@@ -40,9 +40,8 @@ Your password never encrypts data directly: it derives a key that unwraps a sepa
 
 ## Requirements
 
-- macOS 14.0+
-- Xcode 16+
-- Swift 6
+- **macOS 26.0** or later
+- A recent **Xcode** that supports that SDK
 
 ## Building from Source
 
