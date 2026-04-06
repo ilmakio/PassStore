@@ -1,0 +1,713 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		C0E0EC692F7F39ED00456378 /* PassStore.icon in Resources */ = {isa = PBXBuildFile; fileRef = C0E0EC682F7F39ED00456378 /* PassStore.icon */; };
+		F1AAA0032F7D580000456378 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = F1AAA0022F7D580000456378 /* Sparkle */; };
+		F2BBB0032F7D580000456378 /* Sodium in Frameworks */ = {isa = PBXBuildFile; productRef = F2BBB0022F7D580000456378 /* Sodium */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C0E0EB1B2F7D57E300456378 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C0E0EB052F7D57E100456378 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C0E0EB0C2F7D57E100456378;
+			remoteInfo = PassStore;
+		};
+		C0E0EB252F7D57E300456378 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C0E0EB052F7D57E100456378 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C0E0EB0C2F7D57E100456378;
+			remoteInfo = PassStore;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		C0E0EB0D2F7D57E100456378 /* PassStore.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PassStore.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0E0EB1A2F7D57E300456378 /* PassStoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PassStoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0E0EB242F7D57E300456378 /* PassStoreUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PassStoreUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0E0EC682F7F39ED00456378 /* PassStore.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = PassStore.icon; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		C0E0EC6B2F7F39FB00456378 /* Exceptions for "PassStore" folder in "PassStore" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = C0E0EB0C2F7D57E100456378 /* PassStore */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		C0E0EB0F2F7D57E100456378 /* PassStore */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C0E0EC6B2F7F39FB00456378 /* Exceptions for "PassStore" folder in "PassStore" target */,
+			);
+			path = PassStore;
+			sourceTree = "<group>";
+		};
+		C0E0EB1D2F7D57E300456378 /* PassStoreTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = PassStoreTests;
+			sourceTree = "<group>";
+		};
+		C0E0EB272F7D57E300456378 /* PassStoreUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = PassStoreUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C0E0EB0A2F7D57E100456378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1AAA0032F7D580000456378 /* Sparkle in Frameworks */,
+				F2BBB0032F7D580000456378 /* Sodium in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0E0EB172F7D57E300456378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0E0EB212F7D57E300456378 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		C0E0EB042F7D57E100456378 = {
+			isa = PBXGroup;
+			children = (
+				C0E0EC682F7F39ED00456378 /* PassStore.icon */,
+				C0E0EB0F2F7D57E100456378 /* PassStore */,
+				C0E0EB1D2F7D57E300456378 /* PassStoreTests */,
+				C0E0EB272F7D57E300456378 /* PassStoreUITests */,
+				C0E0EB0E2F7D57E100456378 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C0E0EB0E2F7D57E100456378 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C0E0EB0D2F7D57E100456378 /* PassStore.app */,
+				C0E0EB1A2F7D57E300456378 /* PassStoreTests.xctest */,
+				C0E0EB242F7D57E300456378 /* PassStoreUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C0E0EB0C2F7D57E100456378 /* PassStore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C0E0EB2E2F7D57E300456378 /* Build configuration list for PBXNativeTarget "PassStore" */;
+			buildPhases = (
+				C0E0EB092F7D57E100456378 /* Sources */,
+				C0E0EB0A2F7D57E100456378 /* Frameworks */,
+				C0E0EB0B2F7D57E100456378 /* Resources */,
+				F1BBB1012F7D590000456378 /* Resign Sparkle helpers (sandbox doc) */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C0E0EB0F2F7D57E100456378 /* PassStore */,
+			);
+			name = PassStore;
+			packageProductDependencies = (
+				F1AAA0022F7D580000456378 /* Sparkle */,
+				F2BBB0022F7D580000456378 /* Sodium */,
+			);
+			productName = PassStore;
+			productReference = C0E0EB0D2F7D57E100456378 /* PassStore.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C0E0EB192F7D57E300456378 /* PassStoreTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C0E0EB312F7D57E300456378 /* Build configuration list for PBXNativeTarget "PassStoreTests" */;
+			buildPhases = (
+				C0E0EB162F7D57E300456378 /* Sources */,
+				C0E0EB172F7D57E300456378 /* Frameworks */,
+				C0E0EB182F7D57E300456378 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C0E0EB1C2F7D57E300456378 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C0E0EB1D2F7D57E300456378 /* PassStoreTests */,
+			);
+			name = PassStoreTests;
+			packageProductDependencies = (
+			);
+			productName = PassStoreTests;
+			productReference = C0E0EB1A2F7D57E300456378 /* PassStoreTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		C0E0EB232F7D57E300456378 /* PassStoreUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C0E0EB342F7D57E300456378 /* Build configuration list for PBXNativeTarget "PassStoreUITests" */;
+			buildPhases = (
+				C0E0EB202F7D57E300456378 /* Sources */,
+				C0E0EB212F7D57E300456378 /* Frameworks */,
+				C0E0EB222F7D57E300456378 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C0E0EB262F7D57E300456378 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C0E0EB272F7D57E300456378 /* PassStoreUITests */,
+			);
+			name = PassStoreUITests;
+			packageProductDependencies = (
+			);
+			productName = PassStoreUITests;
+			productReference = C0E0EB242F7D57E300456378 /* PassStoreUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C0E0EB052F7D57E100456378 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					C0E0EB0C2F7D57E100456378 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					C0E0EB192F7D57E300456378 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = C0E0EB0C2F7D57E100456378;
+					};
+					C0E0EB232F7D57E300456378 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = C0E0EB0C2F7D57E100456378;
+					};
+				};
+			};
+			buildConfigurationList = C0E0EB082F7D57E100456378 /* Build configuration list for PBXProject "PassStore" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = C0E0EB042F7D57E100456378;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F1AAA0012F7D580000456378 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				F2BBB0012F7D580000456378 /* XCRemoteSwiftPackageReference "swift-sodium" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C0E0EB0E2F7D57E100456378 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C0E0EB0C2F7D57E100456378 /* PassStore */,
+				C0E0EB192F7D57E300456378 /* PassStoreTests */,
+				C0E0EB232F7D57E300456378 /* PassStoreUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C0E0EB0B2F7D57E100456378 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0E0EC692F7F39ED00456378 /* PassStore.icon in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0E0EB182F7D57E300456378 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0E0EB222F7D57E300456378 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		F1BBB1012F7D590000456378 /* Resign Sparkle helpers (sandbox doc) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Resign Sparkle helpers (sandbox doc)";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "cd \"$SRCROOT\" && /bin/bash scripts/xcode/resign-sparkle-after-embed.sh\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C0E0EB092F7D57E100456378 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0E0EB162F7D57E300456378 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0E0EB202F7D57E300456378 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C0E0EB1C2F7D57E300456378 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C0E0EB0C2F7D57E100456378 /* PassStore */;
+			targetProxy = C0E0EB1B2F7D57E300456378 /* PBXContainerItemProxy */;
+		};
+		C0E0EB262F7D57E300456378 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C0E0EB0C2F7D57E100456378 /* PassStore */;
+			targetProxy = C0E0EB252F7D57E300456378 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		C0E0EB2C2F7D57E300456378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C0E0EB2D2F7D57E300456378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		C0E0EB2F2F7D57E300456378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = PassStore;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = PassStore/PassStore.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = "";
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PassStore/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PassStore;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_SUFeedURL = "https://s3.makio.app/storage/passstore/updates/stable/appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "$(PASSSTORE_SPARKLE_PUBLIC_ED_KEY)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.3;
+				OTHER_CODE_SIGN_FLAGS = "";
+				PASSSTORE_SPARKLE_PUBLIC_ED_KEY = "gGKML5DsXo2Z5gPhFm9ma2M0+s/KY3Cw82A6J1tYryY=";
+				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStore;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = PassStore;
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C0E0EB302F7D57E300456378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = PassStore;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = PassStore/PassStore.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = "";
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PassStore/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = PassStore;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_SUFeedURL = "https://s3.makio.app/storage/passstore/updates/stable/appcast.xml";
+				INFOPLIST_KEY_SUPublicEDKey = "$(PASSSTORE_SPARKLE_PUBLIC_ED_KEY)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.3;
+				OTHER_CODE_SIGN_FLAGS = "";
+				PASSSTORE_SPARKLE_PUBLIC_ED_KEY = "gGKML5DsXo2Z5gPhFm9ma2M0+s/KY3Cw82A6J1tYryY=";
+				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStore;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = PassStore;
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C0E0EB322F7D57E300456378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStoreTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PassStore.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PassStore";
+			};
+			name = Debug;
+		};
+		C0E0EB332F7D57E300456378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStoreTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PassStore.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PassStore";
+			};
+			name = Release;
+		};
+		C0E0EB352F7D57E300456378 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStoreUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = PassStore;
+			};
+			name = Debug;
+		};
+		C0E0EB362F7D57E300456378 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStoreUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = PassStore;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C0E0EB082F7D57E100456378 /* Build configuration list for PBXProject "PassStore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0E0EB2C2F7D57E300456378 /* Debug */,
+				C0E0EB2D2F7D57E300456378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C0E0EB2E2F7D57E300456378 /* Build configuration list for PBXNativeTarget "PassStore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0E0EB2F2F7D57E300456378 /* Debug */,
+				C0E0EB302F7D57E300456378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C0E0EB312F7D57E300456378 /* Build configuration list for PBXNativeTarget "PassStoreTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0E0EB322F7D57E300456378 /* Debug */,
+				C0E0EB332F7D57E300456378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C0E0EB342F7D57E300456378 /* Build configuration list for PBXNativeTarget "PassStoreUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0E0EB352F7D57E300456378 /* Debug */,
+				C0E0EB362F7D57E300456378 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F1AAA0012F7D580000456378 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.4;
+			};
+		};
+		F2BBB0012F7D580000456378 /* XCRemoteSwiftPackageReference "swift-sodium" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jedisct1/swift-sodium";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.9.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F1AAA0022F7D580000456378 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1AAA0012F7D580000456378 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+		F2BBB0022F7D580000456378 /* Sodium */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F2BBB0012F7D580000456378 /* XCRemoteSwiftPackageReference "swift-sodium" */;
+			productName = Sodium;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C0E0EB052F7D57E100456378 /* Project object */;
+}

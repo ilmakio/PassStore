@@ -1,0 +1,28 @@
+# Build
+build/
+DerivedData/
+*.xcarchive
+
+# Secrets & signing
+.env
+.env.*
+*.sparkle_private_key
+*.ed25519
+*.provisionprofile
+*.mobileprovision
+private/
+
+# macOS
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+
+# Claude Code
+.claude/
+
+# IDE
+*.swp
+*~
+.vscode/
+.idea/

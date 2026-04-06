@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIconFile</key>
+	<string>PassStore</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>PassStore uses accessibility permission to register a global keyboard shortcut (⌘⌥P) so you can open the command palette while using other apps.</string>
+	<key>SUFeedURL</key>
+	<string>https://s3.makio.app/storage/passstore/updates/stable/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>gGKML5DsXo2Z5gPhFm9ma2M0+s/KY3Cw82A6J1tYryY=</string>
+	<!-- Required for sandboxed apps: run InstallerLauncher inside Installer.xpc (not in-app) so admin auth / launchd jobs work. -->
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>PassStore Encrypted Backup</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.makio.PassStore.pstore</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pstore</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>
