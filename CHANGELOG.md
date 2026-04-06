@@ -2,6 +2,20 @@
 
 All notable changes to PassStore are documented here.
 
+## [1.0.4] - 2026-04-07
+
+Official public release
+
+## [1.0.3] - 2026-04-07
+
+### Fixed
+- Updated automated export/import coverage to match the v3 `.pstore` backup API
+- Resolved a Swift concurrency warning in the global command palette hotkey monitor
+
+### Changed
+- Added an unsigned Xcode verification lane for CLI and CI checks
+- Polished the public GitHub issue template and funding metadata ahead of the open source launch
+
 ## [1.0.2] - 2026-04-06
 
 ### Added

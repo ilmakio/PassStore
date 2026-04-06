@@ -139,12 +139,17 @@ private struct SidebarView: View {
                               case .library(let s) = viewModel.selectedDestination else { return nil }
                         return s.rawValue
                     }()
-                    ReorderableRows(
-                        items: LibrarySection.allCases.map {
-                            SidebarReorderItem(id: $0.rawValue, title: $0.title, systemImage: $0.systemImage)
-                        },
-                        selectedID: libSelectedID,
-                        reorderable: false,
+                        ReorderableRows(
+                            items: LibrarySection.allCases.map {
+                                SidebarReorderItem(
+                                    id: $0.rawValue,
+                                    title: $0.title,
+                                    systemImage: $0.systemImage,
+                                    accessibilityIdentifier: "sidebar-library-\(uiIdentifierSlug($0.title))"
+                                )
+                            },
+                            selectedID: libSelectedID,
+                            reorderable: false,
                         onSelect: { id in
                             guard let id, let section = LibrarySection(rawValue: id) else { return }
                             viewModel.selectDestination(.library(section))
@@ -171,8 +176,13 @@ private struct SidebarView: View {
                         }()
                         ReorderableRows(
                             items: viewModel.workspaces.map {
-                                SidebarReorderItem(id: $0.id.uuidString, title: $0.name,
-                                                   systemImage: $0.icon, tintColor: NSColor(hex: $0.colorHex))
+                                SidebarReorderItem(
+                                    id: $0.id.uuidString,
+                                    title: $0.name,
+                                    systemImage: $0.icon,
+                                    tintColor: NSColor(hex: $0.colorHex),
+                                    accessibilityIdentifier: "sidebar-workspace-\(uiIdentifierSlug($0.name))"
+                                )
                             },
                             selectedID: wsSelectedID,
                             onSelect: { idStr in
@@ -198,7 +208,12 @@ private struct SidebarView: View {
                 )) {
                     ReorderableRows(
                         items: viewModel.orderedTypes.map {
-                            SidebarReorderItem(id: $0.rawValue, title: $0.title, systemImage: $0.systemImage)
+                            SidebarReorderItem(
+                                id: $0.rawValue,
+                                title: $0.title,
+                                systemImage: $0.systemImage,
+                                accessibilityIdentifier: "sidebar-type-\(uiIdentifierSlug($0.title))"
+                            )
                         },
                         selectedID: viewModel.selectedType?.rawValue,
                         allowsDeselection: true,
@@ -227,7 +242,12 @@ private struct SidebarView: View {
                         }()
                         ReorderableRows(
                             items: viewModel.orderedTags.map {
-                                SidebarReorderItem(id: $0, title: "#\($0)", systemImage: "tag")
+                                SidebarReorderItem(
+                                    id: $0,
+                                    title: "#\($0)",
+                                    systemImage: "tag",
+                                    accessibilityIdentifier: "sidebar-tag-\(uiIdentifierSlug($0))"
+                                )
                             },
                             selectedID: tagSelectedID,
                             onSelect: { tag in
@@ -258,7 +278,12 @@ private struct SidebarView: View {
                         }()
                         ReorderableRows(
                             items: viewModel.orderedEnvironments.map {
-                                SidebarReorderItem(id: $0, title: $0, systemImage: "circle.hexagongrid")
+                                SidebarReorderItem(
+                                    id: $0,
+                                    title: $0,
+                                    systemImage: "circle.hexagongrid",
+                                    accessibilityIdentifier: "sidebar-environment-\(uiIdentifierSlug($0))"
+                                )
                             },
                             selectedID: envSelectedID,
                             onSelect: { env in
@@ -439,62 +464,56 @@ private struct ItemRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            if viewModel.isMultiSelecting {
-                Image(systemName: isMultiSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 14))
-                    .foregroundStyle(isMultiSelected ? selectionColor : .secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .center, spacing: 4) {
-                    Text(item.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(isSelected ? selectionColor : .primary)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if item.isFavorite {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.yellow)
-                    }
+        Button(action: handleSelection) {
+            HStack(spacing: 8) {
+                if viewModel.isMultiSelecting {
+                    Image(systemName: isMultiSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(isMultiSelected ? selectionColor : .secondary)
                 }
 
-                HStack(spacing: 6) {
-                    Label(item.type.title, systemImage: item.type.systemImage)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-
-                    if let workspace = item.workspace {
-                        HStack(spacing: 3) {
-                            Image(systemName: workspace.icon)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .center, spacing: 4) {
+                        Text(item.title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(isSelected ? selectionColor : .primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        if item.isFavorite {
+                            Image(systemName: "star.fill")
                                 .font(.system(size: 9))
-                            Text(workspace.name)
-                                .font(.system(size: 10))
+                                .foregroundStyle(.yellow)
                         }
-                        .foregroundStyle(Color(hex: workspace.colorHex))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(Color(hex: workspace.colorHex).opacity(0.12))
-                        )
+                    }
+
+                    HStack(spacing: 6) {
+                        Label(item.type.title, systemImage: item.type.systemImage)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+
+                        if let workspace = item.workspace {
+                            HStack(spacing: 3) {
+                                Image(systemName: workspace.icon)
+                                    .font(.system(size: 9))
+                                Text(workspace.name)
+                                    .font(.system(size: 10))
+                            }
+                            .foregroundStyle(Color(hex: workspace.colorHex))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color(hex: workspace.colorHex).opacity(0.12))
+                            )
+                        }
                     }
                 }
             }
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                viewModel.toggleMultiSelect(item)
-            } else if viewModel.isMultiSelecting {
-                viewModel.toggleMultiSelect(item)
-            } else {
-                viewModel.select(item)
-            }
-        }
+        .buttonStyle(.plain)
         .listRowBackground(
             isSelected
                 ? RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -508,6 +527,16 @@ private struct ItemRow: View {
             } else {
                 singleItemContextMenu
             }
+        }
+    }
+
+    private func handleSelection() {
+        if NSEvent.modifierFlags.contains(.command) {
+            viewModel.toggleMultiSelect(item)
+        } else if viewModel.isMultiSelecting {
+            viewModel.toggleMultiSelect(item)
+        } else {
+            viewModel.select(item)
         }
     }
 

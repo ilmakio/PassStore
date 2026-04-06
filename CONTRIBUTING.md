@@ -35,6 +35,11 @@ Thank you for your interest in contributing to PassStore! Here's how you can hel
 
 - Add unit tests for new logic in `PassStoreTests/`
 - Run existing tests before submitting to ensure nothing is broken
+- For CLI or CI verification without signing, run:
+  ```bash
+  xcodebuild build-for-testing -project PassStore.xcodeproj -scheme PassStore -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=''
+  xcodebuild test-without-building -project PassStore.xcodeproj -scheme PassStore -destination 'platform=macOS' -only-testing:PassStoreTests CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=''
+  ```
 
 ## Release & Distribution
 

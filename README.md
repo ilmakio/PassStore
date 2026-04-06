@@ -1,5 +1,7 @@
 # PassStore
 
+[![CI](https://github.com/ilmakio/PassStore/actions/workflows/ci.yml/badge.svg)](https://github.com/ilmakio/PassStore/actions/workflows/ci.yml)
+
 A local-first secret manager for developers, built natively for macOS.
 
 PassStore keeps your API keys, database credentials, S3 configs, SSH logins, .env values, and other project secrets encrypted locally on your Mac. No cloud sync. No external backend. No analytics.
@@ -56,6 +58,31 @@ Your password never encrypts data directly: it derives a key that unwraps a sepa
 3. Select your development team in **Signing & Capabilities** for each target (PassStore, PassStoreTests, PassStoreUITests)
 
 4. Build and run (Cmd+R)
+
+### Unsigned CLI Verification
+
+For deterministic local verification and GitHub Actions, use the unsigned build-and-unit-test lane:
+
+```bash
+xcodebuild build-for-testing \
+  -project PassStore.xcodeproj \
+  -scheme PassStore \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY=''
+
+xcodebuild test-without-building \
+  -project PassStore.xcodeproj \
+  -scheme PassStore \
+  -destination 'platform=macOS' \
+  -only-testing:PassStoreTests \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY=''
+```
+
+This compiles the full scheme without signing and runs the unit test bundle. Signed direct-download builds and macOS UI test runs still require your own team, provisioning, notarization, and Sparkle configuration.
 
 ### Dependencies
 

@@ -46,25 +46,9 @@ struct TransferTests {
 
     @Test func exportServiceEncryptsPayloadWithoutPlaintextLeak() throws {
         let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
-        let payload = [
-            ExportedItemPayload(
-                id: UUID(),
-                workspaceName: "Backend",
-                title: "Primary Postgres",
-                type: "Database",
-                environment: "Prod",
-                notes: "Sensitive note",
-                tags: ["db"],
-                isFavorite: true,
-                createdAt: .now,
-                updatedAt: .now,
-                fields: [
-                    ExportedFieldPayload(key: "password", label: "Password", value: "super-secret", kind: "secret", isSensitive: true)
-                ]
-            )
-        ]
+        let backup = makeBackupPayload()
 
-        let exported = try service.export(items: payload, password: "export-pass")
+        let exported = try service.exportFullBackup(backup: backup, password: "export-pass")
         let string = String(decoding: exported, as: UTF8.self)
 
         #expect(!string.contains("Primary Postgres"))
@@ -72,31 +56,43 @@ struct TransferTests {
         #expect(!string.contains("Sensitive note"))
     }
 
-    @Test func exportImportRoundTripRestoresPayload() throws {
+    @Test func exportImportRoundTripRestoresFullBackupAndSettings() throws {
         let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
-        let payload = [
-            ExportedItemPayload(
-                id: UUID(),
-                workspaceName: "Backend",
-                title: "Primary Postgres",
-                type: SecretItemType.database.title,
-                environment: EnvironmentKind.prod.title,
-                notes: "Note",
-                tags: ["db"],
-                isFavorite: true,
-                createdAt: .now,
-                updatedAt: .now,
-                fields: [
-                    ExportedFieldPayload(key: "password", label: "Password", value: "super-secret", kind: "secret", isSensitive: true)
-                ]
-            )
-        ]
-        let fileData = try service.export(items: payload, password: "export-pass")
-        let imported = try service.importDecryptedItems(from: fileData, password: "export-pass")
-        #expect(imported.count == 1)
-        #expect(imported[0].title == "Primary Postgres")
-        #expect(imported[0].fields.first?.value == "super-secret")
-        #expect(imported[0].workspaceName == "Backend")
+        let backup = makeBackupPayload(settings: ExportedSettingsPayload(
+            autoLockInterval: 120,
+            clipboardClearInterval: 5,
+            biometricsEnabled: false,
+            globalCommandPaletteHotkeyEnabled: false,
+            sidebarLibraryExpanded: true,
+            sidebarWorkspacesExpanded: false,
+            sidebarTypesExpanded: true,
+            sidebarTagsExpanded: false,
+            sidebarEnvironmentsExpanded: true,
+            sidebarTypesOrder: ["database", "generic"],
+            sidebarTagsOrder: ["backend"],
+            sidebarEnvironmentsOrder: ["Prod", "Staging"]
+        ))
+
+        let fileData = try service.exportFullBackup(backup: backup, password: "export-pass")
+        let imported = try service.importPayload(from: fileData, password: "export-pass")
+
+        guard case let .fullBackup(restored) = imported else {
+            Issue.record("Expected a v3 full backup payload.")
+            return
+        }
+
+        #expect(restored.vault.workspaces.count == 1)
+        #expect(restored.vault.workspaces[0].name == "Backend")
+        #expect(restored.vault.items.count == 1)
+        #expect(restored.vault.items[0].title == "Primary Postgres")
+        #expect(restored.vault.items[0].notes == "Sensitive note")
+        #expect(restored.vault.items[0].fields.first?.plainValue == "super-secret")
+        #expect(restored.settings.autoLockInterval == 120)
+        #expect(restored.settings.clipboardClearInterval == 5)
+        #expect(restored.settings.biometricsEnabled == false)
+        #expect(restored.settings.globalCommandPaletteHotkeyEnabled == false)
+        #expect(restored.settings.sidebarWorkspacesExpanded == false)
+        #expect(restored.settings.sidebarTagsOrder == ["backend"])
     }
 
     @Test func exportImportRoundTripWithUnicodePassword() throws {
@@ -108,47 +104,97 @@ struct TransferTests {
         let unwrapped = try crypto.unwrapVaultKey(wrapped, password: unicodePassword)
         #expect(unwrapped == vaultKey)
 
-        let payload = [
-            ExportedItemPayload(
-                id: UUID(),
-                workspaceName: nil,
-                title: "Unicode",
-                type: SecretItemType.generic.title,
-                environment: EnvironmentKind.dev.title,
-                notes: "ñ",
-                tags: [],
-                isFavorite: false,
-                createdAt: .now,
-                updatedAt: .now,
-                fields: []
-            )
-        ]
-        let fileData = try service.export(items: payload, password: unicodePassword)
-        let imported = try service.importDecryptedItems(from: fileData, password: unicodePassword)
-        #expect(imported.count == 1)
-        #expect(imported[0].title == "Unicode")
+        let backup = makeBackupPayload(
+            title: "Unicode",
+            notes: "ñ",
+            secretValue: "🔐"
+        )
+        let fileData = try service.exportFullBackup(backup: backup, password: unicodePassword)
+        let imported = try service.importPayload(from: fileData, password: unicodePassword)
+
+        guard case let .fullBackup(restored) = imported else {
+            Issue.record("Expected a v3 full backup payload.")
+            return
+        }
+
+        #expect(restored.vault.items.count == 1)
+        #expect(restored.vault.items[0].title == "Unicode")
+        #expect(restored.vault.items[0].notes == "ñ")
+        #expect(restored.vault.items[0].fields.first?.plainValue == "🔐")
     }
 
     @Test func exportImportFailsWithWrongPassword() throws {
         let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
-        let payload = [
-            ExportedItemPayload(
-                id: UUID(),
-                workspaceName: nil,
-                title: "Item",
-                type: SecretItemType.generic.title,
-                environment: EnvironmentKind.dev.title,
-                notes: "",
-                tags: [],
-                isFavorite: false,
-                createdAt: .now,
-                updatedAt: .now,
-                fields: []
-            )
-        ]
-        let fileData = try service.export(items: payload, password: "good")
+        let fileData = try service.exportFullBackup(backup: makeBackupPayload(title: "Item"), password: "good")
         #expect(throws: TransferError.wrongExportPassword) {
-            try service.importDecryptedItems(from: fileData, password: "wrong")
+            try service.importPayload(from: fileData, password: "wrong")
         }
     }
+}
+
+private func makeBackupPayload(
+    title: String = "Primary Postgres",
+    notes: String = "Sensitive note",
+    secretValue: String = "super-secret",
+    settings: ExportedSettingsPayload = ExportedSettingsPayload(
+        autoLockInterval: 300,
+        clipboardClearInterval: 10,
+        biometricsEnabled: true,
+        globalCommandPaletteHotkeyEnabled: true,
+        sidebarLibraryExpanded: true,
+        sidebarWorkspacesExpanded: true,
+        sidebarTypesExpanded: true,
+        sidebarTagsExpanded: true,
+        sidebarEnvironmentsExpanded: true,
+        sidebarTypesOrder: [],
+        sidebarTagsOrder: [],
+        sidebarEnvironmentsOrder: []
+    )
+) -> ExportedBackupPayload {
+    let workspaceID = UUID()
+    let workspace = WorkspaceSnapshot(
+        id: workspaceID,
+        name: "Backend",
+        icon: "shippingbox",
+        colorHex: "#4A7AFF",
+        notes: "Primary backend services",
+        isArchived: false,
+        createdAt: .now,
+        updatedAt: .now,
+        sortOrder: 0
+    )
+    let item = SecretItemSnapshot(
+        id: UUID(),
+        title: title,
+        typeRawValue: SecretItemType.database.rawValue,
+        environmentRawValue: EnvironmentKind.prod.rawValue,
+        customEnvironmentName: nil,
+        notes: notes,
+        tagsRawValue: "db,prod",
+        isFavorite: true,
+        isArchived: false,
+        createdAt: .now,
+        updatedAt: .now,
+        lastAccessedAt: nil,
+        workspaceID: workspaceID,
+        templateID: nil,
+        fields: [
+            FieldValueSnapshot(
+                id: UUID(),
+                fieldKey: "password",
+                labelSnapshot: "Password",
+                kindRawValue: FieldKind.secret.rawValue,
+                isSensitive: true,
+                isCopyable: true,
+                isMasked: true,
+                sortOrder: 0,
+                plainValue: secretValue
+            )
+        ]
+    )
+
+    return ExportedBackupPayload(
+        vault: VaultSnapshot(workspaces: [workspace], items: [item], customTemplates: []),
+        settings: settings
+    )
 }

@@ -33,8 +33,8 @@ final class GlobalCommandPaletteHotkey {
             forName: .passStoreGlobalHotkeySettingsChanged,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
+        ) { _ in
+            Task { @MainActor [weak self] in
                 self?.reinstallMonitors()
             }
         }

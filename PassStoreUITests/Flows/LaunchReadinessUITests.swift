@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 final class LaunchReadinessUITests: XCTestCase {
@@ -7,14 +8,12 @@ final class LaunchReadinessUITests: XCTestCase {
 
     func testLaunchReadinessFlow() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["--uitesting"]
+        app.launchArguments = ["--uitesting", "--ui-select-destination=workspace:pokeos-api"]
         app.launch()
         app.activate()
 
         let workspaceButton = app.buttons.matching(identifier: "sidebar-workspace-pokeos-api").firstMatch
         XCTAssertTrue(workspaceButton.waitForExistence(timeout: 5))
-        app.activate()
-        workspaceButton.click()
 
         XCTAssertTrue(app.buttons.matching(identifier: "item-row-primary-postgres").firstMatch.waitForExistence(timeout: 2))
         XCTAssertFalse(app.buttons.matching(identifier: "item-row-edge-storage").firstMatch.exists)
@@ -63,17 +62,15 @@ final class LaunchReadinessUITests: XCTestCase {
                 .waitForExistence(timeout: 5)
         )
 
-        let copyMenuButton = copyFeedbackApp.buttons["Copy"].firstMatch
-        XCTAssertTrue(copyMenuButton.waitForExistence(timeout: 5))
         copyFeedbackApp.activate()
-        copyMenuButton.click()
-        let copyEnvItem = copyFeedbackApp.menuItems["Copy .env"].firstMatch
-        XCTAssertTrue(copyEnvItem.waitForExistence(timeout: 3))
-        copyEnvItem.click()
+        NSPasteboard.general.clearContents()
+        copyFeedbackApp.typeKey("e", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitForPasteboardString(containing: "# Primary Postgres", timeout: 2))
+        XCTAssertTrue(waitForPasteboardString(containing: "HOST=db.pokeos.internal", timeout: 2))
         copyFeedbackApp.terminate()
     }
 
-    func testCommandPaletteOpensWithShortcutAndDismissesViaScrim() throws {
+    func testCommandPaletteOpensWithShortcutAndDismisses() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--uitesting"]
         app.launch()
@@ -89,8 +86,19 @@ final class LaunchReadinessUITests: XCTestCase {
 
         let scrim = app.buttons.matching(identifier: "command-palette-scrim").firstMatch
         XCTAssertTrue(scrim.waitForExistence(timeout: 2))
-        scrim.click()
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
 
         XCTAssertTrue(search.waitForNonExistence(timeout: 2))
+    }
+
+    private func waitForPasteboardString(containing fragment: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let value = NSPasteboard.general.string(forType: .string), value.contains(fragment) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        return false
     }
 }

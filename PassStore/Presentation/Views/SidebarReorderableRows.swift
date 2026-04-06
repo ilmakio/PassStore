@@ -8,12 +8,20 @@ struct SidebarReorderItem {
     let title: String
     let systemImage: String
     let tintColor: NSColor
+    let accessibilityIdentifier: String?
 
-    init(id: String, title: String, systemImage: String, tintColor: NSColor = .controlAccentColor) {
+    init(
+        id: String,
+        title: String,
+        systemImage: String,
+        tintColor: NSColor = .controlAccentColor,
+        accessibilityIdentifier: String? = nil
+    ) {
         self.id = id
         self.title = title
         self.systemImage = systemImage
         self.tintColor = tintColor
+        self.accessibilityIdentifier = accessibilityIdentifier
     }
 }
 
@@ -150,7 +158,19 @@ struct ReorderableRows: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let item = items[row]
             let cell = SidebarCell()
-            cell.configure(with: item, isSelected: item.id == selectedID)
+            cell.configure(with: item, isSelected: item.id == selectedID) { [weak self, weak tableView] in
+                guard let self, let tableView else { return }
+                if self.allowsDeselection, tableView.selectedRow == row {
+                    tableView.deselectAll(nil)
+                    self.onSelect(nil)
+                    return
+                }
+                if tableView.selectedRow != row {
+                    tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                } else {
+                    self.onSelect(item.id)
+                }
+            }
             return cell
         }
 
@@ -187,6 +207,7 @@ private final class SidebarCell: NSView {
     private let bg = NSView()
     private let imageView = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private var onPress: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -223,7 +244,8 @@ private final class SidebarCell: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(with item: SidebarReorderItem, isSelected: Bool) {
+    func configure(with item: SidebarReorderItem, isSelected: Bool, onPress: @escaping () -> Void) {
+        self.onPress = onPress
         label.stringValue = item.title
         label.textColor = isSelected ? item.tintColor : .secondaryLabelColor
         label.font = .systemFont(ofSize: 11)
@@ -233,6 +255,15 @@ private final class SidebarCell: NSView {
         bg.layer?.backgroundColor = isSelected
             ? item.tintColor.withAlphaComponent(0.15).cgColor
             : .clear
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(item.title)
+        setAccessibilityIdentifier(item.accessibilityIdentifier)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onPress?()
+        return true
     }
 }
 

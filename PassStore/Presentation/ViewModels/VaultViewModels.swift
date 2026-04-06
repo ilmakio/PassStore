@@ -1004,6 +1004,11 @@ final class VaultViewModel {
             let token = String(destinationArgument.dropFirst("--ui-select-destination=".count))
             if token == "all-items" {
                 selectedDestination = .library(.allItems)
+            } else if token.hasPrefix("workspace:") {
+                let workspaceToken = String(token.dropFirst("workspace:".count))
+                if let workspace = workspaces.first(where: { Self.launchToken(for: $0.name) == workspaceToken }) {
+                    selectedDestination = .workspace(workspace.id)
+                }
             }
         }
 
