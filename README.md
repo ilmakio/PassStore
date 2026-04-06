@@ -4,6 +4,8 @@ A local-first secret manager for developers, built natively for macOS.
 
 PassStore keeps your API keys, database credentials, S3 configs, SSH logins, .env values, and other project secrets encrypted locally on your Mac. No cloud sync. No external backend. No analytics.
 
+[![Download app for macOS](doc/images/download-macos.png)](https://passstore.makio.app)
+
 ![PassStore Screenshot](doc/images/thumbnail.jpeg)
 
 ## Features
