@@ -20,6 +20,26 @@ struct AppView: View {
             }
             .navigationSplitViewStyle(.balanced)
             .disabled(isVaultLocked || showOnboarding)
+            // Attached here rather than on the enclosing ZStack: that already owns a
+            // confirmationDialog for workspace deletion and two on one view conflict.
+            .confirmationDialog(
+                viewModel.itemDeletionTitle,
+                isPresented: Binding(
+                    get: { !viewModel.itemsPendingDeletion.isEmpty },
+                    set: { if !$0 { viewModel.cancelItemDeletion() } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button(viewModel.itemDeletionConfirmLabel, role: .destructive) {
+                    viewModel.confirmItemDeletion()
+                }
+                .accessibilityIdentifier("confirm-delete-items")
+                Button("Cancel", role: .cancel) {
+                    viewModel.cancelItemDeletion()
+                }
+            } message: {
+                Text(viewModel.itemDeletionMessage)
+            }
 
             if showOnboarding {
                 OnboardingView(
@@ -77,6 +97,10 @@ struct AppView: View {
                 ImportEncryptedExportSheet(viewModel: viewModel)
             case .export:
                 ExportSheet(onExport: viewModel.exportSelectedItems)
+            case .passwordGenerator:
+                PasswordGeneratorSheet(viewModel: viewModel)
+            case .vaultHealth:
+                VaultHealthSheet(viewModel: viewModel)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
@@ -105,6 +129,23 @@ struct AppView: View {
         } message: {
             Text(viewModel.alertMessage ?? "")
         }
+        .confirmationDialog(
+            viewModel.workspacePendingDeletion.map { "Delete “\($0.name)”?" } ?? "Delete workspace?",
+            isPresented: Binding(
+                get: { viewModel.workspacePendingDeletion != nil },
+                set: { if !$0 { viewModel.workspacePendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Workspace", role: .destructive) {
+                viewModel.confirmWorkspaceDeletion()
+            }
+            Button("Cancel", role: .cancel) {
+                viewModel.workspacePendingDeletion = nil
+            }
+        } message: {
+            Text(workspaceDeletionMessage)
+        }
         .onAppear {
             if viewModel.container.sessionManager.lockState == .setupRequired {
                 showOnboarding = true
@@ -117,6 +158,16 @@ struct AppView: View {
 
     private var isVaultLocked: Bool {
         viewModel.container.sessionManager.lockState != .unlocked
+    }
+
+    private var workspaceDeletionMessage: String {
+        guard let workspace = viewModel.workspacePendingDeletion else { return "" }
+        let count = viewModel.itemCount(inWorkspace: workspace.id)
+        guard count > 0 else {
+            return "This workspace is empty. Deleting it cannot be undone."
+        }
+        let noun = count == 1 ? "item" : "items"
+        return "\(count) \(noun) will stay in your vault but lose this workspace. Deleting the workspace cannot be undone."
     }
 }
 
@@ -140,12 +191,14 @@ private struct SidebarView: View {
                         return s.rawValue
                     }()
                         ReorderableRows(
-                            items: LibrarySection.allCases.map {
-                                SidebarReorderItem(
-                                    id: $0.rawValue,
-                                    title: $0.title,
-                                    systemImage: $0.systemImage,
-                                    accessibilityIdentifier: "sidebar-library-\(uiIdentifierSlug($0.title))"
+                            items: LibrarySection.allCases.map { section in
+                                let count = viewModel.itemCount(in: section)
+                                return SidebarReorderItem(
+                                    id: section.rawValue,
+                                    title: section.title,
+                                    systemImage: section.systemImage,
+                                    badge: count > 0 ? "\(count)" : nil,
+                                    accessibilityIdentifier: "sidebar-library-\(uiIdentifierSlug(section.title))"
                                 )
                             },
                             selectedID: libSelectedID,
@@ -175,13 +228,15 @@ private struct SidebarView: View {
                             return nil
                         }()
                         ReorderableRows(
-                            items: viewModel.workspaces.map {
-                                SidebarReorderItem(
-                                    id: $0.id.uuidString,
-                                    title: $0.name,
-                                    systemImage: $0.icon,
-                                    tintColor: NSColor(hex: $0.colorHex),
-                                    accessibilityIdentifier: "sidebar-workspace-\(uiIdentifierSlug($0.name))"
+                            items: viewModel.workspaces.map { workspace in
+                                let count = viewModel.itemCount(inWorkspace: workspace.id)
+                                return SidebarReorderItem(
+                                    id: workspace.id.uuidString,
+                                    title: workspace.name,
+                                    systemImage: workspace.icon,
+                                    tintColor: NSColor(hex: workspace.colorHex),
+                                    badge: count > 0 ? "\(count)" : nil,
+                                    accessibilityIdentifier: "sidebar-workspace-\(uiIdentifierSlug(workspace.name))"
                                 )
                             },
                             selectedID: wsSelectedID,
@@ -192,6 +247,22 @@ private struct SidebarView: View {
                             },
                             onReorder: { ids in
                                 viewModel.reorderWorkspaces(newIDs: ids.compactMap(UUID.init(uuidString:)))
+                            },
+                            contextActions: { idStr in
+                                guard let id = UUID(uuidString: idStr) else { return [] }
+                                return [
+                                    SidebarRowAction(title: "Edit Workspace…") {
+                                        viewModel.activeSheet = .editWorkspace(id)
+                                    },
+                                    SidebarRowAction(title: "New Secret Item Here…") {
+                                        viewModel.selectDestination(.workspace(id))
+                                        viewModel.setSelectedType(nil)
+                                        viewModel.activeSheet = .newItemFlow
+                                    },
+                                    SidebarRowAction(title: "Delete Workspace…", isDestructive: true) {
+                                        viewModel.requestWorkspaceDeletion(id: id)
+                                    }
+                                ]
                             }
                         )
                         .frame(height: CGFloat(viewModel.workspaces.count) * ReorderableRows.rowHeight + 40)
@@ -347,6 +418,7 @@ private struct SidebarView: View {
 
 private struct ItemListView: View {
     @Bindable var viewModel: VaultViewModel
+    @FocusState private var isSearchFocused: Bool
 
     private var isVaultLocked: Bool {
         viewModel.container.sessionManager.lockState != .unlocked
@@ -360,12 +432,8 @@ private struct ItemListView: View {
                 Divider()
 
                 if viewModel.filteredItems.isEmpty {
-                    ContentUnavailableView(
-                        "No Items",
-                        systemImage: "lock.slash",
-                        description: Text("Adjust the search or filter, or create a new item.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    emptyListPlaceholder
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List(viewModel.filteredItems, id: \.id) { item in
                         ItemRow(viewModel: viewModel, item: item)
@@ -382,7 +450,11 @@ private struct ItemListView: View {
                 viewModel.clearMultiSelection()
                 return .handled
             }
+            .onChange(of: viewModel.searchFocusRequests) { _, _ in
+                isSearchFocused = true
+            }
             .navigationTitle(isVaultLocked ? "" : viewModel.destinationTitle)
+            .navigationSubtitle(isVaultLocked ? "" : viewModel.destinationSubtitle)
             .toolbar {
                 if !isVaultLocked {
                     ToolbarItem(placement: .automatic) {
@@ -402,6 +474,47 @@ private struct ItemListView: View {
                         .tint(.secondary)
                     }
                 }
+            }
+        }
+    }
+
+    /// A brand-new vault has nothing to "adjust", so the empty state has to say something different
+    /// from the one you get after filtering everything out.
+    @ViewBuilder
+    private var emptyListPlaceholder: some View {
+        if viewModel.items.isEmpty {
+            ContentUnavailableView {
+                Label("Your Vault Is Empty", systemImage: "lock.open")
+            } description: {
+                Text("Add your first API key, database credential, or .env file to get started.")
+            } actions: {
+                Button("New Secret Item…") {
+                    viewModel.activeSheet = .newItemFlow
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("empty-vault-new-item")
+            }
+        } else if viewModel.hasActiveFilters {
+            ContentUnavailableView {
+                Label("No Matches", systemImage: "magnifyingglass")
+            } description: {
+                Text("No items match the current search and filters.")
+            } actions: {
+                Button("Clear Filters") {
+                    viewModel.clearFilters()
+                }
+                .accessibilityIdentifier("empty-list-clear-filters")
+            }
+        } else {
+            ContentUnavailableView {
+                Label("Nothing Here Yet", systemImage: "tray")
+            } description: {
+                Text(viewModel.emptyDestinationHint)
+            } actions: {
+                Button("New Secret Item…") {
+                    viewModel.activeSheet = .newItemFlow
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
     }
@@ -427,6 +540,8 @@ private struct ItemListView: View {
             TextField("Search", text: $viewModel.searchText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
+                .focused($isSearchFocused)
+                .accessibilityIdentifier("item-list-search")
             if !viewModel.searchText.isEmpty {
                 Button {
                     viewModel.searchText = ""
@@ -574,8 +689,8 @@ private struct ItemRow: View {
             item.isArchived ? viewModel.restore(item) : viewModel.archive(item)
         }
         Divider()
-        Button("Delete", systemImage: "trash", role: .destructive) {
-            viewModel.delete(item)
+        Button("Delete…", systemImage: "trash", role: .destructive) {
+            viewModel.requestDeletion(of: item)
         }
     }
 
@@ -603,8 +718,8 @@ private struct ItemRow: View {
             viewModel.bulkArchive()
         }
         Divider()
-        Button("Delete \(count) Items", systemImage: "trash", role: .destructive) {
-            viewModel.bulkDelete()
+        Button("Delete \(count) Items…", systemImage: "trash", role: .destructive) {
+            viewModel.requestDeletionOfMultiSelection()
         }
     }
 }
@@ -614,8 +729,12 @@ private struct ItemRow: View {
 private struct MultiSelectionBar: View {
     @Bindable var viewModel: VaultViewModel
 
+    /// Compares against the items actually on screen — `multiSelectedIDs` can still hold ids that
+    /// dropped out of `filteredItems` after a search or filter change.
     private var allSelected: Bool {
-        viewModel.multiSelectedIDs.count == viewModel.filteredItems.count
+        let visible = viewModel.filteredItems
+        guard !visible.isEmpty else { return false }
+        return visible.allSatisfy { viewModel.multiSelectedIDs.contains($0.id) }
     }
 
     var body: some View {
@@ -661,7 +780,6 @@ private struct MultiSelectionBar: View {
 private struct ItemDetailView: View {
     @Bindable var viewModel: VaultViewModel
     @State private var copiedFieldID: UUID?
-    @State private var showDeleteConfirmation = false
 
     private var isVaultLocked: Bool {
         viewModel.container.sessionManager.lockState != .unlocked
@@ -701,6 +819,10 @@ private struct ItemDetailView: View {
                                 GroupedSheetSection(title: "Fields") {
                                     fieldsSectionContent
                                 }
+                            }
+
+                            GroupedSheetSection(title: "Details") {
+                                metadataRows(for: item)
                             }
 
                             if let notes = viewModel.selectedNotes {
@@ -783,8 +905,8 @@ private struct ItemDetailView: View {
                                 }
                             }
                             Divider()
-                            Button("Delete", systemImage: "trash", role: .destructive) {
-                                showDeleteConfirmation = true
+                            Button("Delete…", systemImage: "trash", role: .destructive) {
+                                viewModel.requestDeletionOfSelectedItem()
                             }
                         } label: {
                             Label("More", systemImage: "ellipsis.circle")
@@ -792,14 +914,6 @@ private struct ItemDetailView: View {
                         .accessibilityIdentifier("toolbar-detail-more")
                     }
                 }
-            }
-            .alert("Delete item?", isPresented: $showDeleteConfirmation) {
-                Button("Delete", role: .destructive) {
-                    viewModel.deleteSelectedItem()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This will permanently delete the item and cannot be undone.")
             }
             .onChange(of: viewModel.selectedItemID) { _, _ in
                 copiedFieldID = nil
@@ -885,6 +999,59 @@ private struct ItemDetailView: View {
             )
     }
 
+    // MARK: Metadata
+
+    /// createdAt / updatedAt / lastAccessedAt were tracked from the start but never shown.
+    @ViewBuilder
+    private func metadataRows(for item: SecretItemEntity) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            metadataRow("Created", value: Self.absoluteFormatter.string(from: item.createdAt))
+            metadataRow("Last modified", value: Self.relative(item.updatedAt))
+            metadataRow(
+                "Last used",
+                value: item.lastAccessedAt.map(Self.relative) ?? "Never"
+            )
+            if item.isArchived {
+                metadataRow("Status", value: "Archived")
+            }
+        }
+    }
+
+    private func metadataRow(_ label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 96, alignment: .leading)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
+    }
+
+    private static let absoluteFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
+
+    private static func relative(_ date: Date) -> String {
+        // Within a minute "in 0 seconds" reads oddly; say it plainly.
+        guard Date().timeIntervalSince(date) >= 60 else { return "Just now" }
+        return relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
     // MARK: Fields
 
     private var fieldsSectionContent: some View {
@@ -897,7 +1064,8 @@ private struct ItemDetailView: View {
                     onCopy: {
                         viewModel.copyField(field)
                         flashCopiedField(field.id)
-                    }
+                    },
+                    onOpenURL: { viewModel.openFieldURL(field) }
                 )
 
                 if field.id != viewModel.visibleSelectedFields.last?.id {
@@ -925,8 +1093,13 @@ private struct FieldRow: View {
     let canRevealSecrets: Bool
     let isCopied: Bool
     let onCopy: () -> Void
+    let onOpenURL: () -> Void
 
     @State private var isHoveringSecret = false
+
+    private var isOpenableURL: Bool {
+        field.kind == .url && !field.isSensitive && FieldURLSupport.url(from: field.value) != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -958,6 +1131,15 @@ private struct FieldRow: View {
                     }
                 }
                 .help(helpText)
+            }
+
+            if isOpenableURL {
+                Button(action: onOpenURL) {
+                    Label("Open in browser", systemImage: "arrow.up.right.square")
+                        .font(.caption)
+                }
+                .buttonStyle(.link)
+                .accessibilityIdentifier("detail-field-open-\(field.key)")
             }
         }
         .accessibilityIdentifier("detail-field-\(field.key)")
@@ -1205,26 +1387,6 @@ private struct LockedVaultView: View {
                 .resizable()
                 .scaledToFit()
         }
-    }
-}
-
-// MARK: - Shared Pills
-
-private struct VaultPillValue: Hashable {
-    let title: String
-    let systemImage: String
-    var accentHex: String?
-    var isEmphasized: Bool = false
-
-    init(title: String, systemImage: String, accentHex: String? = nil, isEmphasized: Bool = false) {
-        self.title = title
-        self.systemImage = systemImage
-        self.accentHex = accentHex
-        self.isEmphasized = isEmphasized
-    }
-
-    static func workspace(_ workspace: WorkspaceEntity) -> VaultPillValue {
-        .init(title: workspace.name, systemImage: workspace.icon, accentHex: workspace.colorHex, isEmphasized: true)
     }
 }
 

@@ -53,12 +53,15 @@ private struct MenuBarExtraOpenWindowBridge: View {
     var viewModel: MenuBarViewModel
 
     var body: some View {
-        MenuBarPanelView(viewModel: viewModel)
-            .onAppear {
-                GlobalCommandPaletteHotkey.shared.setOpenMainWindowAction {
-                    openWindow(id: "main")
-                }
+        MenuBarPanelView(
+            viewModel: viewModel,
+            onOpenMainWindow: { openWindow(id: "main") }
+        )
+        .onAppear {
+            GlobalCommandPaletteHotkey.shared.setOpenMainWindowAction {
+                openWindow(id: "main")
             }
+        }
     }
 }
 

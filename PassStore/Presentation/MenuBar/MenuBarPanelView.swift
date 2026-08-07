@@ -3,6 +3,9 @@ import SwiftUI
 
 struct MenuBarPanelView: View {
     @Bindable var viewModel: MenuBarViewModel
+    /// Supplied by the scene that owns `openWindow`; `NSApp.activate` alone cannot
+    /// bring back the main window once the user has closed it.
+    let onOpenMainWindow: () -> Void
 
     var body: some View {
         Group {
@@ -24,6 +27,7 @@ struct MenuBarPanelView: View {
             Divider()
             Button {
                 NSApp.activate(ignoringOtherApps: true)
+                onOpenMainWindow()
             } label: {
                 Label("Open Main Window", systemImage: "macwindow")
             }

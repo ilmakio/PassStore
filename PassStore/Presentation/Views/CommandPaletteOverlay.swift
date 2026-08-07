@@ -267,6 +267,22 @@ extension VaultViewModel {
                 perform: wrap { self.copyConnectionString() }
             ),
             .init(
+                id: "cmd.generatePassword",
+                title: "Generate Password…",
+                subtitle: nil,
+                keywords: ["generate", "password", "random", "strong", "generator"],
+                isEnabled: true,
+                perform: wrap { self.activeSheet = .passwordGenerator }
+            ),
+            .init(
+                id: "cmd.vaultHealth",
+                title: "Check Vault Health…",
+                subtitle: "Find reused, weak and stale secrets",
+                keywords: ["health", "audit", "security", "reused", "weak", "stale", "duplicate"],
+                isEnabled: container.sessionManager.lockState == .unlocked,
+                perform: wrap { self.activeSheet = .vaultHealth }
+            ),
+            .init(
                 id: "cmd.settings",
                 title: "Settings…",
                 subtitle: nil,

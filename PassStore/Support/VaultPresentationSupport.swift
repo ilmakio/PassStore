@@ -1,12 +1,205 @@
-import AppKit
 import Foundation
 import SwiftUI
 
-enum PasswordGenerator {
-    private static let characters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*")
+struct PasswordGeneratorOptions: Equatable {
+    var length: Int = 24
+    var includeLowercase = true
+    var includeUppercase = true
+    var includeDigits = true
+    var includeSymbols = true
+    /// Drops characters that are easy to misread when a secret has to be typed or dictated.
+    var excludeAmbiguous = false
 
+    /// At least one class has to stay on, otherwise there is nothing to draw from.
+    var hasUsableCharacterSet: Bool {
+        includeLowercase || includeUppercase || includeDigits || includeSymbols
+    }
+}
+
+enum PasswordGenerator {
+    static let minimumLength = 8
+    static let maximumLength = 128
+
+    private static let lowercase = Array("abcdefghijklmnopqrstuvwxyz")
+    private static let uppercase = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    private static let digits = Array("0123456789")
+    private static let symbols = Array("!@#$%^&*()-_=+[]{};:,.?/")
+    private static let ambiguous: Set<Character> = ["0", "O", "o", "1", "l", "I", "|", "`", "'", "\"", "5", "S", "2", "Z", "8", "B"]
+
+    /// Kept for callers that only care about length; uses the default character classes.
     static func generate(length: Int = 24) -> String {
-        String((0..<max(length, 1)).compactMap { _ in characters.randomElement() })
+        generate(options: PasswordGeneratorOptions(length: length))
+    }
+
+    /// Draws from every enabled class at least once, then fills the remainder and shuffles, so a
+    /// generated secret always satisfies "must contain a digit/symbol" style policies.
+    /// `randomElement()` is backed by `SystemRandomNumberGenerator`, which is a CSPRNG on Apple platforms.
+    static func generate(options: PasswordGeneratorOptions) -> String {
+        let pools = enabledPools(for: options)
+        guard let combined = pools.flatMap({ $0 }).nilIfEmpty else { return "" }
+
+        let length = max(options.length, 1)
+        var characters: [Character] = []
+        characters.reserveCapacity(length)
+
+        for pool in pools.prefix(length) {
+            if let pick = pool.randomElement() { characters.append(pick) }
+        }
+        while characters.count < length {
+            if let pick = combined.randomElement() { characters.append(pick) }
+        }
+        characters.shuffle()
+        return String(characters.prefix(length))
+    }
+
+    private static func enabledPools(for options: PasswordGeneratorOptions) -> [[Character]] {
+        var pools: [[Character]] = []
+        if options.includeLowercase { pools.append(lowercase) }
+        if options.includeUppercase { pools.append(uppercase) }
+        if options.includeDigits { pools.append(digits) }
+        if options.includeSymbols { pools.append(symbols) }
+        if pools.isEmpty { pools = [lowercase] }
+        guard options.excludeAmbiguous else { return pools }
+        // Filtering can empty a pool (digits are mostly ambiguous), so drop the empties.
+        return pools.map { $0.filter { !ambiguous.contains($0) } }.filter { !$0.isEmpty }
+    }
+}
+
+private extension Array where Element == Character {
+    var nilIfEmpty: [Character]? { isEmpty ? nil : self }
+}
+
+// MARK: - Field URLs
+
+enum FieldURLSupport {
+    /// Builds an openable URL from a stored field value.
+    ///
+    /// Only `http`/`https` are accepted on purpose: vault contents can come from an imported
+    /// backup, and handing an arbitrary scheme (`file:`, `x-apple-…`, a custom app scheme) to
+    /// `NSWorkspace` would let a crafted file trigger actions just because the user clicked a link.
+    static func url(from rawValue: String) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: \.isNewline) else { return nil }
+
+        let candidate: String
+        if trimmed.contains("://") {
+            candidate = trimmed
+        } else {
+            // Bare "example.com/path" is the common case in a URL field.
+            guard !trimmed.hasPrefix("//"), trimmed.contains(".") else { return nil }
+            candidate = "https://\(trimmed)"
+        }
+
+        guard let url = URL(string: candidate),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return url
+    }
+}
+
+// MARK: - Password strength
+
+enum PasswordStrength: Equatable, CaseIterable {
+    case empty
+    case tooShort
+    case weak
+    case fair
+    case strong
+    case veryStrong
+
+    var label: String {
+        switch self {
+        case .empty: "At least 8 characters"
+        case .tooShort: "Too short"
+        case .weak: "Weak"
+        case .fair: "Fair"
+        case .strong: "Strong"
+        case .veryStrong: "Very strong"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .empty: .clear
+        case .tooShort: .red
+        case .weak: .orange
+        case .fair: .yellow
+        case .strong: .green
+        case .veryStrong: .green
+        }
+    }
+
+    var fill: CGFloat {
+        switch self {
+        case .empty: 0
+        case .tooShort: 0.1
+        case .weak: 0.25
+        case .fair: 0.5
+        case .strong: 0.75
+        case .veryStrong: 1.0
+        }
+    }
+
+    /// True for secrets weak enough to surface in the vault health audit.
+    var needsAttention: Bool {
+        switch self {
+        case .empty, .tooShort, .weak: true
+        case .fair, .strong, .veryStrong: false
+        }
+    }
+
+    static func evaluate(_ password: String) -> PasswordStrength {
+        guard !password.isEmpty else { return .empty }
+        guard password.count >= 8 else { return .tooShort }
+
+        let hasUpper = password.contains(where: \.isUppercase)
+        let hasLower = password.contains(where: \.isLowercase)
+        let hasDigit = password.contains(where: \.isNumber)
+        let hasSymbol = password.contains(where: { !$0.isLetter && !$0.isNumber })
+        let classes = [hasUpper, hasLower, hasDigit, hasSymbol].filter(\.self).count
+
+        if password.count >= 20, classes >= 4 { return .veryStrong }
+        if password.count >= 16, classes >= 3 { return .strong }
+        if password.count >= 12 || classes >= 3 { return .fair }
+        return .weak
+    }
+}
+
+struct PasswordStrengthBar: View {
+    let password: String
+
+    private var strength: PasswordStrength {
+        PasswordStrength.evaluate(password)
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(VaultChrome.mutedFill)
+                        .frame(height: 4)
+
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(strength.color)
+                        .frame(width: geometry.size.width * strength.fill, height: 4)
+                        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: strength)
+                }
+            }
+            .frame(height: 4)
+
+            HStack {
+                Text(strength.label)
+                    .font(.caption)
+                    .foregroundStyle(password.isEmpty ? .tertiary : .secondary)
+                Spacer()
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Password strength: \(strength.label)")
     }
 }
 
@@ -115,10 +308,6 @@ enum WorkspaceStylePresets {
         .init(name: "Slate", hex: "#5F6B7A")
     ]
 
-    static func icon(for systemImage: String) -> WorkspaceIconPreset? {
-        icons.first(where: { $0.systemImage == systemImage })
-    }
-
     static func color(for hex: String) -> WorkspaceColorPreset? {
         colors.first(where: { $0.hex.caseInsensitiveCompare(hex) == .orderedSame })
     }
@@ -153,211 +342,5 @@ extension Color {
 }
 
 enum VaultChrome {
-    static let pageBackground = Color(nsColor: .windowBackgroundColor)
-    static let sectionBackground = Color(nsColor: .underPageBackgroundColor)
-    static let surfaceBackground = Color(nsColor: .controlBackgroundColor)
-    static let surfaceRaised = Color(nsColor: .textBackgroundColor)
-    static let detailBackground = Color(nsColor: .windowBackgroundColor)
-    static let detailSectionBackground = Color(nsColor: .controlBackgroundColor)
-    static let detailCardBackground = Color(nsColor: .textBackgroundColor)
-    static let detailInsetBackground = Color(nsColor: .underPageBackgroundColor)
-    static let overlayBackground = Color.black.opacity(0.4)
     static let mutedFill = Color.primary.opacity(0.06)
-}
-
-struct VaultPanelModifier: ViewModifier {
-    enum Prominence {
-        case `default`
-        case section
-        case accented
-    }
-
-    let prominence: Prominence
-
-    func body(content: Content) -> some View {
-        content
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(backgroundColor)
-            )
-    }
-
-    private var backgroundColor: Color {
-        switch prominence {
-        case .default:
-            VaultChrome.surfaceBackground
-        case .section:
-            VaultChrome.sectionBackground
-        case .accented:
-            Color.accentColor.opacity(0.14)
-        }
-    }
-}
-
-struct VaultInfoChipModifier: ViewModifier {
-    var accentHex: String? = nil
-    var isEmphasized = false
-
-    func body(content: Content) -> some View {
-        content
-            .background(
-                Capsule(style: .continuous)
-                    .fill(backgroundColor)
-            )
-    }
-
-    private var backgroundColor: Color {
-        guard let accentHex else {
-            return isEmphasized ? VaultChrome.surfaceRaised : VaultChrome.sectionBackground
-        }
-        return Color(hex: accentHex).opacity(isEmphasized ? 0.22 : 0.14)
-    }
-}
-
-struct VaultChromeButtonStyle: ButtonStyle {
-    enum Prominence {
-        case primary
-        case secondary
-        case success
-        case destructive
-    }
-
-    let prominence: Prominence
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .foregroundStyle(foregroundColor)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(backgroundColor(configuration.isPressed))
-            )
-            .opacity(configuration.isPressed ? 0.88 : 1)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
-    }
-
-    private var foregroundColor: Color {
-        switch prominence {
-        case .primary, .success, .destructive:
-            .white
-        case .secondary:
-            .primary
-        }
-    }
-
-    private func backgroundColor(_ isPressed: Bool) -> Color {
-        switch prominence {
-        case .primary:
-            Color.accentColor
-        case .success:
-            Color.green
-        case .destructive:
-            Color.red
-        case .secondary:
-            isPressed ? VaultChrome.surfaceRaised : VaultChrome.surfaceBackground
-        }
-    }
-}
-
-struct VaultIconButtonStyle: ButtonStyle {
-    enum Prominence {
-        case neutral
-        case accent
-        case success
-    }
-
-    var prominence: Prominence = .neutral
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .medium))
-            .frame(width: 30, height: 30)
-            .foregroundStyle(foregroundColor)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(backgroundColor(configuration.isPressed))
-            )
-            .opacity(configuration.isPressed ? 0.85 : 1)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
-    }
-
-    private var foregroundColor: Color {
-        switch prominence {
-        case .neutral:
-            .secondary
-        case .accent, .success:
-            .white
-        }
-    }
-
-    private func backgroundColor(_ isPressed: Bool) -> Color {
-        switch prominence {
-        case .neutral:
-            return VaultChrome.surfaceBackground
-        case .accent:
-            return Color.accentColor
-        case .success:
-            return Color.green
-        }
-    }
-}
-
-private struct EditorCardModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content.modifier(VaultPanelModifier(prominence: .section))
-    }
-}
-
-private struct EditorMetaChipModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .foregroundStyle(.secondary)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(VaultChrome.sectionBackground)
-            )
-    }
-}
-
-private struct EditorMetaBadgeModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .foregroundStyle(.primary)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(VaultChrome.surfaceBackground)
-            )
-    }
-}
-
-struct EditorInputSurfaceModifier: ViewModifier {
-    let cornerRadius: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            .background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(VaultChrome.surfaceBackground)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-                    )
-            )
-    }
-}
-
-extension View {
-    func editorCardStyle() -> some View {
-        modifier(EditorCardModifier())
-    }
-
-    func editorMetaChipStyle() -> some View {
-        modifier(EditorMetaChipModifier())
-    }
-
-    func editorMetaBadgeStyle() -> some View {
-        modifier(EditorMetaBadgeModifier())
-    }
 }

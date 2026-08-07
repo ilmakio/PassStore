@@ -13,9 +13,16 @@ struct SheetCapsuleButtonStyle: ButtonStyle {
             .padding(.vertical, 8)
             .padding(.horizontal, 18)
             .background(Capsule().fill(isPrimary ? Color.accentColor : Color.primary.opacity(0.08)))
-            .foregroundStyle(isPrimary ? Color.black : Color.primary)
-            .opacity((configuration.isPressed || !isEnabled) ? 0.55 : 1)
+            // `.white` rather than `.black`: the fill is the user's accent colour, which is dark
+            // for most of the macOS presets, so black text failed contrast on the default blue.
+            .foregroundStyle(isPrimary ? Color.white : Color.primary)
+            .opacity(pressedOrDisabledOpacity(isPressed: configuration.isPressed))
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+
+    private func pressedOrDisabledOpacity(isPressed: Bool) -> Double {
+        if !isEnabled { return 0.4 }
+        return isPressed ? 0.7 : 1
     }
 }
 
@@ -108,15 +115,7 @@ struct ItemCreationFlowSheet: View {
                             dismiss()
                         }
                         .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                        .disabled(
-                            EnvImportSaveSupport.draftForSave(
-                                viewModel: viewModel,
-                                base: draft,
-                                pasteBuffer: envImportPasteBuffer,
-                                parseIntoEntries: envImportParseIntoEntries,
-                                suggestedTitleFromFile: envImportSuggestedTitleFromFile
-                            ).title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        )
+                        .disabled(!canSave)
                     }
                 }
                 .padding(.vertical, 14)
@@ -143,6 +142,14 @@ struct ItemCreationFlowSheet: View {
 
     private var selectedTemplate: SecretFieldTemplateEntity? {
         viewModel.template(for: selectedTemplateID)
+    }
+
+    /// Mirrors the title `EnvImportSaveSupport.draftForSave` would produce, without re-parsing the
+    /// staged `.env` text on every keystroke: staging always supplies a fallback title.
+    private var canSave: Bool {
+        if !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return draft.type == .envGroup
+            && !envImportPasteBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func onSaveWorkspace(_ workspaceDraft: WorkspaceDraft) {
@@ -752,26 +759,38 @@ private struct ItemEditorContent: View {
                             .controlSize(.mini)
                     }
                     VStack(alignment: .leading, spacing: 16) {
-                        ForEach($draft.fieldDrafts) { $field in
-                            SimpleFieldEditor(field: $field, itemType: draft.type, showAdvanced: showAdvancedFields)
+                        if draft.fieldDrafts.isEmpty {
+                            Text(showAdvancedFields
+                                 ? "No fields yet. Add one below."
+                                 : "This item has no fields. Turn on Advanced to add one.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        ForEach(Array($draft.fieldDrafts.enumerated()), id: \.element.id) { index, $field in
+                            SimpleFieldEditor(
+                                field: $field,
+                                itemType: draft.type,
+                                showAdvanced: showAdvancedFields,
+                                onRemove: { removeField(id: field.id) },
+                                canMoveUp: index > 0,
+                                canMoveDown: index < draft.fieldDrafts.count - 1,
+                                onMoveUp: { moveField(from: index, to: index - 1) },
+                                onMoveDown: { moveField(from: index, to: index + 1) },
+                                onCopyGenerated: { viewModel.copyGeneratedPassword($0) }
+                            )
                             if field.id != draft.fieldDrafts.last?.id {
                                 Divider()
                             }
                         }
 
                         if showAdvancedFields {
-                            Button {
-                                draft.fieldDrafts.append(.init(
-                                    key: "field\(draft.fieldDrafts.count + 1)",
-                                    label: "New Field",
-                                    kind: .text,
-                                    isSensitive: false,
-                                    sortOrder: draft.fieldDrafts.count
-                                ))
-                            } label: {
+                            Button(action: addField) {
                                 Label("Add Field", systemImage: "plus.circle")
                             }
                             .buttonStyle(.borderless)
+                            .accessibilityIdentifier("editor-add-field")
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -844,6 +863,45 @@ private struct ItemEditorContent: View {
         }
         draft.tags.append(tag)
         tagText = ""
+    }
+
+    private func addField() {
+        let nextIndex = draft.fieldDrafts.count + 1
+        draft.fieldDrafts.append(.init(
+            key: uniqueFieldKey(base: "field\(nextIndex)"),
+            label: "New Field",
+            kind: .text,
+            isSensitive: false,
+            sortOrder: draft.fieldDrafts.count
+        ))
+    }
+
+    private func removeField(id: UUID) {
+        draft.fieldDrafts.removeAll { $0.id == id }
+        renumberFields()
+    }
+
+    private func moveField(from source: Int, to destination: Int) {
+        let fields = draft.fieldDrafts
+        guard fields.indices.contains(source), fields.indices.contains(destination) else { return }
+        draft.fieldDrafts.swapAt(source, destination)
+        renumberFields()
+    }
+
+    /// `sortOrder` drives display order everywhere downstream, so keep it in sync with the array.
+    private func renumberFields() {
+        for index in draft.fieldDrafts.indices {
+            draft.fieldDrafts[index].sortOrder = index
+        }
+    }
+
+    /// Storage keys are the identity used when merging drafts back onto an item, so they must not collide.
+    private func uniqueFieldKey(base: String) -> String {
+        let existing = Set(draft.fieldDrafts.map(\.key))
+        guard existing.contains(base) else { return base }
+        var suffix = 2
+        while existing.contains("\(base)_\(suffix)") { suffix += 1 }
+        return "\(base)_\(suffix)"
     }
 }
 
@@ -1082,6 +1140,8 @@ private struct GeneralSettingsPane: View {
                         .multilineTextAlignment(.leading)
                 }
 
+                MasterPasswordSection(sessionManager: sessionManager)
+
                 GroupedSheetSection(title: "Privacy") {
                     SheetLabeledField(title: "Lock after inactivity") {
                         Picker("", selection: $settings.autoLockInterval) {
@@ -1164,6 +1224,439 @@ private struct GeneralSettingsPane: View {
     private func refreshGlobalHotkeyAccessibilityState() {
         GlobalCommandPaletteHotkey.shared.reinstallMonitors()
         globalHotkeyNeedsAccessibility = GlobalCommandPaletteHotkey.shared.isAccessibilityRequiredButMissing
+    }
+}
+
+// MARK: - Vault health
+
+struct VaultHealthSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let viewModel: VaultViewModel
+
+    @State private var report: VaultHealthReport?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if let report {
+                        summary(for: report)
+                        if report.isClean {
+                            cleanState(auditedItemCount: report.auditedItemCount)
+                        } else {
+                            findingsList(report.findings)
+                        }
+                    } else {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 40)
+                    }
+
+                    Text("This report is built from your unlocked vault and never shows or stores secret values.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Button("Done") { dismiss() }
+                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+                .padding(.vertical, 14)
+        }
+        .frame(width: 560)
+        .frame(minHeight: 480)
+        .navigationTitle("Vault Health")
+        .onAppear { report = viewModel.vaultHealthReport() }
+    }
+
+    private func summary(for report: VaultHealthReport) -> some View {
+        HStack(spacing: 10) {
+            summaryTile(
+                count: report.count(of: .reused),
+                label: "Reused",
+                systemImage: VaultHealthFinding.Kind.reused.systemImage,
+                tint: .red
+            )
+            summaryTile(
+                count: report.count(of: .weak),
+                label: "Weak",
+                systemImage: VaultHealthFinding.Kind.weak.systemImage,
+                tint: .orange
+            )
+            summaryTile(
+                count: report.count(of: .stale),
+                label: "Stale",
+                systemImage: VaultHealthFinding.Kind.stale.systemImage,
+                tint: .yellow
+            )
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func summaryTile(count: Int, label: String, systemImage: String, tint: Color) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(count > 0 ? tint : Color.secondary)
+            Text("\(count)")
+                .font(.title2.weight(.semibold).monospacedDigit())
+                .foregroundStyle(count > 0 ? .primary : .secondary)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .background { GroupedSheetCardBackground(cornerRadius: 10) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(count) \(label)")
+    }
+
+    private func cleanState(auditedItemCount: Int) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 32))
+                .foregroundStyle(.green)
+            Text("No issues found")
+                .font(.headline)
+            Text("Checked \(auditedItemCount) active \(auditedItemCount == 1 ? "item" : "items") for reused, weak, and stale secrets.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+    }
+
+    private func findingsList(_ findings: [VaultHealthFinding]) -> some View {
+        GroupedSheetSection(title: "\(findings.count) \(findings.count == 1 ? "finding" : "findings")") {
+            ForEach(Array(findings.enumerated()), id: \.element.id) { index, finding in
+                Button {
+                    viewModel.selectItem(id: finding.itemID)
+                    dismiss()
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: finding.kind.systemImage)
+                            .font(.system(size: 13))
+                            .foregroundStyle(tint(for: finding.kind))
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(finding.itemTitle)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(finding.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .multilineTextAlignment(.leading)
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Reveal this item in the list")
+                .accessibilityIdentifier("health-finding-\(finding.id)")
+
+                if index != findings.count - 1 {
+                    Divider()
+                }
+            }
+        }
+    }
+
+    private func tint(for kind: VaultHealthFinding.Kind) -> Color {
+        switch kind {
+        case .reused: .red
+        case .weak: .orange
+        case .stale: .yellow
+        }
+    }
+}
+
+// MARK: - Password generator
+
+/// Reusable generator panel. `onUse` is nil when opened standalone (command palette), in which
+/// case only copying makes sense.
+struct PasswordGeneratorPanel: View {
+    var onUse: ((String) -> Void)?
+    var onDismiss: () -> Void
+    var onCopy: (String) -> Void
+
+    @State private var options = PasswordGeneratorOptions()
+    @State private var password = ""
+    @State private var didCopy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            GroupedSheetSection(title: "Generated password") {
+                generatedValue
+
+                HStack(spacing: 10) {
+                    Button {
+                        regenerate()
+                    } label: {
+                        Label("Regenerate", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .accessibilityIdentifier("generator-regenerate")
+
+                    Button {
+                        onCopy(password)
+                        didCopy = true
+                    } label: {
+                        Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                    }
+                    .disabled(password.isEmpty)
+                    .accessibilityIdentifier("generator-copy")
+
+                    Spacer(minLength: 0)
+                }
+
+                PasswordStrengthBar(password: password)
+            }
+
+            GroupedSheetSection(title: "Options") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Length")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(options.length)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(options.length) },
+                            set: { options.length = Int($0.rounded()) }
+                        ),
+                        in: Double(PasswordGenerator.minimumLength)...Double(PasswordGenerator.maximumLength),
+                        step: 1
+                    )
+                    .accessibilityIdentifier("generator-length")
+                    .accessibilityValue("\(options.length) characters")
+                }
+
+                Toggle("Lowercase (a–z)", isOn: $options.includeLowercase).toggleStyle(.checkbox)
+                Toggle("Uppercase (A–Z)", isOn: $options.includeUppercase).toggleStyle(.checkbox)
+                Toggle("Digits (0–9)", isOn: $options.includeDigits).toggleStyle(.checkbox)
+                Toggle("Symbols (!@#…)", isOn: $options.includeSymbols).toggleStyle(.checkbox)
+                Toggle("Avoid look-alike characters", isOn: $options.excludeAmbiguous)
+                    .toggleStyle(.checkbox)
+                    .help("Leaves out 0/O, 1/l/I and similar pairs for secrets you may have to read aloud or retype.")
+
+                if !options.hasUsableCharacterSet {
+                    Text("Turn on at least one character set. Lowercase is used until you do.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button(onUse == nil ? "Done" : "Cancel") { onDismiss() }
+                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: onUse == nil))
+                if let onUse {
+                    Button("Use Password") {
+                        onUse(password)
+                        onDismiss()
+                    }
+                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+                    .disabled(password.isEmpty)
+                    .accessibilityIdentifier("generator-use")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onAppear { if password.isEmpty { regenerate() } }
+        .onChange(of: options) { _, _ in regenerate() }
+    }
+
+    private var generatedValue: some View {
+        Text(password.isEmpty ? " " : password)
+            .font(.system(.body, design: .monospaced))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    )
+            )
+            .accessibilityIdentifier("generator-value")
+    }
+
+    private func regenerate() {
+        password = PasswordGenerator.generate(options: options)
+        didCopy = false
+    }
+}
+
+struct PasswordGeneratorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let viewModel: VaultViewModel
+
+    var body: some View {
+        PasswordGeneratorPanel(
+            onUse: nil,
+            onDismiss: { dismiss() },
+            onCopy: { viewModel.copyGeneratedPassword($0) }
+        )
+        .navigationTitle("Password Generator")
+    }
+}
+
+// MARK: - Master password
+
+/// Changing the master password only re-wraps the vault key, so no stored data is re-encrypted
+/// and the Touch ID Keychain entry keeps working.
+private struct MasterPasswordSection: View {
+    @Bindable var sessionManager: VaultSessionManager
+
+    @State private var isExpanded = false
+    @State private var currentPassword = ""
+    @State private var newPassword = ""
+    @State private var confirmPassword = ""
+    @State private var errorMessage: String?
+    @State private var didSucceed = false
+
+    private var passwordsMatch: Bool {
+        !confirmPassword.isEmpty && newPassword == confirmPassword
+    }
+
+    private var canSubmit: Bool {
+        !currentPassword.isEmpty
+            && newPassword.count >= VaultSessionManager.minimumPasswordLength
+            && passwordsMatch
+            && newPassword != currentPassword
+            && !sessionManager.isBusy
+    }
+
+    var body: some View {
+        GroupedSheetSection(title: "Master Password") {
+            if isExpanded {
+                expandedForm
+            } else {
+                collapsedRow
+            }
+        }
+    }
+
+    private var collapsedRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if didSucceed {
+                Label("Master password updated", systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.green)
+            }
+            Text("Your master password unwraps the vault key. Changing it does not re-encrypt your secrets and does not affect Touch ID.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+            Button("Change Master Password…") {
+                didSucceed = false
+                isExpanded = true
+            }
+            .accessibilityIdentifier("settings-change-master-password")
+        }
+    }
+
+    private var expandedForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SheetLabeledField(title: "Current password") {
+                SecureField("", text: $currentPassword, prompt: Text("Your current master password"))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("master-password-current")
+            }
+
+            SheetLabeledField(title: "New password") {
+                SecureField("", text: $newPassword, prompt: Text("At least \(VaultSessionManager.minimumPasswordLength) characters"))
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("master-password-new")
+            }
+
+            SheetLabeledField(title: "Confirm new password") {
+                SecureField("", text: $confirmPassword, prompt: Text("Re-enter the new password"))
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { if canSubmit { submit() } }
+                    .accessibilityIdentifier("master-password-confirm")
+            }
+
+            PasswordStrengthBar(password: newPassword)
+
+            if let message = validationHint {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+            }
+
+            Text("If you forget this password your secrets cannot be recovered — there is no reset. Export an encrypted backup first.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+
+            HStack(spacing: 10) {
+                Button("Cancel", action: reset)
+                    .disabled(sessionManager.isBusy)
+                Spacer(minLength: 0)
+                Button("Update Password", action: submit)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmit)
+                    .accessibilityIdentifier("master-password-submit")
+            }
+        }
+    }
+
+    private var validationHint: String? {
+        if let errorMessage { return errorMessage }
+        if !newPassword.isEmpty, newPassword.count < VaultSessionManager.minimumPasswordLength {
+            return "New password must be at least \(VaultSessionManager.minimumPasswordLength) characters."
+        }
+        if !confirmPassword.isEmpty, !passwordsMatch {
+            return "The new passwords don't match."
+        }
+        if !newPassword.isEmpty, newPassword == currentPassword {
+            return "The new password must be different from the current one."
+        }
+        return nil
+    }
+
+    private func submit() {
+        errorMessage = nil
+        do {
+            try sessionManager.changeMasterPassword(current: currentPassword, to: newPassword)
+            reset()
+            didSucceed = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func reset() {
+        currentPassword = ""
+        newPassword = ""
+        confirmPassword = ""
+        errorMessage = nil
+        isExpanded = false
     }
 }
 
@@ -1399,7 +1892,11 @@ private struct TemplateSettingsPane: View {
                     } else {
                         VStack(alignment: .leading, spacing: 16) {
                             ForEach($draft.fieldDefinitions) { $field in
-                                templateFieldRow(field: $field, readOnly: isBuiltInSelected)
+                                templateFieldRow(
+                                    field: $field,
+                                    readOnly: isBuiltInSelected,
+                                    onRemove: isBuiltInSelected ? nil : { removeTemplateField(id: field.id) }
+                                )
                                 if field.id != draft.fieldDefinitions.last?.id {
                                     Divider()
                                 }
@@ -1456,9 +1953,34 @@ private struct TemplateSettingsPane: View {
         .navigationTitle(detailTitle)
     }
 
+    private func removeTemplateField(id: UUID) {
+        draft.fieldDefinitions.removeAll { $0.id == id }
+        for index in draft.fieldDefinitions.indices {
+            draft.fieldDefinitions[index].sortOrder = index
+        }
+    }
+
     @ViewBuilder
-    private func templateFieldRow(field: Binding<TemplateFieldDraft>, readOnly: Bool) -> some View {
+    private func templateFieldRow(
+        field: Binding<TemplateFieldDraft>,
+        readOnly: Bool,
+        onRemove: (() -> Void)?
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let onRemove {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button(role: .destructive, action: onRemove) {
+                        Label("Remove Field", systemImage: "minus.circle")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Remove this field from the template")
+                }
+            }
+
             SheetLabeledField(title: "Field label") {
                 TextField("", text: field.label, prompt: Text("Shown in the editor"))
                     .textFieldStyle(.roundedBorder)
@@ -1542,7 +2064,10 @@ struct ExportSheet: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 420, height: 320)
+        // minHeight rather than a fixed height: the security explainer wraps to 4-5 lines and
+        // was forcing the action buttons out of view at 320pt.
+        .frame(width: 440)
+        .frame(minHeight: 400)
         .navigationTitle("Export .pstore Backup")
     }
 }
@@ -1594,7 +2119,8 @@ struct ImportEncryptedExportSheet: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 420, height: 320)
+        .frame(width: 440)
+        .frame(minHeight: 400)
         .navigationTitle("Import .pstore Backup")
         .fileImporter(
             isPresented: $isPresentingFileImporter,
@@ -1650,10 +2176,106 @@ private struct SimpleFieldEditor: View {
     @Binding var field: FieldDraft
     let itemType: SecretItemType
     let showAdvanced: Bool
+    let onRemove: () -> Void
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    /// Routed through the clipboard service so generated passwords honour auto-clear too.
+    let onCopyGenerated: (String) -> Void
     @State private var isRevealed = false
+    @State private var isPresentingGenerator = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
+            fieldHeader
+
+            fieldValueRow
+
+            if showAdvanced {
+                advancedControls
+                    .padding(.top, 6)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .sheet(isPresented: $isPresentingGenerator) {
+            PasswordGeneratorPanel(
+                onUse: { generated in
+                    field.value = generated
+                    isRevealed = true
+                },
+                onDismiss: { isPresentingGenerator = false },
+                onCopy: onCopyGenerated
+            )
+        }
+    }
+
+    /// Basic mode shows the field name as a static caption, so filling in values is the only visible job.
+    private var fieldHeader: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(displayLabel)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            if field.isSensitive {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                    .help("Stored as a sensitive value and masked in the detail view")
+                    .accessibilityLabel("Sensitive")
+            }
+            Spacer(minLength: 8)
+            if showAdvanced {
+                Button(action: onMoveUp) {
+                    Label("Move Up", systemImage: "chevron.up")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(!canMoveUp)
+                .help("Move this field up")
+                .accessibilityIdentifier("editor-move-up-\(field.key)")
+
+                Button(action: onMoveDown) {
+                    Label("Move Down", systemImage: "chevron.down")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(!canMoveDown)
+                .help("Move this field down")
+                .accessibilityIdentifier("editor-move-down-\(field.key)")
+
+                Button(role: .destructive, action: onRemove) {
+                    Label("Remove Field", systemImage: "minus.circle")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Remove this field")
+                .accessibilityIdentifier("editor-remove-field-\(field.key)")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var displayLabel: String {
+        let trimmed = field.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let key = field.key.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? "Untitled field" : key
+    }
+
+    private var advancedControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Advanced")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             SheetLabeledField(title: "Field label") {
                 TextField("", text: $field.label, prompt: Text("e.g. Password"))
                     .textFieldStyle(.roundedBorder)
@@ -1665,54 +2287,34 @@ private struct SimpleFieldEditor: View {
                     }
             }
 
-            Toggle("Sensitive value", isOn: $field.isSensitive)
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .font(.subheadline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            SheetLabeledField(title: "Value") {
-                fieldValueRow
+            SheetLabeledField(title: "Storage key") {
+                TextField("", text: $field.key, prompt: Text("Machine-readable id"))
+                    .font(.system(.body, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
             }
 
-            if showAdvanced {
+            SheetLabeledField(title: "Value kind") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Advanced")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 4)
-
-                    SheetLabeledField(title: "Storage key") {
-                        TextField("", text: $field.key, prompt: Text("Machine-readable id"))
-                            .font(.system(.body, design: .monospaced))
-                            .textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.leading)
-                    }
-
-                    SheetLabeledField(title: "Value kind") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Picker("", selection: $field.kind) {
-                                ForEach(FieldKind.allCases) { kind in
-                                    Text(kind.title).tag(kind)
-                                }
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                            HStack(alignment: .top, spacing: 12) {
-                                Toggle("Copy allowed", isOn: $field.isCopyable)
-                                    .toggleStyle(.checkbox)
-                                Toggle("Masked by default", isOn: $field.isMasked)
-                                    .toggleStyle(.checkbox)
-                            }
-                            .font(.caption)
+                    Picker("", selection: $field.kind) {
+                        ForEach(FieldKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
                         }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    HStack(alignment: .top, spacing: 12) {
+                        Toggle("Sensitive", isOn: $field.isSensitive)
+                            .toggleStyle(.checkbox)
+                        Toggle("Copy allowed", isOn: $field.isCopyable)
+                            .toggleStyle(.checkbox)
+                        Toggle("Masked by default", isOn: $field.isMasked)
+                            .toggleStyle(.checkbox)
+                    }
+                    .font(.caption)
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
     }
 
     private var databaseEngineSelection: Binding<String> {
@@ -1790,13 +2392,18 @@ private struct SimpleFieldEditor: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .multilineTextAlignment(.leading)
 
-                    if field.supportsGeneratedPassword {
-                        Button("Generate") {
-                            field.value = PasswordGenerator.generate()
-                            isRevealed = true
+                    if field.kind == .secret || field.isSensitive {
+                        Button {
+                            isPresentingGenerator = true
+                        } label: {
+                            Label("Generate", systemImage: "wand.and.sparkles")
+                                .labelStyle(.iconOnly)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .help("Generate a strong password")
+                        .accessibilityLabel("Generate password")
+                        .accessibilityIdentifier("editor-generate-\(field.key)")
                     }
 
                     if field.kind == .secret {
@@ -1818,13 +2425,5 @@ private struct SimpleFieldEditor: View {
             .lowercased()
             .replacingOccurrences(of: " ", with: "_")
             .filter { $0.isLetter || $0.isNumber || $0 == "_" }
-    }
-}
-
-// MARK: - Legacy helpers (used by remaining custom views)
-
-private struct EditorSheetBackground: View {
-    var body: some View {
-        Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
     }
 }

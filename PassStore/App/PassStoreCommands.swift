@@ -104,6 +104,23 @@ struct PassStoreCommands: Commands {
             .disabled(!canUseClipboardActions || viewModel.selectedItem?.type != .database)
         }
 
+        CommandGroup(after: .toolbar) {
+            Button {
+                viewModel.activeSheet = .passwordGenerator
+            } label: {
+                Label("Password Generator…", systemImage: "wand.and.sparkles")
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .disabled(isLocked)
+
+            Button {
+                viewModel.activeSheet = .vaultHealth
+            } label: {
+                Label("Vault Health…", systemImage: "checkmark.shield")
+            }
+            .disabled(isLocked)
+        }
+
         CommandGroup(replacing: .appSettings) {
             Button {
                 viewModel.isSettingsPresented = true
@@ -128,8 +145,39 @@ struct PassStoreCommands: Commands {
                 Label("Command Palette…", systemImage: "command.circle")
             }
             .keyboardShortcut("k", modifiers: [.command])
-            .disabled(viewModel.container.sessionManager.lockState != .unlocked)
+            .disabled(isLocked)
+
+            Divider()
+
+            Button {
+                viewModel.requestSearchFocus()
+            } label: {
+                Label("Find", systemImage: "magnifyingglass")
+            }
+            .keyboardShortcut("f", modifiers: [.command])
+            .disabled(isLocked)
+
+            // ⌥ arrows rather than bare arrows so list navigation never steals keys from a focused text field.
+            Button {
+                viewModel.moveSelection(by: -1)
+            } label: {
+                Label("Select Previous Item", systemImage: "chevron.up")
+            }
+            .keyboardShortcut(.upArrow, modifiers: [.option])
+            .disabled(isLocked)
+
+            Button {
+                viewModel.moveSelection(by: 1)
+            } label: {
+                Label("Select Next Item", systemImage: "chevron.down")
+            }
+            .keyboardShortcut(.downArrow, modifiers: [.option])
+            .disabled(isLocked)
         }
+    }
+
+    private var isLocked: Bool {
+        viewModel.container.sessionManager.lockState != .unlocked
     }
 
     private var canUseClipboardActions: Bool {

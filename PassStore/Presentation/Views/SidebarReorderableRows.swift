@@ -8,6 +8,8 @@ struct SidebarReorderItem {
     let title: String
     let systemImage: String
     let tintColor: NSColor
+    /// Trailing count shown right-aligned in the row; nil hides it.
+    let badge: String?
     let accessibilityIdentifier: String?
 
     init(
@@ -15,13 +17,28 @@ struct SidebarReorderItem {
         title: String,
         systemImage: String,
         tintColor: NSColor = .controlAccentColor,
+        badge: String? = nil,
         accessibilityIdentifier: String? = nil
     ) {
         self.id = id
         self.title = title
         self.systemImage = systemImage
         self.tintColor = tintColor
+        self.badge = badge
         self.accessibilityIdentifier = accessibilityIdentifier
+    }
+}
+
+/// One entry in a sidebar row's right-click menu.
+struct SidebarRowAction {
+    let title: String
+    let isDestructive: Bool
+    let handler: () -> Void
+
+    init(title: String, isDestructive: Bool = false, handler: @escaping () -> Void) {
+        self.title = title
+        self.isDestructive = isDestructive
+        self.handler = handler
     }
 }
 
@@ -44,9 +61,11 @@ struct ReorderableRows: NSViewRepresentable {
     let onSelect: (String?) -> Void
     /// Called with the new ordered list of ids after a drag-and-drop reorder. No-op by default.
     var onReorder: ([String]) -> Void = { _ in }
+    /// Right-click menu entries for the row with the given id. Returning `[]` shows no menu.
+    var contextActions: (String) -> [SidebarRowAction] = { _ in [] }
 
     func makeNSView(context: Context) -> NSTableView {
-        let table = NSTableView()
+        let table = SidebarTableView()
         table.headerView = nil
         table.backgroundColor = .clear
         table.gridStyleMask = []
@@ -71,6 +90,9 @@ struct ReorderableRows: NSViewRepresentable {
 
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
+        table.menuProvider = { [weak coordinator = context.coordinator] row in
+            coordinator?.menu(forRow: row)
+        }
         context.coordinator.tableView = table
 
         return table
@@ -83,6 +105,7 @@ struct ReorderableRows: NSViewRepresentable {
         c.allowsDeselection = allowsDeselection
         c.onSelect = onSelect
         c.onReorder = onReorder
+        c.contextActions = contextActions
 
         table.reloadData()
 
@@ -100,7 +123,8 @@ struct ReorderableRows: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(items: items, selectedID: selectedID, allowsDeselection: allowsDeselection,
-                    reorderable: reorderable, onSelect: onSelect, onReorder: onReorder)
+                    reorderable: reorderable, onSelect: onSelect, onReorder: onReorder,
+                    contextActions: contextActions)
     }
 
     // MARK: - Coordinator
@@ -112,20 +136,59 @@ struct ReorderableRows: NSViewRepresentable {
         var reorderable: Bool
         var onSelect: (String?) -> Void
         var onReorder: ([String]) -> Void
+        var contextActions: (String) -> [SidebarRowAction]
         var isUpdating = false
         weak var tableView: NSTableView?
 
+        /// Actions backing the menu currently on screen; `NSMenuItem.tag` indexes into this.
+        private var visibleContextActions: [SidebarRowAction] = []
+
         init(items: [SidebarReorderItem], selectedID: String?, allowsDeselection: Bool,
-             reorderable: Bool, onSelect: @escaping (String?) -> Void, onReorder: @escaping ([String]) -> Void) {
+             reorderable: Bool, onSelect: @escaping (String?) -> Void, onReorder: @escaping ([String]) -> Void,
+             contextActions: @escaping (String) -> [SidebarRowAction]) {
             self.items = items
             self.selectedID = selectedID
             self.allowsDeselection = allowsDeselection
             self.reorderable = reorderable
             self.onSelect = onSelect
             self.onReorder = onReorder
+            self.contextActions = contextActions
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+
+        // MARK: Context menu
+
+        func menu(forRow row: Int) -> NSMenu? {
+            guard row >= 0, row < items.count else { return nil }
+            let actions = contextActions(items[row].id)
+            guard !actions.isEmpty else { return nil }
+
+            visibleContextActions = actions
+            let menu = NSMenu()
+            var didSeparateDestructive = false
+            for (index, action) in actions.enumerated() {
+                // macOS convention: destructive entries sit below a separator.
+                if action.isDestructive, !didSeparateDestructive, index > 0 {
+                    menu.addItem(.separator())
+                    didSeparateDestructive = true
+                }
+                let menuItem = NSMenuItem(
+                    title: action.title,
+                    action: #selector(performContextAction(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                menuItem.tag = index
+                menu.addItem(menuItem)
+            }
+            return menu
+        }
+
+        @objc private func performContextAction(_ sender: NSMenuItem) {
+            guard sender.tag >= 0, sender.tag < visibleContextActions.count else { return }
+            visibleContextActions[sender.tag].handler()
+        }
 
         // MARK: Drag source — enables drag from any point on the row
 
@@ -157,7 +220,8 @@ struct ReorderableRows: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let item = items[row]
-            let cell = SidebarCell()
+            let cell = tableView.makeView(withIdentifier: SidebarCell.reuseIdentifier, owner: self) as? SidebarCell
+                ?? SidebarCell()
             cell.configure(with: item, isSelected: item.id == selectedID) { [weak self, weak tableView] in
                 guard let self, let tableView else { return }
                 if self.allowsDeselection, tableView.selectedRow == row {
@@ -201,16 +265,33 @@ struct ReorderableRows: NSViewRepresentable {
     }
 }
 
+// MARK: - Table View (right-click menus resolved against the clicked row)
+
+private final class SidebarTableView: NSTableView {
+    var menuProvider: ((Int) -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let clickedRow = row(at: point)
+        guard clickedRow >= 0 else { return nil }
+        return menuProvider?(clickedRow)
+    }
+}
+
 // MARK: - Cell View
 
 private final class SidebarCell: NSView {
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("SidebarCell")
+
     private let bg = NSView()
     private let imageView = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let badgeLabel = NSTextField(labelWithString: "")
     private var onPress: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        identifier = Self.reuseIdentifier
         bg.wantsLayer = true
         bg.layer?.cornerRadius = 6
         bg.translatesAutoresizingMaskIntoConstraints = false
@@ -225,6 +306,13 @@ private final class SidebarCell: NSView {
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)
 
+        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        badgeLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        badgeLabel.textColor = .tertiaryLabelColor
+        badgeLabel.alignment = .right
+        badgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        addSubview(badgeLabel)
+
         NSLayoutConstraint.activate([
             bg.leadingAnchor.constraint(equalTo: leadingAnchor),
             bg.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -237,8 +325,11 @@ private final class SidebarCell: NSView {
             imageView.heightAnchor.constraint(equalToConstant: 15),
 
             label.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            badgeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6),
+            badgeLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            badgeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -252,12 +343,14 @@ private final class SidebarCell: NSView {
         imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular, scale: .small)
         imageView.image = NSImage(systemSymbolName: item.systemImage, accessibilityDescription: item.title)
         imageView.contentTintColor = isSelected ? item.tintColor : .tertiaryLabelColor
+        badgeLabel.stringValue = item.badge ?? ""
+        badgeLabel.isHidden = item.badge == nil
         bg.layer?.backgroundColor = isSelected
             ? item.tintColor.withAlphaComponent(0.15).cgColor
             : .clear
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel(item.title)
+        setAccessibilityLabel(item.badge.map { "\(item.title), \($0)" } ?? item.title)
         setAccessibilityIdentifier(item.accessibilityIdentifier)
     }
 

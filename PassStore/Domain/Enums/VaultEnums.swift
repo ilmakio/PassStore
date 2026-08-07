@@ -116,6 +116,8 @@ enum VaultSheet: Identifiable {
     case editWorkspace(UUID)
     case importEncryptedExport
     case export
+    case passwordGenerator
+    case vaultHealth
 
     var id: String {
         switch self {
@@ -125,6 +127,8 @@ enum VaultSheet: Identifiable {
         case let .editWorkspace(id): "edit-workspace-\(id.uuidString)"
         case .importEncryptedExport: "import-encrypted-export"
         case .export: "export"
+        case .passwordGenerator: "password-generator"
+        case .vaultHealth: "vault-health"
         }
     }
 }

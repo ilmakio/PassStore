@@ -10,6 +10,8 @@ enum VaultCryptoError: LocalizedError {
     case vaultLocked
     case metadataMissing
     case emptyPassword
+    case passwordTooShort(Int)
+    case incorrectCurrentPassword
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +27,10 @@ enum VaultCryptoError: LocalizedError {
             "Vault metadata is missing."
         case .emptyPassword:
             "Password cannot be empty."
+        case let .passwordTooShort(minimum):
+            "Password must be at least \(minimum) characters."
+        case .incorrectCurrentPassword:
+            "That is not your current master password."
         }
     }
 }
@@ -341,7 +347,8 @@ final class VaultMemoryStore {
     }
 
     private func load(_ snapshot: VaultSnapshot) {
-        let workspaceMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map {
+        // Snapshots can come from an imported backup file, so duplicate ids must not trap.
+        let workspaceMap = Dictionary(snapshot.workspaces.map {
             ($0.id, WorkspaceEntity(
                 id: $0.id,
                 name: $0.name,
@@ -353,9 +360,9 @@ final class VaultMemoryStore {
                 updatedAt: $0.updatedAt,
                 sortOrder: $0.sortOrder
             ))
-        })
+        }, uniquingKeysWith: { first, _ in first })
 
-        let customTemplateMap = Dictionary(uniqueKeysWithValues: snapshot.customTemplates.map { templateSnapshot in
+        let customTemplateMap = Dictionary(snapshot.customTemplates.map { templateSnapshot in
             let template = SecretFieldTemplateEntity(
                 id: templateSnapshot.id,
                 itemType: SecretItemType(rawValue: templateSnapshot.itemTypeRawValue) ?? .customTemplate,
@@ -378,9 +385,9 @@ final class VaultMemoryStore {
                 )
             }.sorted { $0.sortOrder < $1.sortOrder }
             return (template.id, template)
-        })
+        }, uniquingKeysWith: { first, _ in first })
 
-        let builtInTemplateMap = Dictionary(uniqueKeysWithValues: builtInTemplates.map { ($0.id, $0) })
+        let builtInTemplateMap = Dictionary(builtInTemplates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let templatesByID = builtInTemplateMap.merging(customTemplateMap) { _, new in new }
 
         let items = snapshot.items.map { itemSnapshot in

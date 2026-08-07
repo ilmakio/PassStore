@@ -529,6 +529,59 @@ struct TemplateFieldSnapshot: Codable {
     let sortOrder: Int
 }
 
+// MARK: - Vault health audit
+
+struct VaultHealthFinding: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case reused
+        case weak
+        case stale
+
+        /// Lower sorts first: reuse is the most actionable problem in a secret vault.
+        var severity: Int {
+            switch self {
+            case .reused: 0
+            case .weak: 1
+            case .stale: 2
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .reused: "Reused"
+            case .weak: "Weak"
+            case .stale: "Stale"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .reused: "arrow.triangle.2.circlepath"
+            case .weak: "exclamationmark.shield"
+            case .stale: "clock.badge.exclamationmark"
+            }
+        }
+    }
+
+    let id: String
+    let kind: Kind
+    let itemID: UUID
+    let itemTitle: String
+    /// Human-readable explanation. Never contains a secret value.
+    let detail: String
+}
+
+struct VaultHealthReport {
+    let auditedItemCount: Int
+    let findings: [VaultHealthFinding]
+
+    func count(of kind: VaultHealthFinding.Kind) -> Int {
+        findings.filter { $0.kind == kind }.count
+    }
+
+    var isClean: Bool { findings.isEmpty }
+}
+
 struct ParsedEnvDocument {
     var notes: String
     var entries: [ParsedEnvEntry]

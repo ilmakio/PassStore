@@ -38,14 +38,20 @@ struct CopyFormatter {
     }
 
     static func jsonString(for item: SecretItemEntity, fields: [FieldResolvedValue]) throws -> String {
-        let payload = Dictionary(uniqueKeysWithValues: fields.map { ($0.key, $0.value) })
+        let payload = keyedValues(fields)
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// Field keys should be unique, but a legacy or hand-edited vault can repeat one; keep the
+    /// first occurrence rather than trapping the way `Dictionary(uniqueKeysWithValues:)` would.
+    static func keyedValues(_ fields: [FieldResolvedValue]) -> [String: String] {
+        Dictionary(fields.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first })
+    }
+
     static func databaseConnectionString(for item: SecretItemEntity, fields: [FieldResolvedValue]) throws -> String {
         guard item.type == .database else { throw TransferError.invalidDatabaseItem }
-        let map = Dictionary(uniqueKeysWithValues: fields.map { ($0.key, $0.value) })
+        let map = keyedValues(fields)
         let engineRaw = (map["db_engine"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let engine = engineRaw.isEmpty ? "postgresql" : engineRaw
         return try buildDatabaseConnectionString(engine: engine, map: map)

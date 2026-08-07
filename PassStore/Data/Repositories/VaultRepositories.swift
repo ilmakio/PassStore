@@ -186,8 +186,11 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         item.workspace = workspace(for: draft.workspaceID)
         item.template = template(for: draft.templateID)
 
-        let existingFields = Dictionary(uniqueKeysWithValues: item.fields.map { ($0.fieldKey, $0) })
-        item.fields = draft.fieldDrafts.map { fieldDraft in
+        // Field keys are the merge identity, so collisions must be resolved before mapping:
+        // `Dictionary(uniqueKeysWithValues:)` traps on duplicates, and the editor lets two
+        // fields end up with the same slug (e.g. renaming a field to match an existing one).
+        let existingFields = Dictionary(item.fields.map { ($0.fieldKey, $0) }, uniquingKeysWith: { first, _ in first })
+        item.fields = Self.withUniqueKeys(draft.fieldDrafts).map { fieldDraft in
             let field = existingFields[fieldDraft.key] ?? SecretFieldValueEntity(
                 id: fieldDraft.id,
                 fieldKey: fieldDraft.key,
@@ -258,6 +261,26 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         store.items.removeAll { $0.id == item.id }
         rebuildWorkspaceItems()
         try store.persist()
+    }
+
+    /// Renames duplicate storage keys (`host`, `host_2`, …) so every field survives the save
+    /// instead of one silently overwriting the other.
+    static func withUniqueKeys(_ drafts: [FieldDraft]) -> [FieldDraft] {
+        var seen: Set<String> = []
+        return drafts.map { draft in
+            let base = draft.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            var candidate = base.isEmpty ? "field" : base
+            if seen.contains(candidate) {
+                var suffix = 2
+                while seen.contains("\(candidate)_\(suffix)") { suffix += 1 }
+                candidate = "\(candidate)_\(suffix)"
+            }
+            seen.insert(candidate)
+            guard candidate != draft.key else { return draft }
+            var renamed = draft
+            renamed.key = candidate
+            return renamed
+        }
     }
 
     private func workspace(for id: UUID?) -> WorkspaceEntity? {

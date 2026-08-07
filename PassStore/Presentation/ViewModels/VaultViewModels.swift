@@ -1,7 +1,7 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
-import SwiftUI
 
 @MainActor
 @Observable
@@ -29,6 +29,14 @@ final class VaultViewModel {
     var activeSheet: VaultSheet?
     var alertMessage: String?
     var isSettingsPresented = false
+
+    /// Set by the sidebar's Delete Workspace action; drives the confirmation alert in `AppView`.
+    var workspacePendingDeletion: WorkspaceEntity?
+    /// Items awaiting delete confirmation. Deleting a secret is irreversible, so every entry
+    /// point (context menu, multi-selection, detail toolbar, palette) funnels through here.
+    var itemsPendingDeletion: [SecretItemEntity] = []
+    /// Incremented by the Find command; `ItemListView` moves focus to the search field on change.
+    var searchFocusRequests = 0
 
     var isCommandPalettePresented = false
     var commandPaletteQuery = ""
@@ -93,35 +101,6 @@ final class VaultViewModel {
         return ordered + newEnvs
     }
 
-    func moveWorkspaces(from source: IndexSet, to destination: Int) {
-        var reordered = workspaces
-        reordered.move(fromOffsets: source, toOffset: destination)
-        do {
-            try container.workspaceRepository.reorderWorkspaces(reordered.map(\.id))
-            reload()
-        } catch {
-            alertMessage = error.localizedDescription
-        }
-    }
-
-    func moveTypes(from source: IndexSet, to destination: Int) {
-        var order = orderedTypes.map(\.rawValue)
-        order.move(fromOffsets: source, toOffset: destination)
-        container.settings.sidebarTypesOrder = order
-    }
-
-    func moveTags(from source: IndexSet, to destination: Int) {
-        var order = orderedTags
-        order.move(fromOffsets: source, toOffset: destination)
-        container.settings.sidebarTagsOrder = order
-    }
-
-    func moveEnvironments(from source: IndexSet, to destination: Int) {
-        var order = orderedEnvironments
-        order.move(fromOffsets: source, toOffset: destination)
-        container.settings.sidebarEnvironmentsOrder = order
-    }
-
     func reorderWorkspaces(newIDs: [UUID]) {
         do {
             try container.workspaceRepository.reorderWorkspaces(newIDs)
@@ -129,6 +108,61 @@ final class VaultViewModel {
         } catch {
             alertMessage = error.localizedDescription
         }
+    }
+
+    func requestWorkspaceDeletion(id: UUID) {
+        workspacePendingDeletion = workspace(for: id)
+    }
+
+    /// Deletes the workspace and un-assigns (never deletes) the items that belonged to it.
+    func confirmWorkspaceDeletion() {
+        guard let workspace = workspacePendingDeletion else { return }
+        workspacePendingDeletion = nil
+        let wasSelected: Bool = {
+            if case let .workspace(id) = selectedDestination { return id == workspace.id }
+            return false
+        }()
+        do {
+            try container.workspaceRepository.deleteWorkspace(workspace)
+            if wasSelected {
+                selectedDestination = .library(.allItems)
+            }
+            reload()
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func itemCount(in section: LibrarySection) -> Int {
+        items.filter { item in
+            switch section {
+            case .allItems: !item.isArchived
+            case .favorites: item.isFavorite && !item.isArchived
+            case .recent: !item.isArchived
+            case .archived: item.isArchived
+            }
+        }.count
+    }
+
+    func itemCount(inWorkspace id: UUID) -> Int {
+        items.filter { $0.workspace?.id == id && !$0.isArchived }.count
+    }
+
+    func requestSearchFocus() {
+        searchFocusRequests += 1
+    }
+
+    /// Moves the list selection by `offset` within the currently filtered items (keyboard navigation).
+    func moveSelection(by offset: Int) {
+        let visible = filteredItems
+        guard !visible.isEmpty else { return }
+        guard let current = selectedItemID, let index = visible.firstIndex(where: { $0.id == current }) else {
+            select(visible.first)
+            return
+        }
+        let next = min(max(index + offset, 0), visible.count - 1)
+        guard next != index else { return }
+        select(visible[next])
     }
 
     var builtInTemplates: [SecretFieldTemplateEntity] {
@@ -190,6 +224,35 @@ final class VaultViewModel {
         }
     }
 
+    var hasActiveFilters: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedType != nil
+    }
+
+    func clearFilters() {
+        searchText = ""
+        setSelectedType(nil)
+    }
+
+    /// Shown when the vault has items but this particular destination is empty.
+    var emptyDestinationHint: String {
+        switch selectedDestination {
+        case .library(.allItems):
+            "Every item in your vault is archived."
+        case .library(.favorites):
+            "Star an item to pin it here for quick access."
+        case .library(.recent):
+            "Items you create or edit will show up here."
+        case .library(.archived):
+            "Nothing is archived. Archived items stay recoverable."
+        case .workspace:
+            "This workspace has no items yet."
+        case .tag:
+            "No items carry this tag anymore."
+        case .environment:
+            "No items target this environment anymore."
+        }
+    }
+
     var destinationSystemImage: String {
         switch selectedDestination {
         case let .library(section):
@@ -200,15 +263,6 @@ final class VaultViewModel {
             "tag"
         case .environment:
             "circle.hexagongrid"
-        }
-    }
-
-    var destinationAccentColor: Color {
-        switch selectedDestination {
-        case let .workspace(id):
-            Color(hex: workspace(for: id)?.colorHex ?? "#4A7AFF")
-        default:
-            .accentColor
         }
     }
 
@@ -312,20 +366,6 @@ final class VaultViewModel {
         multiSelectedIDs.removeAll()
     }
 
-    func bulkToggleFavorite() {
-        for item in multiSelectedItems {
-            var draft = makeDraft(from: item)
-            draft.isFavorite.toggle()
-            do {
-                try container.itemRepository.saveItem(draft)
-            } catch {
-                alertMessage = error.localizedDescription
-                return
-            }
-        }
-        reload()
-    }
-
     func bulkAddFavorite() {
         for item in multiSelectedItems where !item.isFavorite {
             var draft = makeDraft(from: item)
@@ -377,8 +417,14 @@ final class VaultViewModel {
         for item in selected {
             let fields = Self.visibleFields(in: resolvedFields(for: item))
             if fields.contains(where: \.isSensitive) { hasSensitive = true }
-            let payload = Dictionary(uniqueKeysWithValues: fields.map { ($0.key, $0.value) })
-            allPayloads[item.title] = payload
+            // Two items can share a title, so disambiguate instead of letting the last one win.
+            var key = item.title
+            var suffix = 2
+            while allPayloads[key] != nil {
+                key = "\(item.title) (\(suffix))"
+                suffix += 1
+            }
+            allPayloads[key] = CopyFormatter.keyedValues(fields)
         }
         guard let data = try? JSONSerialization.data(withJSONObject: allPayloads, options: [.prettyPrinted, .sortedKeys]) else { return }
         let json = String(decoding: data, as: UTF8.self)
@@ -394,20 +440,26 @@ final class VaultViewModel {
         multiSelectedIDs.removeAll()
     }
 
+    /// Archives every selected item with a single reload; the per-item path would otherwise
+    /// re-fetch the vault and retarget the sidebar destination once per item.
     func bulkArchive() {
-        for item in multiSelectedItems {
-            updateArchiveState(for: item, isArchived: true)
+        let selected = multiSelectedItems
+        guard !selected.isEmpty else { return }
+        for item in selected {
+            var draft = makeDraft(from: item)
+            draft.id = item.id
+            draft.isArchived = true
+            do {
+                try container.itemRepository.saveItem(draft)
+            } catch {
+                alertMessage = error.localizedDescription
+                break
+            }
         }
-        multiSelectedIDs.removeAll()
-    }
-
-    func bulkDelete() {
-        for item in multiSelectedItems {
-            try? container.itemRepository.deleteItem(item)
-        }
-        reload()
         multiSelectedIDs.removeAll()
         selectedItemID = nil
+        selectedDestination = .library(.archived)
+        reload()
     }
 
     func saveItem(_ draft: SecretItemDraft) {
@@ -472,11 +524,6 @@ final class VaultViewModel {
         restore(selectedItem)
     }
 
-    func deleteSelectedItem() {
-        guard let selectedItem else { return }
-        delete(selectedItem)
-    }
-
     func edit(_ item: SecretItemEntity) {
         selectedItemID = item.id
         activeSheet = .editItem(item.id)
@@ -511,13 +558,171 @@ final class VaultViewModel {
         updateArchiveState(for: item, isArchived: false)
     }
 
-    func delete(_ item: SecretItemEntity) {
+    // MARK: - Deletion confirmation
+
+    func requestDeletion(of items: [SecretItemEntity]) {
+        guard !items.isEmpty else { return }
+        itemsPendingDeletion = items
+    }
+
+    func requestDeletion(of item: SecretItemEntity) {
+        requestDeletion(of: [item])
+    }
+
+    func requestDeletionOfSelectedItem() {
+        guard let selectedItem else { return }
+        requestDeletion(of: selectedItem)
+    }
+
+    func requestDeletionOfMultiSelection() {
+        requestDeletion(of: multiSelectedItems)
+    }
+
+    func cancelItemDeletion() {
+        itemsPendingDeletion = []
+    }
+
+    func confirmItemDeletion() {
+        let targets = itemsPendingDeletion
+        itemsPendingDeletion = []
+        guard !targets.isEmpty else { return }
+        let deletedIDs = Set(targets.map(\.id))
         do {
-            try container.itemRepository.deleteItem(item)
-            reload()
+            for item in targets {
+                try container.itemRepository.deleteItem(item)
+            }
         } catch {
             alertMessage = error.localizedDescription
         }
+        multiSelectedIDs.subtract(deletedIDs)
+        if let selectedItemID, deletedIDs.contains(selectedItemID) {
+            self.selectedItemID = nil
+        }
+        reload()
+    }
+
+    var itemDeletionTitle: String {
+        switch itemsPendingDeletion.count {
+        case 0: "Delete item?"
+        case 1: "Delete “\(itemsPendingDeletion[0].title)”?"
+        default: "Delete \(itemsPendingDeletion.count) items?"
+        }
+    }
+
+    var itemDeletionConfirmLabel: String {
+        itemsPendingDeletion.count > 1 ? "Delete \(itemsPendingDeletion.count) Items" : "Delete"
+    }
+
+    var itemDeletionMessage: String {
+        let secretCount = itemsPendingDeletion.reduce(0) { total, item in
+            total + Self.visibleFields(in: resolvedFields(for: item)).filter(\.isSensitive).count
+        }
+        let base = itemsPendingDeletion.count > 1
+            ? "These items and all their fields will be permanently deleted."
+            : "This item and all its fields will be permanently deleted."
+        guard secretCount > 0 else { return "\(base) This cannot be undone." }
+        let noun = secretCount == 1 ? "stored secret" : "stored secrets"
+        return "\(base) That includes \(secretCount) \(noun). This cannot be undone — consider archiving instead."
+    }
+
+    // MARK: - Vault health
+
+    /// Audits stored secrets for weak, reused and stale entries.
+    /// Findings deliberately carry only item titles and field labels — never secret values —
+    /// so the report itself is safe to show, screenshot, or read aloud.
+    func vaultHealthReport() -> VaultHealthReport {
+        let active = items.filter { !$0.isArchived }
+        var findings: [VaultHealthFinding] = []
+
+        // Group sensitive values to spot reuse. Hashed so plaintext never lands in the report.
+        var occurrencesByDigest: [String: [(item: SecretItemEntity, label: String)]] = [:]
+
+        for item in active {
+            let fields = Self.visibleFields(in: resolvedFields(for: item))
+            for field in fields where field.isSensitive {
+                let digest = Self.digest(field.value)
+                occurrencesByDigest[digest, default: []].append((item, field.label))
+
+                let strength = PasswordStrength.evaluate(field.value)
+                if strength.needsAttention {
+                    findings.append(
+                        VaultHealthFinding(
+                            id: "weak-\(item.id.uuidString)-\(field.key)",
+                            kind: .weak,
+                            itemID: item.id,
+                            itemTitle: item.title,
+                            detail: "\(field.label) — \(strength.label.lowercased())"
+                        )
+                    )
+                }
+            }
+        }
+
+        for (_, occurrences) in occurrencesByDigest {
+            let distinctItems = Set(occurrences.map(\.item.id))
+            guard distinctItems.count > 1 else { continue }
+            let titles = occurrences.map(\.item.title).sorted()
+            for occurrence in occurrences {
+                let others = titles.filter { $0 != occurrence.item.title }
+                findings.append(
+                    VaultHealthFinding(
+                        id: "reused-\(occurrence.item.id.uuidString)-\(occurrence.label)",
+                        kind: .reused,
+                        itemID: occurrence.item.id,
+                        itemTitle: occurrence.item.title,
+                        detail: "\(occurrence.label) — also used in \(others.joined(separator: ", "))"
+                    )
+                )
+            }
+        }
+
+        let staleCutoff = Date().addingTimeInterval(-Self.staleItemInterval)
+        for item in active where item.updatedAt < staleCutoff {
+            let months = Int(Date().timeIntervalSince(item.updatedAt) / (30 * 24 * 3600))
+            findings.append(
+                VaultHealthFinding(
+                    id: "stale-\(item.id.uuidString)",
+                    kind: .stale,
+                    itemID: item.id,
+                    itemTitle: item.title,
+                    detail: "Not updated in about \(months) months"
+                )
+            )
+        }
+
+        return VaultHealthReport(
+            auditedItemCount: active.count,
+            findings: findings.sorted {
+                if $0.kind != $1.kind { return $0.kind.severity < $1.kind.severity }
+                return $0.itemTitle.localizedCaseInsensitiveCompare($1.itemTitle) == .orderedAscending
+            }
+        )
+    }
+
+    /// Items untouched for a year are surfaced as worth rotating or retiring.
+    private static let staleItemInterval: TimeInterval = 365 * 24 * 3600
+
+    private static func digest(_ value: String) -> String {
+        Data(SHA256.hash(data: Data(value.utf8))).base64EncodedString()
+    }
+
+    func selectItem(id: UUID) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        revealAndSelectItemFromPalette(item)
+    }
+
+    func openFieldURL(_ field: FieldResolvedValue) {
+        guard let url = FieldURLSupport.url(from: field.value) else {
+            alertMessage = "“\(field.label)” doesn't contain a web address that can be opened."
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    func copyGeneratedPassword(_ password: String) {
+        guard !password.isEmpty else { return }
+        maybeWarnForSensitiveCopy(isSensitive: true)
+        container.clipboard.copy(password, label: "Generated password")
     }
 
     func copyField(_ field: FieldResolvedValue) {
@@ -836,7 +1041,7 @@ final class VaultViewModel {
             return
         }
 
-        let oldByKey = Dictionary(uniqueKeysWithValues: draft.fieldDrafts.map { ($0.key, $0) })
+        let oldByKey = Dictionary(draft.fieldDrafts.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         let template = defaultTemplate(for: newType)
         let defs = template?.fieldDefinitions.sorted { $0.sortOrder < $1.sortOrder } ?? []
 
@@ -1155,14 +1360,31 @@ final class VaultViewModel {
 
     private func matchesSearchAndType(_ item: SecretItemEntity) -> Bool {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let matchesSearch = query.isEmpty
-            || item.title.localizedCaseInsensitiveContains(query)
-            || item.notes.localizedCaseInsensitiveContains(query)
-            || item.tags.contains(where: { $0.localizedCaseInsensitiveContains(query) })
-            || item.environmentValue.title.localizedCaseInsensitiveContains(query)
-            || item.fields.contains(where: { $0.labelSnapshot.localizedCaseInsensitiveContains(query) })
         let typeMatch = selectedType == nil || item.type == selectedType
-        return matchesSearch && typeMatch
+        guard !query.isEmpty else { return typeMatch }
+        return typeMatch && matchesQuery(item, query: query)
+    }
+
+    /// Every whitespace-separated token has to match somewhere, so "postgres prod" narrows
+    /// instead of matching either word.
+    private func matchesQuery(_ item: SecretItemEntity, query: String) -> Bool {
+        let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !tokens.isEmpty else { return true }
+        return tokens.allSatisfy { token in
+            item.title.localizedCaseInsensitiveContains(token)
+                || item.notes.localizedCaseInsensitiveContains(token)
+                || item.tags.contains(where: { $0.localizedCaseInsensitiveContains(token) })
+                || item.environmentValue.title.localizedCaseInsensitiveContains(token)
+                || item.type.title.localizedCaseInsensitiveContains(token)
+                || item.workspace?.name.localizedCaseInsensitiveContains(token) == true
+                || item.fields.contains { field in
+                    if field.labelSnapshot.localizedCaseInsensitiveContains(token) { return true }
+                    // Non-sensitive values only: matching on a password or token would let the
+                    // search box confirm a secret's contents without ever revealing it.
+                    guard !field.isSensitive else { return false }
+                    return field.plainValue.localizedCaseInsensitiveContains(token)
+                }
+        }
     }
 
     private func sortComparator(lhs: SecretItemEntity, rhs: SecretItemEntity) -> Bool {

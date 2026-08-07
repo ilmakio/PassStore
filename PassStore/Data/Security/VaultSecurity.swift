@@ -294,14 +294,33 @@ final class VaultSessionManager {
         }
     }
 
-    func changeMasterPassword(to password: String) throws {
-        guard !password.isEmpty else { throw VaultCryptoError.emptyPassword }
-        guard let activeVaultKey, var metadata else { throw VaultCryptoError.vaultLocked }
-        metadata.wrappedVaultKey = try cryptoService.wrapVaultKey(activeVaultKey, password: password)
+    /// Re-wraps the existing vault key under a new password. The vault key itself is unchanged, so
+    /// stored data needs no re-encryption and the biometric Keychain entry stays valid.
+    /// Requires the current password: an unlocked window should not be enough to lock the owner out.
+    func changeMasterPassword(current: String, to newPassword: String) throws {
+        guard lockState == .unlocked, let activeVaultKey, var metadata else {
+            throw VaultCryptoError.vaultLocked
+        }
+        guard !newPassword.isEmpty else { throw VaultCryptoError.emptyPassword }
+        guard newPassword.count >= Self.minimumPasswordLength else {
+            throw VaultCryptoError.passwordTooShort(Self.minimumPasswordLength)
+        }
+
+        isBusy = true
+        defer { isBusy = false }
+
+        // The AES-GCM auth tag makes a successful unwrap proof that `current` is right.
+        guard (try? cryptoService.unwrapVaultKey(metadata.wrappedVaultKey, password: current)) != nil else {
+            throw VaultCryptoError.incorrectCurrentPassword
+        }
+
+        metadata.wrappedVaultKey = try cryptoService.wrapVaultKey(activeVaultKey, password: newPassword)
         metadata.updatedAt = .now
         self.metadata = metadata
-        try saveCurrentVault()
+        try saveCurrentVault(metadataOverride: metadata)
     }
+
+    static let minimumPasswordLength = 8
 
     func syncBiometricPreferenceIfUnlocked() {
         guard lockState == .unlocked, let activeVaultKey, var metadata else {

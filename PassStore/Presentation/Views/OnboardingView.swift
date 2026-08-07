@@ -273,10 +273,12 @@ private struct PasswordStepView: View {
                 VStack(spacing: 10) {
                     SecureField("Password", text: $password)
                         .textFieldStyle(.roundedBorder)
+                        .onSubmit(submitIfReady)
                         .accessibilityIdentifier("onboarding-password-field")
 
                     SecureField("Confirm password", text: $confirmPassword)
                         .textFieldStyle(.roundedBorder)
+                        .onSubmit(submitIfReady)
                         .accessibilityIdentifier("onboarding-confirm-field")
                 }
                 .frame(width: 300)
@@ -312,98 +314,10 @@ private struct PasswordStepView: View {
         .frame(maxWidth: .infinity)
         .animation(.easeOut(duration: 0.15), value: showMismatch)
     }
-}
 
-// MARK: - Password Strength Bar
-
-private struct PasswordStrengthBar: View {
-    let password: String
-
-    private var strength: PasswordStrength {
-        PasswordStrength.evaluate(password)
-    }
-
-    var body: some View {
-        VStack(spacing: 4) {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(VaultChrome.mutedFill)
-                        .frame(height: 4)
-
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(strength.color)
-                        .frame(width: geometry.size.width * strength.fill, height: 4)
-                        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: strength)
-                }
-            }
-            .frame(height: 4)
-
-            HStack {
-                Text(strength.label)
-                    .font(.caption)
-                    .foregroundStyle(password.isEmpty ? .tertiary : .secondary)
-                Spacer()
-            }
-        }
-    }
-}
-
-private enum PasswordStrength: Equatable {
-    case empty
-    case tooShort
-    case weak
-    case fair
-    case strong
-    case veryStrong
-
-    var label: String {
-        switch self {
-        case .empty: "At least 8 characters"
-        case .tooShort: "Too short"
-        case .weak: "Weak"
-        case .fair: "Fair"
-        case .strong: "Strong"
-        case .veryStrong: "Very strong"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .empty: .clear
-        case .tooShort: .red
-        case .weak: .orange
-        case .fair: .yellow
-        case .strong: .green
-        case .veryStrong: .green
-        }
-    }
-
-    var fill: CGFloat {
-        switch self {
-        case .empty: 0
-        case .tooShort: 0.1
-        case .weak: 0.25
-        case .fair: 0.5
-        case .strong: 0.75
-        case .veryStrong: 1.0
-        }
-    }
-
-    static func evaluate(_ password: String) -> PasswordStrength {
-        guard !password.isEmpty else { return .empty }
-        guard password.count >= 8 else { return .tooShort }
-
-        let hasUpper = password.contains(where: \.isUppercase)
-        let hasLower = password.contains(where: \.isLowercase)
-        let hasDigit = password.contains(where: \.isNumber)
-        let hasSymbol = password.contains(where: { !$0.isLetter && !$0.isNumber })
-        let classes = [hasUpper, hasLower, hasDigit, hasSymbol].filter(\.self).count
-
-        if password.count >= 20, classes >= 4 { return .veryStrong }
-        if password.count >= 16, classes >= 3 { return .strong }
-        if password.count >= 12 || classes >= 3 { return .fair }
-        return .weak
+    private func submitIfReady() {
+        guard canContinue else { return }
+        onContinue()
     }
 }
 
@@ -519,6 +433,7 @@ private struct WorkspaceStepView: View {
                             .foregroundStyle(.secondary)
                         TextField("", text: $draft.name, prompt: Text("e.g. Production API"))
                             .textFieldStyle(.roundedBorder)
+                            .onSubmit { if canContinue { onContinue() } }
                             .accessibilityIdentifier("onboarding-workspace-name")
                     }
 
