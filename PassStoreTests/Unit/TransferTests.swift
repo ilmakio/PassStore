@@ -48,7 +48,7 @@ struct TransferTests {
         let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
         let backup = makeBackupPayload()
 
-        let exported = try service.exportFullBackup(backup: backup, password: "export-pass")
+        let exported = try service.exportFullBackupSynchronously(backup: backup, password: "export-pass")
         let string = String(decoding: exported, as: UTF8.self)
 
         #expect(!string.contains("Primary Postgres"))
@@ -73,8 +73,8 @@ struct TransferTests {
             sidebarEnvironmentsOrder: ["Prod", "Staging"]
         ))
 
-        let fileData = try service.exportFullBackup(backup: backup, password: "export-pass")
-        let imported = try service.importPayload(from: fileData, password: "export-pass")
+        let fileData = try service.exportFullBackupSynchronously(backup: backup, password: "export-pass")
+        let imported = try service.importPayloadSynchronously(from: fileData, password: "export-pass")
 
         guard case let .fullBackup(restored) = imported else {
             Issue.record("Expected a v3 full backup payload.")
@@ -109,8 +109,8 @@ struct TransferTests {
             notes: "ñ",
             secretValue: "🔐"
         )
-        let fileData = try service.exportFullBackup(backup: backup, password: unicodePassword)
-        let imported = try service.importPayload(from: fileData, password: unicodePassword)
+        let fileData = try service.exportFullBackupSynchronously(backup: backup, password: unicodePassword)
+        let imported = try service.importPayloadSynchronously(from: fileData, password: unicodePassword)
 
         guard case let .fullBackup(restored) = imported else {
             Issue.record("Expected a v3 full backup payload.")
@@ -125,9 +125,9 @@ struct TransferTests {
 
     @Test func exportImportFailsWithWrongPassword() throws {
         let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
-        let fileData = try service.exportFullBackup(backup: makeBackupPayload(title: "Item"), password: "good")
+        let fileData = try service.exportFullBackupSynchronously(backup: makeBackupPayload(title: "Item"), password: "good")
         #expect(throws: TransferError.wrongExportPassword) {
-            try service.importPayload(from: fileData, password: "wrong")
+            try service.importPayloadSynchronously(from: fileData, password: "wrong")
         }
     }
 }

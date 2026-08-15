@@ -7,30 +7,66 @@ struct MenuBarPanelView: View {
     /// bring back the main window once the user has closed it.
     let onOpenMainWindow: () -> Void
 
+    private var isLocked: Bool {
+        viewModel.vault.container.sessionManager.lockState != .unlocked
+    }
+
     var body: some View {
         Group {
-            if viewModel.vault.container.sessionManager.lockState != .unlocked {
-                Text("Unlock PassStore in the main window to copy secrets.")
-            } else if viewModel.quickItems.isEmpty {
-                Text("No favorite items with filled entries.")
+            if isLocked {
+                lockedContent
             } else {
-                ForEach(viewModel.quickItems, id: \.id) { item in
-                    MenuBarItemRow(
-                        item: item,
-                        fields: viewModel.quickFields(for: item),
-                        onCopy: { field in
-                            viewModel.vault.container.clipboard.copy(field.value, label: "\(item.title) • \(field.label)")
-                        }
-                    )
-                }
+                unlockedContent
             }
+
             Divider()
+
             Button {
                 NSApp.activate(ignoringOtherApps: true)
                 onOpenMainWindow()
             } label: {
                 Label("Open Main Window", systemImage: "macwindow")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var lockedContent: some View {
+        Text("PassStore is locked.")
+
+        // Unlocking used to require finding and opening the main window first, even when the
+        // Mac could do it with a fingerprint.
+        if viewModel.canUnlockWithBiometrics {
+            Button {
+                Task { await viewModel.unlockWithBiometrics() }
+            } label: {
+                Label("Unlock with Touch ID", systemImage: "touchid")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var unlockedContent: some View {
+        if viewModel.quickItems.isEmpty {
+            Text("No favourites yet — star an item to reach it from here.")
+        } else {
+            ForEach(viewModel.quickItems, id: \.id) { item in
+                MenuBarItemRow(
+                    item: item,
+                    fields: viewModel.quickFields(for: item),
+                    onCopy: { field in
+                        viewModel.copy(field, from: item)
+                    }
+                )
+            }
+        }
+
+        Divider()
+
+        Button {
+            viewModel.vault.container.sessionManager.lock()
+        } label: {
+            Label("Lock Vault", systemImage: "lock.fill")
         }
     }
 }
@@ -46,7 +82,7 @@ private struct MenuBarItemRow: View {
                 Button {
                     onCopy(field)
                 } label: {
-                    Label(field.label, systemImage: "doc.on.doc")
+                    Label(field.label, systemImage: field.isSensitive ? "lock.doc" : "doc.on.doc")
                 }
             }
         }

@@ -22,7 +22,11 @@ struct VaultViewModelTests {
         #expect(viewModel.filteredItems.first?.title == "Primary Postgres")
     }
 
-    @Test func typeFilterShowsItemsAcrossWorkspacesWhenWorkspaceWasSelected() throws {
+    /// The type filter narrows *within* the current workspace.
+    ///
+    /// It used to widen to the whole vault while the header still named the workspace, so the
+    /// title described a scope the list was not showing.
+    @Test func typeFilterNarrowsWithinTheSelectedWorkspace() throws {
         let container = AppContainer.preview()
         let viewModel = VaultViewModel(container: container)
 
@@ -33,9 +37,14 @@ struct VaultViewModelTests {
         #expect(viewModel.filteredItems.allSatisfy { $0.workspace?.id == infra.id })
 
         viewModel.setSelectedType(.database)
-        #expect(viewModel.filteredItems.contains { $0.title == "Primary Postgres" })
         #expect(viewModel.filteredItems.allSatisfy { $0.type == .database })
-        #expect(viewModel.filteredItems.contains { $0.workspace?.id == backend.id })
+        #expect(viewModel.filteredItems.allSatisfy { $0.workspace?.id == infra.id })
+        #expect(!viewModel.filteredItems.contains { $0.workspace?.id == backend.id })
+
+        // Browsing by type from the library still spans every workspace.
+        viewModel.selectDestination(.library(.allItems))
+        viewModel.setSelectedType(.database)
+        #expect(viewModel.filteredItems.contains { $0.title == "Primary Postgres" })
     }
 
     @Test func visibleFieldsExcludeResolvedEmptyValues() {

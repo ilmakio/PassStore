@@ -213,7 +213,16 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             item = existing
             isNewItem = false
         } else {
-            item = SecretItemEntity(title: draft.title, type: draft.type, environment: draft.environment)
+            // Honour an explicit id when creating. It used to be discarded, so restoring an
+            // item from a backup produced a brand-new id — which meant importing the same
+            // backup twice duplicated everything, and nothing could be matched against what
+            // the vault already held.
+            item = SecretItemEntity(
+                id: draft.id ?? UUID(),
+                title: draft.title,
+                type: draft.type,
+                environment: draft.environment
+            )
             store.items.append(item)
             isNewItem = true
         }

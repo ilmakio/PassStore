@@ -1326,6 +1326,15 @@ final class VaultViewModel {
     /// Summary of `stagedImport`, shown by the preview sheet.
     private(set) var importPreview: ImportPreview?
 
+    /// Stages backup bytes that are already in memory.
+    ///
+    /// The picker path goes through `applyImportFilePickerResult`; this is the same step for
+    /// callers that already hold the data.
+    func stageImport(data: Data, fileName: String) {
+        pendingImportFileData = data
+        importExportSelectedFileName = fileName
+    }
+
     /// Decrypts the chosen file and produces a summary. Nothing is written yet.
     @discardableResult
     func prepareImport(password: String) async -> Bool {
@@ -2239,7 +2248,6 @@ final class VaultViewModel {
 @Observable
 final class MenuBarViewModel {
     let vault: VaultViewModel
-    var searchText = ""
 
     init(vault: VaultViewModel) {
         self.vault = vault
@@ -2247,30 +2255,42 @@ final class MenuBarViewModel {
 
     var quickItems: [SecretItemEntity] {
         vault.items
-            .filter(\.isFavorite)
+            .filter { $0.isFavorite && !$0.isArchived }
             .filter { !quickFields(for: $0).isEmpty }
-            .filter {
-                searchText.isEmpty
-                || $0.title.localizedCaseInsensitiveContains(searchText)
-                || $0.tags.contains(where: { tag in tag.localizedCaseInsensitiveContains(searchText) })
-                || quickFields(for: $0).contains(where: {
-                    $0.label.localizedCaseInsensitiveContains(searchText)
-                        || $0.key.localizedCaseInsensitiveContains(searchText)
-                })
-            }
             .sorted {
                 let lhsDate = $0.lastAccessedAt ?? $0.updatedAt
                 let rhsDate = $1.lastAccessedAt ?? $1.updatedAt
                 if lhsDate != rhsDate { return lhsDate > rhsDate }
                 return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
             }
-            .prefix(8)
+            .prefix(Self.quickItemLimit)
             .map { $0 }
     }
+
+    private static let quickItemLimit = 8
 
     func quickFields(for item: SecretItemEntity) -> [FieldResolvedValue] {
         vault.resolvedFields(for: item)
             .filter(\.isCopyable)
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    var canUnlockWithBiometrics: Bool {
+        vault.container.sessionManager.canAttemptBiometricUnlock
+    }
+
+    func unlockWithBiometrics() async {
+        await vault.container.sessionManager.unlockWithBiometrics()
+        vault.reload()
+    }
+
+    /// Copies through the view model rather than straight to the pasteboard.
+    ///
+    /// Copying from the menu bar used to bypass the first-time "this goes through the system
+    /// clipboard" warning, and never stamped "last used" — so the menu bar's own
+    /// most-recently-used ordering never actually moved.
+    func copy(_ field: FieldResolvedValue, from item: SecretItemEntity) {
+        vault.copyField(field)
+        try? vault.container.itemRepository.recordItemAccess(item)
     }
 }

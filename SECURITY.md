@@ -51,6 +51,18 @@ The canonical **user-facing** security write-up (threat model, session, clipboar
 
 - Default location: `~/Library/Application Support/app.makio.PassStore/` (or the app bundle id), directory `0700`, `vault.enc` / `vault.meta` `0600`, atomic writes.
 
+**Previous values (1.2.0)**
+
+- Replacing a secret keeps the value it replaced, capped at 10 versions per field, inside the same encrypted payload as everything else. This is opt-out (Settings → Data), purgeable per item and vault-wide, and cleared from memory on lock along with the live values. It does mean a rotated secret stays recoverable from the vault until purged — rotate *and* purge if a value was leaked.
+
+**Linked files (1.2.0)**
+
+- An item may store a security-scoped bookmark to the `.env` it mirrors. The bookmark grants PassStore access to that one file; reads and writes happen only when you press Update or Write, and access is released immediately afterwards. No file is watched and nothing runs in the background.
+
+**Global shortcut**
+
+- ⌘⌥P is registered with the window server (`RegisterEventHotKey`). PassStore does not request Accessibility permission and does not observe keystrokes outside its own windows. Before 1.2.0 it installed a global `NSEvent` monitor, which required Accessibility and delivered every keystroke from every application to the app.
+
 **Memory**
 
 - Password bytes used in Argon2id and PBKDF2 paths are zeroed after derivation where the code controls the buffer; the in-memory vault key is cleared on lock; sensitive field values are overwritten when the vault locks (`VaultMemoryStore`). Swift `String` passwords cannot be reliably zeroed (platform limitation).
