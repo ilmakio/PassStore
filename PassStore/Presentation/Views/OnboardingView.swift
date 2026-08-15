@@ -28,6 +28,10 @@ struct OnboardingView: View {
     @State private var isCreating = false
     @State private var errorMessage: String?
     @State private var hasBiometricHardware = false
+    /// Set from the welcome step. A restore still needs a master password and a vault to
+    /// restore into, so the flow is unchanged — it just opens the import sheet at the end
+    /// instead of leaving a new arrival to find it in a menu.
+    @State private var wantsBackupRestore = false
 
     private var steps: [OnboardingStep] {
         var s: [OnboardingStep] = [.welcome, .masterPassword]
@@ -63,7 +67,10 @@ struct OnboardingView: View {
                 ZStack {
                     switch currentStep {
                     case .welcome:
-                        WelcomeStepView(onContinue: goNext)
+                        WelcomeStepView(onContinue: goNext, onRestore: {
+                            wantsBackupRestore = true
+                            goNext()
+                        })
                             .transition(stepTransition)
                     case .masterPassword:
                         PasswordStepView(
@@ -92,8 +99,13 @@ struct OnboardingView: View {
                         )
                         .transition(stepTransition)
                     case .ready:
-                        ReadyStepView(onComplete: onComplete)
-                            .transition(stepTransition)
+                        ReadyStepView(wantsBackupRestore: wantsBackupRestore) {
+                            if wantsBackupRestore {
+                                viewModel.activeSheet = .importEncryptedExport
+                            }
+                            onComplete()
+                        }
+                        .transition(stepTransition)
                     }
                 }
                 .frame(maxWidth: 450)
@@ -141,15 +153,21 @@ struct OnboardingView: View {
     // MARK: - Vault Creation
 
     private func completeOnboarding() {
+        Task { await createVault() }
+    }
+
+    private func createVault() async {
         isCreating = true
         errorMessage = nil
+        defer { isCreating = false }
 
         settings.biometricsEnabled = enableTouchID
-        sessionManager.createVault(password: password)
+        // Key derivation runs off the main actor, so the step stays responsive and the
+        // "Creating your vault…" state is actually visible rather than a frozen window.
+        await sessionManager.createVault(password: password)
 
         if let error = sessionManager.lastErrorMessage {
             errorMessage = error
-            isCreating = false
             return
         }
 
@@ -157,8 +175,6 @@ struct OnboardingView: View {
         if !trimmedName.isEmpty {
             viewModel.saveWorkspace(workspaceDraft)
         }
-
-        isCreating = false
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
             previousStep = currentStep
@@ -189,6 +205,7 @@ private struct OnboardingStepIndicator: View {
 
 private struct WelcomeStepView: View {
     let onContinue: () -> Void
+    let onRestore: () -> Void
 
     var body: some View {
         VStack(spacing: 24) {
@@ -209,9 +226,16 @@ private struct WelcomeStepView: View {
 
             Spacer()
 
-            Button("Get Started", action: onContinue)
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                .accessibilityIdentifier("onboarding-get-started")
+            VStack(spacing: VaultSpacing.m) {
+                Button("Get Started", action: onContinue)
+                    .buttonStyle(VaultButtonStyle(.primary))
+                    .accessibilityIdentifier("onboarding-get-started")
+
+                Button("I already have a backup", action: onRestore)
+                    .buttonStyle(.link)
+                    .font(.vaultFootnote)
+                    .accessibilityIdentifier("onboarding-restore-backup")
+            }
 
             Spacer()
                 .frame(height: 16)
@@ -528,6 +552,7 @@ private struct WorkspaceStepView: View {
 // MARK: - Ready Step
 
 private struct ReadyStepView: View {
+    var wantsBackupRestore = false
     let onComplete: () -> Void
     @State private var showCheck = false
 
@@ -545,16 +570,19 @@ private struct ReadyStepView: View {
             VStack(spacing: 8) {
                 Text("You're all set")
                     .font(.title3.weight(.semibold))
-                Text("Your vault is ready.\nStart adding your secrets.")
+                Text(wantsBackupRestore
+                     ? "Your vault is ready.\nNext, choose the .pstore backup to restore."
+                     : "Your vault is ready.\nStart adding your secrets.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
 
-            Button("Open PassStore", action: onComplete)
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+            Button(wantsBackupRestore ? "Choose Backup…" : "Open PassStore", action: onComplete)
+                .buttonStyle(VaultButtonStyle(.primary))
                 .accessibilityIdentifier("onboarding-open-app")
 
             Spacer()

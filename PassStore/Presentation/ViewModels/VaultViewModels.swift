@@ -134,14 +134,7 @@ final class VaultViewModel {
     }
 
     func itemCount(in section: LibrarySection) -> Int {
-        items.filter { item in
-            switch section {
-            case .allItems: !item.isArchived
-            case .favorites: item.isFavorite && !item.isArchived
-            case .recent: !item.isArchived
-            case .archived: item.isArchived
-            }
-        }.count
+        items.count { Self.matches(section: section, item: $0) }
     }
 
     func itemCount(inWorkspace id: UUID) -> Int {
@@ -185,11 +178,50 @@ final class VaultViewModel {
         builtInTemplates.filter { ![.generic, .websiteService].contains($0.itemType) }
     }
 
+    // MARK: - Filtered list (memoised)
+
+    /// Identity of one filtered-list result. When this is unchanged, so is the list.
+    private struct FilterFingerprint: Equatable {
+        let destination: VaultDestination
+        let type: SecretItemType?
+        let query: String
+        let sortOrder: ItemSortOrder
+        let generation: Int
+    }
+
+    /// Bumped by `reload()`; every mutation path funnels through it.
+    @ObservationIgnored private var vaultGeneration = 0
+    @ObservationIgnored private var filteredCache: (key: FilterFingerprint, value: [SecretItemEntity])?
+
+    /// The list the middle column shows.
+    ///
+    /// Memoised because it is read many times per render — the list body, the selection bar,
+    /// selection syncing and keyboard navigation all ask for it — and each miss was two
+    /// passes plus a sort over the whole vault.
     var filteredItems: [SecretItemEntity] {
-        items
+        // Touch `items` so SwiftUI still registers the dependency on a cache hit.
+        let all = items
+        let key = FilterFingerprint(
+            destination: selectedDestination,
+            type: selectedType,
+            query: searchText.trimmingCharacters(in: .whitespacesAndNewlines),
+            sortOrder: sortOrder,
+            generation: vaultGeneration
+        )
+        if let cached = filteredCache, cached.key == key {
+            return cached.value
+        }
+        let result = all
             .filter(matchesDestination)
             .filter(matchesSearchAndType)
             .sorted(by: sortComparator)
+        filteredCache = (key, result)
+        return result
+    }
+
+    var sortOrder: ItemSortOrder {
+        get { container.settings.itemSortOrder }
+        set { container.settings.itemSortOrder = newValue }
     }
 
     var destinationTitle: String {
@@ -268,6 +300,8 @@ final class VaultViewModel {
 
     func reload() {
         do {
+            vaultGeneration &+= 1
+            filteredCache = nil
             workspaces = try container.workspaceRepository.fetchAll(includeArchived: false)
             items = try container.itemRepository.fetchAll(includeArchived: true)
             templates = try container.templateRepository.fetchAll()
@@ -275,6 +309,15 @@ final class VaultViewModel {
         } catch {
             alertMessage = error.localizedDescription
         }
+    }
+
+    /// Invalidates the filtered-list cache without re-reading the store.
+    ///
+    /// Used by mutations that change an entity in place (favourite, last-used) where a full
+    /// `reload()` would be pure waste.
+    private func invalidateFilteredCache() {
+        vaultGeneration &+= 1
+        filteredCache = nil
     }
 
     func resetUnlockedSelection() {
@@ -326,13 +369,19 @@ final class VaultViewModel {
         syncSelectedItem()
     }
 
+    /// Selects a row and stamps "last used".
+    ///
+    /// The stamp used to trigger a synchronous full-vault re-encrypt plus a complete
+    /// `reload()` — every entity in the vault rebuilt — on every click. The repository now
+    /// coalesces the write, and the entity is observable, so nothing has to be reloaded.
     func select(_ item: SecretItemEntity?) {
-        selectedItemID = item?.id
         multiSelectedIDs.removeAll()
+        selectedItemID = item?.id
         guard let item else { return }
-        _ = try? container.itemRepository.recordItemAccess(item)
-        reload()
-        selectedItemID = item.id
+        try? container.itemRepository.recordItemAccess(item)
+        // Deliberately no cache invalidation: under a last-used sort, re-ordering the list
+        // under the pointer on every click would make it impossible to work down a list.
+        // The new order lands on the next natural refresh.
     }
 
     // MARK: - Multi-selection
@@ -839,6 +888,220 @@ final class VaultViewModel {
         SecretItemRepository.digest(value)
     }
 
+    // MARK: - Linked .env files
+    //
+    // A `.env` is not a one-off import: it changes, and re-importing it by hand meant
+    // find file → copy → paste → save, every time. An item now remembers the file it came
+    // from and can pull the latest contents in one click — or push its contents back out.
+
+    /// Compares the linked file with what the vault holds.
+    ///
+    /// Both sides are digested at the last successful sync, so a change can be attributed to
+    /// the file, to the vault, or to both, instead of guessing from timestamps.
+    func linkedFileStatus(for item: SecretItemEntity) -> LinkedFileStatus {
+        guard let link = item.linkedFile else { return .unlinked }
+        guard let contents = try? container.linkedFiles.read(link) else { return .unavailable }
+
+        let fileDigest = LinkedFileService.digest(contents)
+        let vaultDigest = LinkedFileService.digest(envContents(for: item))
+        let fileMoved = link.syncedDigest != nil && link.syncedDigest != fileDigest
+        let vaultMoved = link.syncedVaultDigest != nil && link.syncedVaultDigest != vaultDigest
+
+        switch (fileMoved, vaultMoved) {
+        case (false, false): return .upToDate
+        case (true, false): return .fileChanged
+        case (false, true): return .vaultChanged
+        case (true, true): return .diverged
+        }
+    }
+
+    /// The `.env` text this item currently represents.
+    func envContents(for item: SecretItemEntity) -> String {
+        let fields = Self.visibleFields(in: resolvedFields(for: item))
+        if item.linkedFile?.parsedIntoFields == false, let blob = fields.first(where: { $0.key == "env" }) {
+            return blob.value
+        }
+        return CopyFormatter.envFileContents(fields: fields)
+    }
+
+    /// Pulls the current file contents into the item.
+    @discardableResult
+    func updateItemFromLinkedFile(_ item: SecretItemEntity) -> Bool {
+        guard let link = item.linkedFile else {
+            alertMessage = LinkedFileError.noLink.localizedDescription
+            return false
+        }
+        do {
+            let contents = try container.linkedFiles.read(link)
+            // A pull rewrites every field, so it gets the same undo cover as a bulk edit.
+            captureUndo("Update from file")
+
+            var draft = makeDraft(from: item)
+            draft.id = item.id
+            applyEnvImportContent(
+                to: &draft,
+                raw: contents,
+                parseIntoEntries: link.parsedIntoFields,
+                suggestedTitle: nil
+            )
+
+            var updatedLink = link
+            updatedLink.syncedDigest = LinkedFileService.digest(contents)
+            updatedLink.syncedAt = .now
+            draft.linkedFile = updatedLink
+
+            let saved = try container.itemRepository.saveItem(draft)
+            // Digest the result rather than the draft: normalisation can change it.
+            updatedLink.syncedVaultDigest = LinkedFileService.digest(envContents(for: saved))
+            saved.linkedFile = updatedLink
+            try container.memoryStore.persist()
+
+            reload()
+            selectedItemID = saved.id
+            lastActionMessage = "Updated “\(saved.title)” from \(link.fileName)."
+            return true
+        } catch {
+            alertMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Writes the item's contents back over the linked file.
+    @discardableResult
+    func writeLinkedFile(from item: SecretItemEntity) -> Bool {
+        guard let link = item.linkedFile else {
+            alertMessage = LinkedFileError.noLink.localizedDescription
+            return false
+        }
+        do {
+            let contents = envContents(for: item)
+            try container.linkedFiles.write(contents, to: link)
+            var updatedLink = link
+            updatedLink.syncedDigest = LinkedFileService.digest(contents)
+            updatedLink.syncedVaultDigest = LinkedFileService.digest(contents)
+            updatedLink.syncedAt = .now
+            item.linkedFile = updatedLink
+            try container.memoryStore.persist()
+            invalidateFilteredCache()
+            lastActionMessage = "Wrote \(link.fileName)."
+            return true
+        } catch {
+            alertMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Attaches a file to an item, or replaces the existing link.
+    func linkFile(at url: URL, to item: SecretItemEntity, parsedIntoFields: Bool) {
+        var link = container.linkedFiles.makeLink(to: url, parsedIntoFields: parsedIntoFields)
+        if let contents = try? container.linkedFiles.read(link) {
+            link.syncedDigest = LinkedFileService.digest(contents)
+        }
+        link.syncedVaultDigest = LinkedFileService.digest(envContents(for: item))
+        link.syncedAt = .now
+        item.linkedFile = link
+        do {
+            try container.memoryStore.persist()
+            invalidateFilteredCache()
+            lastActionMessage = "Linked to \(link.fileName)."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func unlinkFile(from item: SecretItemEntity) {
+        item.linkedFile = nil
+        try? container.memoryStore.persist()
+        invalidateFilteredCache()
+    }
+
+    /// Opens a picker and links the chosen file. `showsHiddenFiles` matters: `.env` is hidden.
+    func chooseLinkedFile(for item: SecretItemEntity, parsedIntoFields: Bool) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.canChooseDirectories = false
+        panel.prompt = "Link"
+        panel.message = "Choose the .env file this item mirrors."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        linkFile(at: url, to: item, parsedIntoFields: parsedIntoFields)
+    }
+
+    /// Items whose linked file changed on disk. Recomputed when the window regains focus.
+    private(set) var itemsWithOutdatedLinks: [UUID] = []
+
+    /// Rechecks every linked file. Called when the window comes forward, so a `.env` edited
+    /// in an editor shows up as "changed" without any polling.
+    func refreshLinkedFileStatuses() {
+        guard container.settings.checksLinkedFilesOnFocus,
+              container.sessionManager.lockState == .unlocked else { return }
+        itemsWithOutdatedLinks = items
+            .filter { $0.linkedFile != nil }
+            .filter { linkedFileStatus(for: $0) == .fileChanged }
+            .map(\.id)
+    }
+
+    var outdatedLinkedFileCount: Int { itemsWithOutdatedLinks.count }
+
+    // MARK: - Secret value history
+
+    /// Fields on this item that have at least one recorded previous value.
+    func fieldsWithHistory(for item: SecretItemEntity) -> [FieldResolvedValue] {
+        resolvedFields(for: item).filter { !$0.previousValues.isEmpty }
+    }
+
+    var isValueHistoryEnabled: Bool {
+        container.settings.keepsSecretValueHistory
+    }
+
+    func copyPreviousValue(_ version: SecretValueVersion, label: String) {
+        maybeWarnForSensitiveCopy(isSensitive: true)
+        container.clipboard.copy(version.value, label: "\(label) (previous)")
+    }
+
+    /// Puts an old value back into the field. The value being replaced is itself pushed onto
+    /// the history, so restoring is reversible too.
+    func restorePreviousValue(_ version: SecretValueVersion, fieldKey: String, in item: SecretItemEntity) {
+        var draft = makeDraft(from: item)
+        draft.id = item.id
+        guard let index = draft.fieldDrafts.firstIndex(where: { $0.key == fieldKey }) else { return }
+        guard draft.fieldDrafts[index].value != version.value else { return }
+        captureUndo("Value restore")
+        draft.fieldDrafts[index].value = version.value
+        saveItem(draft)
+        lastActionMessage = "Restored the previous value of “\(draft.fieldDrafts[index].label)”."
+    }
+
+    func purgeValueHistory(for item: SecretItemEntity) {
+        do {
+            captureUndo("History purge")
+            try container.itemRepository.purgeValueHistory(for: item)
+            reload()
+            lastActionMessage = "Previous values for “\(item.title)” deleted."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func purgeAllValueHistory() {
+        do {
+            captureUndo("History purge")
+            try container.itemRepository.purgeAllValueHistory()
+            reload()
+            lastActionMessage = "All stored previous values deleted."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// How many previous values are stored across the whole vault — shown in Settings so the
+    /// trade-off is visible rather than implicit.
+    var storedPreviousValueCount: Int {
+        items.reduce(0) { total, item in
+            total + item.fields.reduce(0) { $0 + $1.previousValues.count }
+        }
+    }
+
     func selectItem(id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
         revealAndSelectItemFromPalette(item)
@@ -898,8 +1161,43 @@ final class VaultViewModel {
         container.clipboard.copy(value, label: "Connection String")
     }
 
+    // MARK: - Undo
+
+    /// One reversible step: the whole vault as it was, plus what the action was called.
+    private struct UndoStep {
+        let snapshot: VaultSnapshot
+        let label: String
+    }
+
+    /// Single-level undo for actions that destroy or rewrite data in bulk.
+    ///
+    /// Snapshots are cheap relative to the operations they guard (delete, bulk edit,
+    /// restore-from-backup), and one level is enough to cover "that wasn't what I meant"
+    /// without turning the vault into a document store.
+    @ObservationIgnored private var undoStep: UndoStep?
+
+    var undoActionLabel: String? { undoStep?.label }
+
+    /// Captures the current vault before a destructive action.
+    private func captureUndo(_ label: String) {
+        guard container.sessionManager.lockState == .unlocked else { return }
+        undoStep = UndoStep(snapshot: container.memoryStore.makeSnapshot(), label: label)
+    }
+
+    func undoLastDestructiveAction() {
+        guard let step = undoStep else { return }
+        undoStep = nil
+        do {
+            try container.memoryStore.replaceContents(with: step.snapshot)
+            reload()
+            lastActionMessage = "Undid \(step.label.lowercased())."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
     @discardableResult
-    func exportSelectedItems(password: String, confirmation: String) -> Bool {
+    func exportSelectedItems(password: String, confirmation: String) async -> Bool {
         guard container.sessionManager.lockState == .unlocked else {
             alertMessage = TransferError.missingPassword.localizedDescription
             return false
@@ -916,8 +1214,12 @@ final class VaultViewModel {
             vault: container.memoryStore.makeSnapshot(),
             settings: container.settings.makeSettingsSnapshot()
         )
+        isWorking = true
+        defer { isWorking = false }
         do {
-            let data = try container.exportService.exportFullBackup(backup: backup, password: password)
+            // Wrapping the export key is a full Argon2id pass; on the main actor it froze
+            // the sheet for about a second with no indication anything was happening.
+            let data = try await container.exportService.exportFullBackup(backup: backup, password: password)
             pendingExportData = data
             return true
         } catch {
@@ -925,6 +1227,9 @@ final class VaultViewModel {
             return false
         }
     }
+
+    /// True while a long crypto operation is running, so sheets can show a spinner.
+    var isWorking = false
 
     /// Run after the export SwiftUI sheet dismisses; presents the system save UI via SwiftUI `fileExporter` (works with App Sandbox write entitlement).
     func completeExportAfterSheetDismissed() {
@@ -971,8 +1276,21 @@ final class VaultViewModel {
         importExportSelectedFileName = nil
     }
 
+    // MARK: - Backup import
+    //
+    // Restoring a backup used to run the moment the password was accepted: a v3 file silently
+    // replaced every workspace, item, template and preference in the vault, with no summary,
+    // no confirmation and no way back. It is now a two-step flow — decrypt and summarise,
+    // then apply the way the owner chooses — and the previous vault is copied aside first.
+
+    /// Decrypted backup waiting for the owner to choose how to apply it.
+    @ObservationIgnored private var stagedImport: ImportedPayload?
+    /// Summary of `stagedImport`, shown by the preview sheet.
+    private(set) var importPreview: ImportPreview?
+
+    /// Decrypts the chosen file and produces a summary. Nothing is written yet.
     @discardableResult
-    func importEncryptedExport(password: String) -> Bool {
+    func prepareImport(password: String) async -> Bool {
         guard container.sessionManager.lockState == .unlocked else {
             alertMessage = "Unlock the vault before importing."
             return false
@@ -985,35 +1303,246 @@ final class VaultViewModel {
             alertMessage = TransferError.importFileMissing.localizedDescription
             return false
         }
+
+        isWorking = true
+        defer { isWorking = false }
+
         do {
-            let imported = try container.exportService.importPayload(from: fileData, password: password)
-            switch imported {
-            case let .fullBackup(backup):
-                try container.memoryStore.replaceContents(with: backup.vault)
-                container.settings.applySettings(from: backup.settings)
-                reload()
-            case let .legacyItems(payloads):
-                guard !payloads.isEmpty else {
-                    alertMessage = "The export file contains no items."
-                    return false
-                }
-                for payload in payloads {
-                    let workspaceID = try resolveOrCreateWorkspaceID(named: payload.workspaceName)
-                    let draft = makeDraft(fromExportedPayload: payload, workspaceID: workspaceID)
-                    _ = try container.itemRepository.saveItem(draft)
-                }
-                reload()
-            }
-            pendingImportFileData = nil
-            importExportSelectedFileName = nil
+            let imported = try await container.exportService.importPayload(from: fileData, password: password)
+            stagedImport = imported
+            importPreview = makePreview(for: imported, fileName: importExportSelectedFileName ?? "backup.pstore")
             return true
-        } catch let error as TransferError {
-            alertMessage = error.localizedDescription
-            return false
         } catch {
             alertMessage = error.localizedDescription
             return false
         }
+    }
+
+    func cancelStagedImport() {
+        stagedImport = nil
+        importPreview = nil
+    }
+
+    private func makePreview(for imported: ImportedPayload, fileName: String) -> ImportPreview {
+        switch imported {
+        case let .fullBackup(backup):
+            let existing = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var identical = 0
+            var conflicting = 0
+            for incoming in backup.vault.items {
+                guard let current = existing[incoming.id] else { continue }
+                if Self.isSameContent(current, incoming) { identical += 1 } else { conflicting += 1 }
+            }
+            return ImportPreview(
+                itemCount: backup.vault.items.count,
+                workspaceCount: backup.vault.workspaces.count,
+                templateCount: backup.vault.customTemplates.count,
+                createdAt: nil,
+                fileName: fileName,
+                conflictingItemCount: conflicting,
+                identicalItemCount: identical,
+                isLegacyFormat: false
+            )
+        case let .legacyItems(payloads):
+            return ImportPreview(
+                itemCount: payloads.count,
+                workspaceCount: Set(payloads.compactMap(\.workspaceName)).count,
+                templateCount: 0,
+                createdAt: nil,
+                fileName: fileName,
+                conflictingItemCount: 0,
+                identicalItemCount: 0,
+                isLegacyFormat: true
+            )
+        }
+    }
+
+    /// Compares an in-memory item with a snapshot on the fields a person would call content.
+    private static func isSameContent(_ item: SecretItemEntity, _ snapshot: SecretItemSnapshot) -> Bool {
+        guard item.title == snapshot.title,
+              item.typeRawValue == snapshot.typeRawValue,
+              item.notes == snapshot.notes,
+              item.tagsRawValue == snapshot.tagsRawValue,
+              item.fields.count == snapshot.fields.count else { return false }
+        let current = Dictionary(item.fields.map { ($0.fieldKey, $0.plainValue) }, uniquingKeysWith: { first, _ in first })
+        return snapshot.fields.allSatisfy { current[$0.fieldKey] == $0.plainValue }
+    }
+
+    /// Writes the staged backup into the vault.
+    @discardableResult
+    func applyStagedImport(mode: ImportPreview.Mode) -> ImportOutcome? {
+        guard let imported = stagedImport else {
+            alertMessage = TransferError.importFileMissing.localizedDescription
+            return nil
+        }
+
+        // Two safety nets: an in-session undo, and a copy of the encrypted files so the
+        // import survives being wrong even after a relaunch.
+        captureUndo(mode == .replace ? "Vault replacement" : "Backup merge")
+        try? container.sessionManager.writeRollbackCopy()
+
+        do {
+            let outcome: ImportOutcome
+            switch imported {
+            case let .fullBackup(backup):
+                outcome = try applyFullBackup(backup, mode: mode)
+            case let .legacyItems(payloads):
+                outcome = try applyLegacyItems(payloads, mode: mode)
+            }
+            stagedImport = nil
+            importPreview = nil
+            pendingImportFileData = nil
+            importExportSelectedFileName = nil
+            reload()
+            lastActionMessage = outcome.summary
+            return outcome
+        } catch {
+            alertMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func applyFullBackup(_ backup: ExportedBackupPayload, mode: ImportPreview.Mode) throws -> ImportOutcome {
+        switch mode {
+        case .replace:
+            try container.memoryStore.replaceContents(with: backup.vault)
+            container.settings.applySettings(from: backup.settings)
+            // The restored preference and the Keychain entry must not disagree: a backup that
+            // says "biometrics on" does not by itself put a usable key in this Mac's Keychain.
+            container.sessionManager.syncBiometricPreferenceIfUnlocked()
+            return ImportOutcome(
+                mode: .replace,
+                addedItems: backup.vault.items.count,
+                addedWorkspaces: backup.vault.workspaces.count,
+                skippedIdentical: 0
+            )
+        case .merge:
+            return try mergeSnapshot(backup.vault)
+        }
+    }
+
+    /// Adds what the backup has and the vault does not. Nothing existing is overwritten.
+    ///
+    /// An incoming item whose id already exists is imported as a *new* item rather than
+    /// replacing the local one — losing a local edit to a silent id collision would defeat
+    /// the point of offering merge at all. Byte-identical items are skipped.
+    private func mergeSnapshot(_ snapshot: VaultSnapshot) throws -> ImportOutcome {
+        var addedWorkspaces = 0
+        var workspaceRemap: [UUID: UUID] = [:]
+        let existingWorkspaces = try container.workspaceRepository.fetchAll(includeArchived: true)
+        let existingWorkspaceIDs = Set(existingWorkspaces.map(\.id))
+
+        for incoming in snapshot.workspaces {
+            if existingWorkspaceIDs.contains(incoming.id) {
+                workspaceRemap[incoming.id] = incoming.id
+                continue
+            }
+            if let sameName = existingWorkspaces.first(where: {
+                $0.name.localizedCaseInsensitiveCompare(incoming.name) == .orderedSame
+            }) {
+                workspaceRemap[incoming.id] = sameName.id
+                continue
+            }
+            let created = try container.workspaceRepository.saveWorkspace(
+                WorkspaceDraft(
+                    id: nil,
+                    name: incoming.name,
+                    icon: incoming.icon,
+                    colorHex: incoming.colorHex,
+                    notes: incoming.notes
+                )
+            )
+            workspaceRemap[incoming.id] = created.id
+            addedWorkspaces += 1
+        }
+
+        let existingItems = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var added = 0
+        var skipped = 0
+
+        for incoming in snapshot.items {
+            if let current = existingItems[incoming.id] {
+                if Self.isSameContent(current, incoming) {
+                    skipped += 1
+                    continue
+                }
+            }
+            var draft = Self.draft(from: incoming, workspaceID: incoming.workspaceID.flatMap { workspaceRemap[$0] })
+            if existingItems[incoming.id] != nil {
+                // Same id, different contents: keep both, and say which one arrived.
+                draft.id = nil
+                draft.title = "\(incoming.title) (imported)"
+            }
+            _ = try container.itemRepository.saveItem(draft)
+            added += 1
+        }
+
+        return ImportOutcome(mode: .merge, addedItems: added, addedWorkspaces: addedWorkspaces, skippedIdentical: skipped)
+    }
+
+    private static func draft(from snapshot: SecretItemSnapshot, workspaceID: UUID?) -> SecretItemDraft {
+        SecretItemDraft(
+            id: snapshot.id,
+            title: snapshot.title,
+            type: SecretItemType(rawValue: snapshot.typeRawValue) ?? .generic,
+            workspaceID: workspaceID,
+            environment: snapshot.environmentRawValue == EnvironmentKind.custom.rawValue
+                ? .custom(snapshot.customEnvironmentName ?? "Custom")
+                : .preset(EnvironmentKind(rawValue: snapshot.environmentRawValue) ?? .dev),
+            notes: snapshot.notes,
+            tags: snapshot.tagsRawValue.split(separator: ",").map(String.init),
+            isFavorite: snapshot.isFavorite,
+            isArchived: snapshot.isArchived,
+            fieldDrafts: snapshot.fields.sorted { $0.sortOrder < $1.sortOrder }.enumerated().map { index, field in
+                FieldDraft(
+                    key: field.fieldKey,
+                    label: field.labelSnapshot,
+                    value: field.plainValue,
+                    kind: FieldKind(rawValue: field.kindRawValue) ?? .text,
+                    isSensitive: field.isSensitive,
+                    isCopyable: field.isCopyable,
+                    isMasked: field.isMasked,
+                    sortOrder: index
+                )
+            },
+            templateID: snapshot.templateID,
+            linkedFile: snapshot.linkedFile
+        )
+    }
+
+    private func applyLegacyItems(_ payloads: [ExportedItemPayload], mode: ImportPreview.Mode) throws -> ImportOutcome {
+        guard !payloads.isEmpty else {
+            throw TransferError.invalidExportFile
+        }
+        // A legacy export carries items only, so "replace" would delete workspaces and
+        // templates the file cannot restore. It always merges.
+        for payload in payloads {
+            let workspaceID = try resolveOrCreateWorkspaceID(named: payload.workspaceName)
+            let draft = makeDraft(fromExportedPayload: payload, workspaceID: workspaceID)
+            _ = try container.itemRepository.saveItem(draft)
+        }
+        return ImportOutcome(mode: .merge, addedItems: payloads.count, addedWorkspaces: 0, skippedIdentical: 0)
+    }
+
+    // MARK: Rollback
+
+    /// Date of the pre-import copy on disk, if one exists.
+    var rollbackCopyDate: Date? {
+        container.sessionManager.rollbackCopyDate()
+    }
+
+    /// Puts the pre-import vault back and locks, so the restored file is read from scratch.
+    func restoreRollbackCopy() {
+        do {
+            try container.sessionManager.restoreRollbackCopy()
+            lastActionMessage = "Previous vault restored. Unlock to continue."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func discardRollbackCopy() {
+        container.sessionManager.discardRollbackCopy()
     }
 
     private func resolveOrCreateWorkspaceID(named name: String?) throws -> UUID? {
@@ -1130,6 +1659,15 @@ final class VaultViewModel {
 
     func draftForSelectedItem() -> SecretItemDraft {
         selectedItem.map(makeDraft(from:)) ?? newItemDraft()
+    }
+
+    /// Editor draft for a specific item, independent of what is selected.
+    func draft(forItemID id: UUID) -> SecretItemDraft {
+        items.first(where: { $0.id == id }).map(makeDraft(from:)) ?? draftForSelectedItem()
+    }
+
+    func item(withID id: UUID) -> SecretItemEntity? {
+        items.first(where: { $0.id == id })
     }
 
     func newItemDraft(template: SecretFieldTemplateEntity? = nil) -> SecretItemDraft {
@@ -1316,7 +1854,8 @@ final class VaultViewModel {
                     secretReference: item.fields.first(where: { $0.fieldKey == field.key })?.secretReference
                 )
             },
-            templateID: item.template?.id
+            templateID: item.template?.id,
+            linkedFile: item.linkedFile
         )
     }
 
@@ -1366,6 +1905,11 @@ final class VaultViewModel {
             .lowercased()
     }
 
+    /// Archives or restores in place.
+    ///
+    /// This used to jump the sidebar to Archived (or All Items) afterwards, so archiving one
+    /// item while working inside a workspace threw you out of that workspace. The selection
+    /// is simply cleared when the item leaves the current destination.
     private func updateArchiveState(for item: SecretItemEntity, isArchived: Bool) {
         var draft = makeDraft(from: item)
         draft.id = item.id
@@ -1373,12 +1917,36 @@ final class VaultViewModel {
         do {
             let saved = try container.itemRepository.saveItem(draft)
             reload()
-            selectedDestination = isArchived ? .library(.archived) : .library(.allItems)
-            selectedItemID = saved.id
+            if filteredItems.contains(where: { $0.id == saved.id }) {
+                selectedItemID = saved.id
+            } else {
+                selectedItemID = nil
+                lastActionMessage = isArchived
+                    ? "“\(saved.title)” archived."
+                    : "“\(saved.title)” restored."
+            }
         } catch {
             alertMessage = error.localizedDescription
         }
     }
+
+    // MARK: - Transient status message
+
+    /// Short confirmation shown in the list footer — used when something succeeded but the
+    /// result moved out of view, which otherwise looks like nothing happened.
+    var lastActionMessage: String? {
+        didSet {
+            guard lastActionMessage != nil else { return }
+            statusMessageDismissal?.cancel()
+            statusMessageDismissal = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                self?.lastActionMessage = nil
+            }
+        }
+    }
+
+    @ObservationIgnored private var statusMessageDismissal: Task<Void, Never>?
 
     private func buildEnvImportDraft(from string: String, suggestedTitle: String, parseIntoEntries: Bool) -> SecretItemDraft {
         if parseIntoEntries {
@@ -1468,26 +2036,33 @@ final class VaultViewModel {
     private func matchesDestination(_ item: SecretItemEntity) -> Bool {
         switch selectedDestination {
         case let .library(section):
-            switch section {
-            case .allItems:
-                return !item.isArchived
-            case .favorites:
-                return item.isFavorite && !item.isArchived
-            case .recent:
-                return !item.isArchived
-            case .archived:
-                return item.isArchived
-            }
+            return Self.matches(section: section, item: item)
         case let .workspace(id):
-            // Browsing by type: show matching items across every workspace (not only the last-selected one).
-            if selectedType != nil {
-                return !item.isArchived
-            }
+            // The type filter narrows within the workspace. It used to widen to the whole
+            // vault while the header still named the workspace, so the title described a
+            // scope the list was not showing.
             return item.workspace?.id == id && !item.isArchived
         case let .tag(tag):
             return item.tags.contains(tag) && !item.isArchived
         case let .environment(environment):
             return item.environmentValue.title == environment && !item.isArchived
+        }
+    }
+
+    /// Shared by the list filter and the sidebar badges so a count can never disagree with
+    /// what clicking it shows.
+    private static func matches(section: LibrarySection, item: SecretItemEntity) -> Bool {
+        switch section {
+        case .allItems:
+            !item.isArchived
+        case .favorites:
+            item.isFavorite && !item.isArchived
+        // "Recent" used to be an exact copy of "All Items" with a different sort — same rows,
+        // same badge. It now means what it says: things actually opened.
+        case .recent:
+            !item.isArchived && item.lastAccessedAt != nil
+        case .archived:
+            item.isArchived
         }
     }
 
@@ -1520,14 +2095,35 @@ final class VaultViewModel {
         }
     }
 
+    /// "Recent" is the one destination that defines its own order — it exists to answer
+    /// "what did I just use?" — so it ignores the chosen sort. Everywhere else the sort is
+    /// the owner's choice rather than a hard-coded A-Z.
+    private var effectiveSortOrder: ItemSortOrder {
+        if case .library(.recent) = selectedDestination { return .recentlyUsed }
+        return sortOrder
+    }
+
     private func sortComparator(lhs: SecretItemEntity, rhs: SecretItemEntity) -> Bool {
-        if case .library(.recent) = selectedDestination {
-            if lhs.updatedAt != rhs.updatedAt {
-                return lhs.updatedAt > rhs.updatedAt
+        switch effectiveSortOrder {
+        case .title:
+            break
+        case .recentlyUsed:
+            // Never used sorts below everything used, rather than pretending it was used at
+            // the epoch or at its edit date.
+            let lhsDate = lhs.lastAccessedAt
+            let rhsDate = rhs.lastAccessedAt
+            if lhsDate != rhsDate {
+                switch (lhsDate, rhsDate) {
+                case let (l?, r?): return l > r
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: break
+                }
             }
-            if lhs.createdAt != rhs.createdAt {
-                return lhs.createdAt > rhs.createdAt
-            }
+        case .recentlyUpdated:
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        case .newestFirst:
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
         }
         return compareByTitleThenWorkspace(lhs: lhs, rhs: rhs)
     }

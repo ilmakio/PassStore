@@ -35,7 +35,7 @@ enum VaultCryptoError: LocalizedError {
     }
 }
 
-struct VaultCryptoService {
+struct VaultCryptoService: Sendable {
     let defaultIterations: Int
     /// Argon2id opslimit (number of passes). Default: 3 = OPSLIMIT_MODERATE.
     let defaultOpsLimit: Int
@@ -215,6 +215,43 @@ struct VaultCryptoService {
     }
 }
 
+// MARK: - Off-main key derivation
+//
+// Argon2id is deliberately expensive: 256 MB and three passes take the better part of a
+// second. Running that on the main actor froze the whole window on every unlock, every
+// password change and every backup — and because the work was synchronous, the `isBusy`
+// flag was set and cleared within one runloop turn, so no spinner ever rendered.
+//
+// Only pure value types cross the boundary here (`Data`, the Codable envelopes, and the
+// service itself), so no store or view model is touched off the main actor.
+
+extension VaultCryptoService {
+    func wrapVaultKeyOffMain(_ vaultKey: Data, password: String) async throws -> WrappedVaultKey {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try wrapVaultKey(vaultKey, password: password)
+        }.value
+    }
+
+    func unwrapVaultKeyOffMain(_ wrappedKey: WrappedVaultKey, password: String) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try unwrapVaultKey(wrappedKey, password: password)
+        }.value
+    }
+
+    /// Unwraps the vault key and decrypts the payload in a single hop off the main actor.
+    func openVaultOffMain(
+        metadata: VaultMetadata,
+        envelope: VaultEnvelope,
+        password: String
+    ) async throws -> (vaultKey: Data, snapshot: VaultSnapshot) {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            let vaultKey = try unwrapVaultKey(metadata.wrappedVaultKey, password: password)
+            let snapshot = try decryptVault(envelope, using: vaultKey)
+            return (vaultKey, snapshot)
+        }.value
+    }
+}
+
 @MainActor
 final class VaultMemoryStore {
     var workspaces: [WorkspaceEntity] = []
@@ -225,6 +262,11 @@ final class VaultMemoryStore {
     var masterPasswordHistory: [MasterPasswordChangeEntry] = []
     private let builtInTemplates: [SecretFieldTemplateEntity]
     private var persistHandler: (() throws -> Void)?
+
+    /// Pending coalesced write scheduled by `persistSoon`.
+    private var deferredPersist: Task<Void, Never>?
+    /// Set when a deferred write is owed, so `flushPendingPersist` knows whether to do anything.
+    private var hasUnsavedDeferredChanges = false
 
     init(builtInTemplates: [SecretFieldTemplateEntity]? = nil) {
         self.builtInTemplates = builtInTemplates ?? BuiltInTemplates.entities()
@@ -244,11 +286,16 @@ final class VaultMemoryStore {
     }
 
     func clear() {
+        // A coalesced write may still be owed (last-used timestamps); locking must not lose it.
+        flushPendingPersist()
+
         // Overwrite sensitive field values before releasing to ARC.
         for item in items {
             for field in item.fields where field.isSensitive {
                 field.plainValue = String(repeating: "\0", count: field.plainValue.count)
                 field.plainValue = ""
+                // Value history holds old secrets too, so it has to go the same way.
+                field.previousValues = []
             }
         }
         workspaces = []
@@ -274,8 +321,44 @@ final class VaultMemoryStore {
 
     func persist() throws {
         try requireUnlocked()
+        deferredPersist?.cancel()
+        deferredPersist = nil
+        hasUnsavedDeferredChanges = false
         try persistHandler?()
     }
+
+    /// Schedules a coalesced write instead of encrypting the whole vault immediately.
+    ///
+    /// Used for high-frequency, low-value mutations — currently only "last used" timestamps.
+    /// Selecting a row used to re-encrypt and rewrite the entire vault synchronously, so
+    /// holding ⌥↓ through a list meant one full AES pass and one disk write per row.
+    func persistSoon() {
+        guard isUnlocked else { return }
+        hasUnsavedDeferredChanges = true
+        deferredPersist?.cancel()
+        deferredPersist = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.deferredPersistDelay))
+            guard !Task.isCancelled, let self else { return }
+            self.deferredPersist = nil
+            guard self.hasUnsavedDeferredChanges, self.isUnlocked else { return }
+            self.hasUnsavedDeferredChanges = false
+            try? self.persistHandler?()
+        }
+    }
+
+    /// Writes any owed coalesced changes right now. Called on lock and on app termination.
+    func flushPendingPersist() {
+        deferredPersist?.cancel()
+        deferredPersist = nil
+        guard hasUnsavedDeferredChanges, isUnlocked else {
+            hasUnsavedDeferredChanges = false
+            return
+        }
+        hasUnsavedDeferredChanges = false
+        try? persistHandler?()
+    }
+
+    private static let deferredPersistDelay: Double = 2
 
     /// Replaces the entire vault contents with the given snapshot and persists.
     func replaceContents(with snapshot: VaultSnapshot) throws {
@@ -325,11 +408,13 @@ final class VaultMemoryStore {
                         isCopyable: $0.isCopyable,
                         isMasked: $0.isMasked,
                         sortOrder: $0.sortOrder,
-                        plainValue: $0.plainValue
+                        plainValue: $0.plainValue,
+                        previousValues: $0.previousValues
                     )
                 }.sorted { $0.sortOrder < $1.sortOrder },
                 changeHistory: item.changeHistory,
-                ignoredHealthIssues: item.ignoredHealthIssues
+                ignoredHealthIssues: item.ignoredHealthIssues,
+                linkedFile: item.linkedFile
             )
         }
 
@@ -427,7 +512,8 @@ final class VaultMemoryStore {
                 workspace: itemSnapshot.workspaceID.flatMap { workspaceMap[$0] },
                 template: itemSnapshot.templateID.flatMap { templatesByID[$0] },
                 changeHistory: itemSnapshot.changeHistory,
-                ignoredHealthIssues: itemSnapshot.ignoredHealthIssues
+                ignoredHealthIssues: itemSnapshot.ignoredHealthIssues,
+                linkedFile: itemSnapshot.linkedFile
             )
             item.fields = itemSnapshot.fields.map { fieldSnapshot in
                 SecretFieldValueEntity(
@@ -440,6 +526,7 @@ final class VaultMemoryStore {
                     isMasked: fieldSnapshot.isMasked,
                     sortOrder: fieldSnapshot.sortOrder,
                     plainValue: fieldSnapshot.plainValue,
+                    previousValues: fieldSnapshot.previousValues,
                     item: item
                 )
             }.sorted { $0.sortOrder < $1.sortOrder }
@@ -517,6 +604,52 @@ final class FileEncryptedVaultStore: EncryptedVaultStore {
         if FileManager.default.fileExists(atPath: metadataURL.path) {
             try FileManager.default.removeItem(at: metadataURL)
         }
+        discardRollbackCopy()
+    }
+
+    // MARK: - Rollback copy
+
+    private var rollbackEnvelopeURL: URL { directoryURL.appendingPathComponent("vault.enc.rollback", isDirectory: false) }
+    private var rollbackMetadataURL: URL { directoryURL.appendingPathComponent("vault.meta.rollback", isDirectory: false) }
+
+    /// Snapshots the on-disk vault before a destructive operation (currently: restoring a
+    /// backup). The copy stays encrypted with the same key, so this adds no new exposure —
+    /// it only means "replace my whole vault" is survivable across a relaunch.
+    func writeRollbackCopy() throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: envelopeURL.path), fm.fileExists(atPath: metadataURL.path) else { return }
+        discardRollbackCopy()
+        try fm.copyItem(at: envelopeURL, to: rollbackEnvelopeURL)
+        try fm.copyItem(at: metadataURL, to: rollbackMetadataURL)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: rollbackEnvelopeURL.path)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: rollbackMetadataURL.path)
+    }
+
+    func rollbackCopyDate() -> Date? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: rollbackEnvelopeURL.path), fm.fileExists(atPath: rollbackMetadataURL.path) else {
+            return nil
+        }
+        return (try? fm.attributesOfItem(atPath: rollbackEnvelopeURL.path)[.modificationDate]) as? Date
+    }
+
+    func restoreRollbackCopy() throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: rollbackEnvelopeURL.path), fm.fileExists(atPath: rollbackMetadataURL.path) else {
+            throw VaultCryptoError.metadataMissing
+        }
+        let envelopeData = try Data(contentsOf: rollbackEnvelopeURL)
+        let metadataData = try Data(contentsOf: rollbackMetadataURL)
+        try metadataData.write(to: metadataURL, options: .atomic)
+        try envelopeData.write(to: envelopeURL, options: .atomic)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataURL.path)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: envelopeURL.path)
+        discardRollbackCopy()
+    }
+
+    func discardRollbackCopy() {
+        try? FileManager.default.removeItem(at: rollbackEnvelopeURL)
+        try? FileManager.default.removeItem(at: rollbackMetadataURL)
     }
 
     func resetLegacyArtifacts() throws {
@@ -537,6 +670,7 @@ final class FileEncryptedVaultStore: EncryptedVaultStore {
 final class InMemoryEncryptedVaultStore: EncryptedVaultStore {
     private var metadata: VaultMetadata?
     private var envelope: VaultEnvelope?
+    private var rollback: (metadata: VaultMetadata, envelope: VaultEnvelope, takenAt: Date)?
 
     func hasVault() -> Bool {
         metadata != nil && envelope != nil
@@ -560,9 +694,28 @@ final class InMemoryEncryptedVaultStore: EncryptedVaultStore {
     func resetSecureVault() throws {
         metadata = nil
         envelope = nil
+        rollback = nil
     }
 
     func resetLegacyArtifacts() throws {}
+
+    func writeRollbackCopy() throws {
+        guard let metadata, let envelope else { return }
+        rollback = (metadata, envelope, Date())
+    }
+
+    func rollbackCopyDate() -> Date? { rollback?.takenAt }
+
+    func restoreRollbackCopy() throws {
+        guard let rollback else { throw VaultCryptoError.metadataMissing }
+        metadata = rollback.metadata
+        envelope = rollback.envelope
+        self.rollback = nil
+    }
+
+    func discardRollbackCopy() {
+        rollback = nil
+    }
 }
 
 private extension JSONEncoder {

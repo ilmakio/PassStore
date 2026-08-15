@@ -339,7 +339,3 @@ extension Color {
         )
     }
 }
-
-enum VaultChrome {
-    static let mutedFill = Color.primary.opacity(0.06)
-}

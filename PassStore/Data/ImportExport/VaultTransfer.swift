@@ -32,9 +32,40 @@ enum TransferError: LocalizedError {
 
 struct CopyFormatter {
     static func envString(for item: SecretItemEntity, fields: [FieldResolvedValue]) -> String {
-        let header = "# \(item.title)"
-        let pairs = fields.sorted { $0.sortOrder < $1.sortOrder }.map { "\($0.key.uppercased())=\($0.value)" }
-        return ([header] + pairs).joined(separator: "\n")
+        "# \(item.title)\n" + envFileContents(fields: fields)
+    }
+
+    /// Serialises fields as `.env` text.
+    ///
+    /// Two long-standing round-trip bugs are fixed here. Keys were upper-cased, so importing
+    /// `Api_Key=…` and copying it back produced `API_KEY=…` — a different variable. And values
+    /// were never quoted, so anything containing a space, a newline, a quote or a `#` came
+    /// back out as an invalid or truncated line.
+    static func envFileContents(fields: [FieldResolvedValue]) -> String {
+        fields
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .map { "\($0.key)=\(envQuoted($0.value))" }
+            .joined(separator: "\n")
+    }
+
+    /// Quotes only when the bare form would not survive a re-read.
+    static func envQuoted(_ value: String) -> String {
+        let needsQuoting = value.isEmpty
+            || value.contains(where: { $0 == " " || $0 == "\t" || $0.isNewline })
+            || value.contains("#")
+            || value.contains("\"")
+            || value.contains("'")
+            || value.contains("\\")
+            || value.hasPrefix(" ")
+            || value.hasSuffix(" ")
+        guard needsQuoting else { return value }
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        return "\"\(escaped)\""
     }
 
     static func jsonString(for item: SecretItemEntity, fields: [FieldResolvedValue]) throws -> String {
@@ -173,28 +204,118 @@ struct CopyFormatter {
     }
 }
 
-struct EnvImportService {
+struct EnvImportService: Sendable {
+    /// Parses `.env` text.
+    ///
+    /// The original parser split on `=` and trimmed, which meant `KEY="hello world"` was
+    /// stored *with* its quote characters, `export KEY=v` produced a key literally called
+    /// `export KEY`, and a value spanning several quoted lines was truncated at the first
+    /// newline. All three are common in real `.env` files.
     func parse(_ text: String) -> ParsedEnvDocument {
         var notes: [String] = []
         var entries: [ParsedEnvEntry] = []
-        for rawLine in text.split(whereSeparator: \.isNewline) {
+
+        var lines = text.components(separatedBy: .newlines)[...]
+        while let rawLine = lines.first {
+            lines = lines.dropFirst()
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
+
             if line.hasPrefix("#") {
                 notes.append(String(line.dropFirst()).trimmingCharacters(in: .whitespaces))
                 continue
             }
-            let pieces = line.split(separator: "=", maxSplits: 1).map(String.init)
-            guard pieces.count == 2 else { continue }
-            let key = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            let sensitive = key.lowercased().contains("secret")
-                || key.lowercased().contains("token")
-                || key.lowercased().contains("password")
-                || key.lowercased().contains("key")
-            entries.append(ParsedEnvEntry(key: key, value: value, isSensitive: sensitive))
+
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            var key = String(line[line.startIndex..<separator]).trimmingCharacters(in: .whitespaces)
+            // `export FOO=bar` is valid in a sourced .env and must not become a key called
+            // "export FOO".
+            if key.hasPrefix("export "), key.count > "export ".count {
+                key = String(key.dropFirst("export ".count)).trimmingCharacters(in: .whitespaces)
+            }
+            guard !key.isEmpty, key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "." }) else { continue }
+
+            var remainder = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+
+            // A quoted value may continue on following lines until the quote closes.
+            if let quote = remainder.first, quote == "\"" || quote == "'", !Self.isClosed(remainder, quote: quote) {
+                while let next = lines.first {
+                    lines = lines.dropFirst()
+                    remainder += "\n" + next
+                    if Self.isClosed(remainder, quote: quote) { break }
+                }
+            }
+
+            let value = Self.unquote(remainder)
+            entries.append(ParsedEnvEntry(key: key, value: value, isSensitive: Self.looksSensitive(key: key)))
         }
+
         return ParsedEnvDocument(notes: notes.joined(separator: "\n"), entries: entries)
+    }
+
+    /// True once the opening quote has a matching unescaped closing quote.
+    private static func isClosed(_ text: String, quote: Character) -> Bool {
+        var isEscaped = false
+        for (index, character) in text.enumerated() {
+            if index == 0 { continue }
+            if isEscaped { isEscaped = false; continue }
+            if character == "\\", quote == "\"" { isEscaped = true; continue }
+            if character == quote { return true }
+        }
+        return false
+    }
+
+    /// Strips surrounding quotes, expands escapes inside double quotes, and drops a trailing
+    /// comment from an unquoted value.
+    static func unquote(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard let quote = trimmed.first, quote == "\"" || quote == "'" else {
+            // `FOO=bar # note` — the comment is not part of the value.
+            guard let hashIndex = trimmed.firstIndex(of: "#") else { return trimmed }
+            return String(trimmed[trimmed.startIndex..<hashIndex]).trimmingCharacters(in: .whitespaces)
+        }
+
+        var body = String(trimmed.dropFirst())
+        if let closing = body.lastIndex(of: quote) {
+            body = String(body[body.startIndex..<closing])
+        }
+        // Single quotes are literal in shell semantics; only double quotes take escapes.
+        guard quote == "\"" else { return body }
+        var result = ""
+        var isEscaped = false
+        for character in body {
+            if isEscaped {
+                switch character {
+                case "n": result.append("\n")
+                case "r": result.append("\r")
+                case "t": result.append("\t")
+                case "\\": result.append("\\")
+                case "\"": result.append("\"")
+                default:
+                    result.append("\\")
+                    result.append(character)
+                }
+                isEscaped = false
+                continue
+            }
+            if character == "\\" { isEscaped = true; continue }
+            result.append(character)
+        }
+        if isEscaped { result.append("\\") }
+        return result
+    }
+
+    /// Heuristic for pre-marking a variable as sensitive on import.
+    ///
+    /// `key` alone used to match, so `MONKEY_COUNT` and `KEYBOARD_LAYOUT` were imported as
+    /// secrets. It now has to look like a credential rather than merely contain the letters.
+    static func looksSensitive(key: String) -> Bool {
+        let lower = key.lowercased()
+        let strongMarkers = ["secret", "password", "passwd", "token", "credential", "private", "apikey", "auth"]
+        if strongMarkers.contains(where: { lower.contains($0) }) { return true }
+        // "key" only counts as its own word: API_KEY and KEY yes, MONKEY_COUNT no.
+        let words = lower.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        return words.contains("key") || words.contains("keys") || words.contains("dsn") || words.contains("pwd")
     }
 }
 
@@ -203,7 +324,7 @@ enum ImportedPayload {
     case fullBackup(ExportedBackupPayload)
 }
 
-struct ExportService {
+struct ExportService: Sendable {
     private let cryptoService: VaultCryptoService
 
     init(cryptoService: VaultCryptoService) {
@@ -211,7 +332,16 @@ struct ExportService {
     }
 
     /// Exports a full vault backup (v3) including all vault data and app settings.
-    func exportFullBackup(backup: ExportedBackupPayload, password: String) throws -> Data {
+    ///
+    /// Runs the Argon2id wrap off the main actor: it is the same ~1s cost as an unlock, and
+    /// on the main actor it froze the export sheet with no spinner.
+    func exportFullBackup(backup: ExportedBackupPayload, password: String) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try exportFullBackupSynchronously(backup: backup, password: password)
+        }.value
+    }
+
+    func exportFullBackupSynchronously(backup: ExportedBackupPayload, password: String) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let payload = try encoder.encode(backup)
@@ -227,8 +357,14 @@ struct ExportService {
         return try encoder.encode(exportEnvelope)
     }
 
+    func importPayload(from fileData: Data, password: String) async throws -> ImportedPayload {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try importPayloadSynchronously(from: fileData, password: password)
+        }.value
+    }
+
     /// Decrypts a `.pstore` file and returns either a full backup (v3) or legacy items (v1/v2).
-    func importPayload(from fileData: Data, password: String) throws -> ImportedPayload {
+    func importPayloadSynchronously(from fileData: Data, password: String) throws -> ImportedPayload {
         let decoder = JSONDecoder()
         let envelope: EncryptedExportEnvelope
         do {

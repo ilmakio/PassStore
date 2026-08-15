@@ -2,7 +2,9 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+import LocalAuthentication
 import Observation
+import Security
 
 @Observable
 final class AppSettingsStore {
@@ -16,6 +18,31 @@ final class AppSettingsStore {
 
     var biometricsEnabled: Bool {
         didSet { defaults.set(biometricsEnabled, forKey: Keys.biometricsEnabled) }
+    }
+
+    /// Raise the Touch ID prompt by itself when the app launches or comes back to the front.
+    var unlocksWithBiometricsAutomatically: Bool {
+        didSet { defaults.set(unlocksWithBiometricsAutomatically, forKey: Keys.unlocksWithBiometricsAutomatically) }
+    }
+
+    /// Lock when the Mac sleeps, the screen locks or the screensaver starts.
+    var locksOnSystemLock: Bool {
+        didSet { defaults.set(locksOnSystemLock, forKey: Keys.locksOnSystemLock) }
+    }
+
+    /// Keep previous values of secret fields so a rotated password can be looked up or restored.
+    var keepsSecretValueHistory: Bool {
+        didSet { defaults.set(keepsSecretValueHistory, forKey: Keys.keepsSecretValueHistory) }
+    }
+
+    /// Check linked `.env` files for on-disk changes when the window comes back to the front.
+    var checksLinkedFilesOnFocus: Bool {
+        didSet { defaults.set(checksLinkedFilesOnFocus, forKey: Keys.checksLinkedFilesOnFocus) }
+    }
+
+    /// Persisted item-list sort order (see `ItemSortOrder`).
+    var itemSortOrderRawValue: String {
+        didSet { defaults.set(itemSortOrderRawValue, forKey: Keys.itemSortOrder) }
     }
 
     /// When false, the global ⌘⌥P shortcut is not registered.
@@ -78,6 +105,11 @@ final class AppSettingsStore {
         static let sidebarTagsOrder = "settings.sidebar.tagsOrder"
         static let sidebarEnvironmentsOrder = "settings.sidebar.environmentsOrder"
         static let hasShownSensitiveCopyWarning = "settings.hasShownSensitiveCopyWarning"
+        static let unlocksWithBiometricsAutomatically = "settings.unlocksWithBiometricsAutomatically"
+        static let locksOnSystemLock = "settings.locksOnSystemLock"
+        static let keepsSecretValueHistory = "settings.keepsSecretValueHistory"
+        static let checksLinkedFilesOnFocus = "settings.checksLinkedFilesOnFocus"
+        static let itemSortOrder = "settings.itemSortOrder"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -95,6 +127,16 @@ final class AppSettingsStore {
         self.sidebarTagsOrder = defaults.stringArray(forKey: Keys.sidebarTagsOrder) ?? []
         self.sidebarEnvironmentsOrder = defaults.stringArray(forKey: Keys.sidebarEnvironmentsOrder) ?? []
         self.hasShownSensitiveCopyWarning = defaults.bool(forKey: Keys.hasShownSensitiveCopyWarning)
+        self.unlocksWithBiometricsAutomatically = defaults.object(forKey: Keys.unlocksWithBiometricsAutomatically) as? Bool ?? true
+        self.locksOnSystemLock = defaults.object(forKey: Keys.locksOnSystemLock) as? Bool ?? true
+        self.keepsSecretValueHistory = defaults.object(forKey: Keys.keepsSecretValueHistory) as? Bool ?? true
+        self.checksLinkedFilesOnFocus = defaults.object(forKey: Keys.checksLinkedFilesOnFocus) as? Bool ?? true
+        self.itemSortOrderRawValue = defaults.string(forKey: Keys.itemSortOrder) ?? ItemSortOrder.title.rawValue
+    }
+
+    var itemSortOrder: ItemSortOrder {
+        get { ItemSortOrder(rawValue: itemSortOrderRawValue) ?? .title }
+        set { itemSortOrderRawValue = newValue.rawValue }
     }
 
     func makeSettingsSnapshot() -> ExportedSettingsPayload {
@@ -110,7 +152,12 @@ final class AppSettingsStore {
             sidebarEnvironmentsExpanded: sidebarEnvironmentsExpanded,
             sidebarTypesOrder: sidebarTypesOrder,
             sidebarTagsOrder: sidebarTagsOrder,
-            sidebarEnvironmentsOrder: sidebarEnvironmentsOrder
+            sidebarEnvironmentsOrder: sidebarEnvironmentsOrder,
+            unlocksWithBiometricsAutomatically: unlocksWithBiometricsAutomatically,
+            locksOnSystemLock: locksOnSystemLock,
+            keepsSecretValueHistory: keepsSecretValueHistory,
+            checksLinkedFilesOnFocus: checksLinkedFilesOnFocus,
+            itemSortOrderRawValue: itemSortOrderRawValue
         )
     }
 
@@ -127,6 +174,11 @@ final class AppSettingsStore {
         sidebarTypesOrder = payload.sidebarTypesOrder
         sidebarTagsOrder = payload.sidebarTagsOrder
         sidebarEnvironmentsOrder = payload.sidebarEnvironmentsOrder
+        unlocksWithBiometricsAutomatically = payload.unlocksWithBiometricsAutomatically
+        locksOnSystemLock = payload.locksOnSystemLock
+        keepsSecretValueHistory = payload.keepsSecretValueHistory
+        checksLinkedFilesOnFocus = payload.checksLinkedFilesOnFocus
+        itemSortOrderRawValue = payload.itemSortOrderRawValue
     }
 }
 
@@ -161,6 +213,8 @@ final class VaultSessionManager {
     private var lastInteractionAt = Date()
     private var timer: Timer?
     private var eventMonitor: Any?
+    /// Sleep / screen-lock observers, kept so they can be torn down together.
+    private var systemLockObservers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
 
     // Brute-force protection: progressive delay after failed password attempts.
     private var failedPasswordAttempts = 0
@@ -185,103 +239,188 @@ final class VaultSessionManager {
         self.keyStore = keyStore
         self.memoryStore = memoryStore
         self.lockState = vaultStore.hasVault() ? .locked : .setupRequired
+        restoreLockoutState()
         refreshBiometricAvailability()
         startMonitoring()
     }
 
-    func createVault(password: String) {
-        guard password.count >= 8 else {
-            lastErrorMessage = password.isEmpty
-                ? "Password cannot be empty."
-                : "Password must be at least 8 characters."
-            return
-        }
+    // MARK: - Vault creation
+
+    /// Creates a vault, deriving the wrapping key off the main actor so the window stays live.
+    func createVault(password: String) async {
+        guard validateNewVaultPassword(password) else { return }
         isBusy = true
         defer { isBusy = false }
-
         do {
             try performResetCleanup()
             let vaultKey = cryptoService.generateVaultKey()
-            let wrappedKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
-            var metadata = VaultMetadata(
-                version: 1,
-                wrappedVaultKey: wrappedKey,
-                biometricUnlockEnabled: false,
-                updatedAt: .now
-            )
-            // The vault starts with one audit entry so "last changed" has an answer from day one.
-            let initialSnapshot = VaultSnapshot(
-                workspaces: [],
-                items: [],
-                customTemplates: [],
-                masterPasswordHistory: [MasterPasswordChangeEntry(kind: .vaultCreated)]
-            )
-            let envelope = try cryptoService.encryptVault(initialSnapshot, using: vaultKey)
-            _ = syncBiometricState(using: vaultKey, metadata: &metadata)
-            try vaultStore.save(metadata: metadata, envelope: envelope)
-            activate(snapshot: initialSnapshot, key: vaultKey, metadata: metadata)
-            lastErrorMessage = nil
+            let wrappedKey = try await cryptoService.wrapVaultKeyOffMain(vaultKey, password: password)
+            try finishVaultCreation(vaultKey: vaultKey, wrappedKey: wrappedKey)
         } catch {
             lastErrorMessage = error.localizedDescription
         }
     }
 
-    func unlockWithPassword(_ password: String) -> Bool {
-        // Progressive delay: reject early if still in lockout window.
-        if let lastFailed = lastFailedAttemptAt, failedPasswordAttempts > 0 {
-            let required = Self.lockoutDelays.first { failedPasswordAttempts >= $0.threshold }?.delay ?? 0
-            let elapsed = Date().timeIntervalSince(lastFailed)
-            if elapsed < required {
-                let remaining = Int((required - elapsed).rounded(.up))
-                lastErrorMessage = "Too many failed attempts. Please wait \(remaining)s."
-                return false
-            }
+    /// Blocking variant. Only for previews, UI-test fixtures and unit tests, which configure a
+    /// deliberately cheap KDF; production paths use the `async` version.
+    func createVaultSynchronously(password: String) {
+        guard validateNewVaultPassword(password) else { return }
+        do {
+            try performResetCleanup()
+            let vaultKey = cryptoService.generateVaultKey()
+            let wrappedKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
+            try finishVaultCreation(vaultKey: vaultKey, wrappedKey: wrappedKey)
+        } catch {
+            lastErrorMessage = error.localizedDescription
         }
+    }
 
+    private func validateNewVaultPassword(_ password: String) -> Bool {
+        guard password.count >= Self.minimumPasswordLength else {
+            lastErrorMessage = password.isEmpty
+                ? "Password cannot be empty."
+                : "Password must be at least \(Self.minimumPasswordLength) characters."
+            return false
+        }
+        return true
+    }
+
+    private func finishVaultCreation(vaultKey: Data, wrappedKey: WrappedVaultKey) throws {
+        var metadata = VaultMetadata(
+            version: 1,
+            wrappedVaultKey: wrappedKey,
+            biometricUnlockEnabled: false,
+            updatedAt: .now
+        )
+        // The vault starts with one audit entry so "last changed" has an answer from day one.
+        let initialSnapshot = VaultSnapshot(
+            workspaces: [],
+            items: [],
+            customTemplates: [],
+            masterPasswordHistory: [MasterPasswordChangeEntry(kind: .vaultCreated)]
+        )
+        let envelope = try cryptoService.encryptVault(initialSnapshot, using: vaultKey)
+        _ = syncBiometricState(using: vaultKey, metadata: &metadata)
+        try vaultStore.save(metadata: metadata, envelope: envelope)
+        activate(snapshot: initialSnapshot, key: vaultKey, metadata: metadata)
+        clearLockout()
+        lastErrorMessage = nil
+    }
+
+    // MARK: - Unlock
+
+    /// Unlocks with the master password. Argon2id runs off the main actor, so `isBusy` is
+    /// actually observable for the duration and the window keeps drawing.
+    @discardableResult
+    func unlockWithPassword(_ password: String) async -> Bool {
+        if let message = lockoutMessage() {
+            lastErrorMessage = message
+            return false
+        }
         isBusy = true
         defer { isBusy = false }
-
         do {
             let metadata = try vaultStore.loadMetadata()
-            let vaultKey = try cryptoService.unwrapVaultKey(metadata.wrappedVaultKey, password: password)
-            var updatedMetadata = metadata
-
-            // Migrate legacy PBKDF2 vaults to Argon2id on first successful unlock.
-            let isLegacyKDF = metadata.wrappedVaultKey.kdfAlgorithm == nil
-                || metadata.wrappedVaultKey.kdfAlgorithm == "pbkdf2-sha256"
-            if isLegacyKDF {
-                updatedMetadata.wrappedVaultKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
-            }
-
-            _ = syncBiometricState(using: vaultKey, metadata: &updatedMetadata)
             let envelope = try vaultStore.loadEnvelope()
-            let snapshot = try cryptoService.decryptVault(envelope, using: vaultKey)
-            activate(snapshot: snapshot, key: vaultKey, metadata: updatedMetadata)
-            if updatedMetadata.updatedAt != metadata.updatedAt
-                || updatedMetadata.biometricUnlockEnabled != metadata.biometricUnlockEnabled
-                || isLegacyKDF {
-                try saveCurrentVault(metadataOverride: updatedMetadata)
+            let opened = try await cryptoService.openVaultOffMain(
+                metadata: metadata,
+                envelope: envelope,
+                password: password
+            )
+            var rewrapped: WrappedVaultKey?
+            if Self.isLegacyKDF(metadata) {
+                rewrapped = try await cryptoService.wrapVaultKeyOffMain(opened.vaultKey, password: password)
             }
-            failedPasswordAttempts = 0
-            lastFailedAttemptAt = nil
-            lastErrorMessage = nil
+            try applyUnlock(
+                metadata: metadata,
+                vaultKey: opened.vaultKey,
+                snapshot: opened.snapshot,
+                rewrappedKey: rewrapped
+            )
             return true
         } catch {
-            failedPasswordAttempts += 1
-            lastFailedAttemptAt = Date()
-            lastErrorMessage = "Incorrect password or corrupted vault."
+            registerFailedAttempt()
             return false
         }
     }
 
+    /// Blocking variant, for tests and previews. See `createVaultSynchronously`.
+    @discardableResult
+    func unlockWithPasswordSynchronously(_ password: String) -> Bool {
+        if let message = lockoutMessage() {
+            lastErrorMessage = message
+            return false
+        }
+        do {
+            let metadata = try vaultStore.loadMetadata()
+            let envelope = try vaultStore.loadEnvelope()
+            let vaultKey = try cryptoService.unwrapVaultKey(metadata.wrappedVaultKey, password: password)
+            let snapshot = try cryptoService.decryptVault(envelope, using: vaultKey)
+            let rewrapped = Self.isLegacyKDF(metadata)
+                ? try cryptoService.wrapVaultKey(vaultKey, password: password)
+                : nil
+            try applyUnlock(metadata: metadata, vaultKey: vaultKey, snapshot: snapshot, rewrappedKey: rewrapped)
+            return true
+        } catch {
+            registerFailedAttempt()
+            return false
+        }
+    }
+
+    /// Legacy PBKDF2 vaults are re-wrapped with Argon2id on the first successful unlock.
+    private static func isLegacyKDF(_ metadata: VaultMetadata) -> Bool {
+        metadata.wrappedVaultKey.kdfAlgorithm == nil || metadata.wrappedVaultKey.kdfAlgorithm == "pbkdf2-sha256"
+    }
+
+    private func applyUnlock(
+        metadata: VaultMetadata,
+        vaultKey: Data,
+        snapshot: VaultSnapshot,
+        rewrappedKey: WrappedVaultKey?
+    ) throws {
+        var updatedMetadata = metadata
+        if let rewrappedKey {
+            updatedMetadata.wrappedVaultKey = rewrappedKey
+        }
+        _ = syncBiometricState(using: vaultKey, metadata: &updatedMetadata)
+        activate(snapshot: snapshot, key: vaultKey, metadata: updatedMetadata)
+        if updatedMetadata.updatedAt != metadata.updatedAt
+            || updatedMetadata.biometricUnlockEnabled != metadata.biometricUnlockEnabled
+            || rewrappedKey != nil {
+            try saveCurrentVault(metadataOverride: updatedMetadata)
+        }
+        clearLockout()
+        lastErrorMessage = nil
+    }
+
+    /// True when a Touch ID prompt would actually succeed right now — used to decide whether
+    /// to raise the prompt automatically on launch and on window focus.
+    var canAttemptBiometricUnlock: Bool {
+        lockState == .locked
+            && settings.biometricsEnabled
+            && isBiometricAvailable
+            && !isBusy
+            && !isPresentingBiometricPrompt
+    }
+
+    /// Guards against stacking prompts when several triggers fire at once (launch + focus,
+    /// or focus bouncing as the Touch ID sheet takes and returns key window status).
+    private(set) var isPresentingBiometricPrompt = false
+
+    @discardableResult
     func unlockWithBiometrics() async -> Bool {
         guard settings.biometricsEnabled else {
             lastErrorMessage = "Biometric unlock is disabled."
             return false
         }
+        guard !isPresentingBiometricPrompt else { return false }
 
+        isPresentingBiometricPrompt = true
         isBusy = true
-        defer { isBusy = false }
+        defer {
+            isBusy = false
+            isPresentingBiometricPrompt = false
+        }
 
         do {
             let metadata = try vaultStore.loadMetadata()
@@ -289,22 +428,136 @@ final class VaultSessionManager {
                 lastErrorMessage = "Biometric unlock is not configured."
                 return false
             }
-            let vaultKey = try keyStore.readVaultKey(prompt: "Unlock PassStore")
             let envelope = try vaultStore.loadEnvelope()
-            let snapshot = try cryptoService.decryptVault(envelope, using: vaultKey)
-            activate(snapshot: snapshot, key: vaultKey, metadata: metadata)
+            // `SecItemCopyMatching` blocks its thread for as long as the Touch ID sheet is up,
+            // so it cannot run on the main actor without freezing the window behind the sheet.
+            let keyStore = self.keyStore
+            let cryptoService = self.cryptoService
+            let opened = try await Task.detached(priority: .userInitiated) { () -> (Data, VaultSnapshot) in
+                let vaultKey = try keyStore.readVaultKey(prompt: "Unlock PassStore")
+                return (vaultKey, try cryptoService.decryptVault(envelope, using: vaultKey))
+            }.value
+            activate(snapshot: opened.1, key: opened.0, metadata: metadata)
+            clearLockout()
             lastErrorMessage = nil
             return true
         } catch {
-            lastErrorMessage = error.localizedDescription
+            // A cancelled prompt is a normal outcome, not an error worth shouting about.
+            lastErrorMessage = Self.isUserCancelledBiometrics(error) ? nil : error.localizedDescription
             return false
         }
     }
 
+    /// `errSecUserCanceled` / `LAError.userCancel` mean "I'll type it instead", so the lock
+    /// screen should stay quiet rather than showing a scary red line.
+    private static func isUserCancelledBiometrics(_ error: Error) -> Bool {
+        if case let VaultKeyStoreError.unexpectedStatus(status) = error {
+            return status == errSecUserCanceled || status == errSecAuthFailed
+        }
+        let nsError = error as NSError
+        return nsError.domain == LAErrorDomain
+            && [LAError.userCancel.rawValue, LAError.appCancel.rawValue, LAError.systemCancel.rawValue].contains(nsError.code)
+    }
+
+    // MARK: - Rollback copy
+
+    /// Copies the encrypted vault aside before a destructive operation.
+    func writeRollbackCopy() throws {
+        try vaultStore.writeRollbackCopy()
+    }
+
+    func rollbackCopyDate() -> Date? {
+        vaultStore.rollbackCopyDate()
+    }
+
+    /// Restores the pre-operation vault and locks, so the next unlock reads the restored
+    /// files rather than whatever is still in memory.
+    func restoreRollbackCopy() throws {
+        try vaultStore.restoreRollbackCopy()
+        lock()
+    }
+
+    func discardRollbackCopy() {
+        vaultStore.discardRollbackCopy()
+    }
+
+    // MARK: - Reset
+
+    /// Destroys the vault and every derived artefact so the owner can start over.
+    ///
+    /// There is deliberately no recovery path for a forgotten master password — the whole
+    /// design depends on that — but "start over" is not the same as "recover", and without
+    /// it a forgotten password left the app permanently stuck at the lock screen with the
+    /// only fix being to delete files in `~/Library` by hand.
+    func resetVaultDestroyingAllData() {
+        memoryStore.clear()
+        if activeVaultKey != nil {
+            activeVaultKey!.withUnsafeMutableBytes { buffer in
+                guard let base = buffer.baseAddress else { return }
+                memset(base, 0, buffer.count)
+            }
+            activeVaultKey = nil
+        }
+        metadata = nil
+        try? performResetCleanup()
+        clearLockout()
+        lockState = .setupRequired
+        refreshBiometricAvailability()
+        lastErrorMessage = nil
+        onLock?()
+    }
+
+    // MARK: - Brute-force lockout
+    //
+    // Persisted rather than held in memory: an in-memory counter is reset by quitting the
+    // app, which makes the delay trivial to skip. The real defence against an attacker with
+    // the file is Argon2id, but the on-screen delay should still mean something.
+
+    private enum LockoutKeys {
+        static let attempts = "security.failedPasswordAttempts"
+        static let lastAttempt = "security.lastFailedAttemptAt"
+    }
+
+    /// Nil when a password attempt is allowed, otherwise the message to show.
+    private func lockoutMessage() -> String? {
+        guard failedPasswordAttempts > 0, let lastFailed = lastFailedAttemptAt else { return nil }
+        let required = Self.lockoutDelays.first { failedPasswordAttempts >= $0.threshold }?.delay ?? 0
+        let elapsed = Date().timeIntervalSince(lastFailed)
+        // A clock moved backwards would otherwise lock the owner out indefinitely.
+        guard elapsed >= 0, elapsed < required else { return nil }
+        let remaining = Int((required - elapsed).rounded(.up))
+        return "Too many failed attempts. Try again in \(remaining)s."
+    }
+
+    private func registerFailedAttempt() {
+        failedPasswordAttempts += 1
+        lastFailedAttemptAt = Date()
+        defaults.set(failedPasswordAttempts, forKey: LockoutKeys.attempts)
+        defaults.set(lastFailedAttemptAt, forKey: LockoutKeys.lastAttempt)
+        lastErrorMessage = "Incorrect password or corrupted vault."
+    }
+
+    private func clearLockout() {
+        failedPasswordAttempts = 0
+        lastFailedAttemptAt = nil
+        defaults.removeObject(forKey: LockoutKeys.attempts)
+        defaults.removeObject(forKey: LockoutKeys.lastAttempt)
+    }
+
+    private func restoreLockoutState() {
+        failedPasswordAttempts = defaults.integer(forKey: LockoutKeys.attempts)
+        lastFailedAttemptAt = defaults.object(forKey: LockoutKeys.lastAttempt) as? Date
+    }
+
+    // MARK: - Master password
+
     /// Re-wraps the existing vault key under a new password. The vault key itself is unchanged, so
     /// stored data needs no re-encryption and the biometric Keychain entry stays valid.
     /// Requires the current password: an unlocked window should not be enough to lock the owner out.
-    func changeMasterPassword(current: String, to newPassword: String) throws {
+    ///
+    /// Both derivations run off the main actor — this is the slowest operation in the app
+    /// (two full Argon2id passes) and it used to freeze the settings sheet solid.
+    func changeMasterPassword(current: String, to newPassword: String) async throws {
         guard lockState == .unlocked, let activeVaultKey, var metadata else {
             throw VaultCryptoError.vaultLocked
         }
@@ -317,11 +570,12 @@ final class VaultSessionManager {
         defer { isBusy = false }
 
         // The AES-GCM auth tag makes a successful unwrap proof that `current` is right.
-        guard (try? cryptoService.unwrapVaultKey(metadata.wrappedVaultKey, password: current)) != nil else {
+        let currentKey = try? await cryptoService.unwrapVaultKeyOffMain(metadata.wrappedVaultKey, password: current)
+        guard currentKey != nil else {
             throw VaultCryptoError.incorrectCurrentPassword
         }
 
-        metadata.wrappedVaultKey = try cryptoService.wrapVaultKey(activeVaultKey, password: newPassword)
+        metadata.wrappedVaultKey = try await cryptoService.wrapVaultKeyOffMain(activeVaultKey, password: newPassword)
         metadata.updatedAt = .now
         self.metadata = metadata
         // Recorded before the save so the new entry rides along in the same encrypted write.
@@ -457,6 +711,46 @@ final class VaultSessionManager {
             self?.touchInteraction()
             return event
         }
+        installSystemLockTriggers()
+    }
+
+    /// Locks when the Mac itself becomes unattended.
+    ///
+    /// The inactivity timer alone was not enough: closing the lid or hitting the screensaver
+    /// hotkey left the vault unlocked in memory for as long as the auto-lock interval, which
+    /// is exactly the moment it should have been sealed.
+    private func installSystemLockTriggers() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let distributedCenter = DistributedNotificationCenter.default()
+
+        let workspaceTriggers: [Notification.Name] = [
+            NSWorkspace.willSleepNotification,
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.sessionDidResignActiveNotification
+        ]
+        for name in workspaceTriggers {
+            let token = workspaceCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.lockForSystemEvent() }
+            }
+            systemLockObservers.append((center: workspaceCenter, token: token))
+        }
+
+        // Screen lock / screensaver start are only published on the distributed centre.
+        for name in ["com.apple.screenIsLocked", "com.apple.screensaver.didstart"] {
+            let token = distributedCenter.addObserver(
+                forName: Notification.Name(name),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.lockForSystemEvent() }
+            }
+            systemLockObservers.append((center: distributedCenter, token: token))
+        }
+    }
+
+    private func lockForSystemEvent() {
+        guard settings.locksOnSystemLock, lockState == .unlocked else { return }
+        lock()
     }
 }
 

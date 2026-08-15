@@ -15,6 +15,15 @@ protocol EncryptedVaultStore: AnyObject {
     func save(metadata: VaultMetadata, envelope: VaultEnvelope) throws
     func resetSecureVault() throws
     func resetLegacyArtifacts() throws
+
+    /// Copies the current vault aside so a destructive operation can be undone after a relaunch.
+    /// Still encrypted with the same vault key — this is a copy, not a decryption.
+    func writeRollbackCopy() throws
+    /// When the rollback copy was taken, or nil if there isn't one.
+    func rollbackCopyDate() -> Date?
+    /// Puts the rollback copy back in place. Throws if there is none.
+    func restoreRollbackCopy() throws
+    func discardRollbackCopy()
 }
 
 protocol WorkspaceRepositoryProtocol: AnyObject {

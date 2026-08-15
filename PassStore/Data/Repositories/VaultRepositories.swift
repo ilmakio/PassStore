@@ -138,9 +138,11 @@ final class TemplateRepository: TemplateRepositoryProtocol {
 @MainActor
 final class SecretItemRepository: SecretItemRepositoryProtocol {
     private let store: VaultMemoryStore
+    private let settings: AppSettingsStore?
 
-    init(store: VaultMemoryStore) {
+    init(store: VaultMemoryStore, settings: AppSettingsStore? = nil) {
         self.store = store
+        self.settings = settings
     }
 
     func fetchAll(includeArchived: Bool = false) throws -> [SecretItemEntity] {
@@ -159,9 +161,45 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                 isSensitive: $0.isSensitive,
                 isCopyable: $0.isCopyable,
                 isMasked: $0.isMasked,
-                sortOrder: $0.sortOrder
+                sortOrder: $0.sortOrder,
+                previousValues: $0.previousValues.sorted { $0.replacedAt > $1.replacedAt }
             )
         }.sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    // MARK: - Value history
+
+    /// Whether previous values are kept when a field changes. Off means no new versions are
+    /// written; it does not retroactively purge what is already stored (`purgeValueHistory`
+    /// does that).
+    ///
+    /// Read straight from settings so the switch takes effect on the next save with no
+    /// separate copy of the flag to keep in sync.
+    var keepsValueHistory: Bool {
+        settings?.keepsSecretValueHistory ?? true
+    }
+
+    /// Bounded per field: an actively rotated credential should not grow the vault forever.
+    static let valueHistoryLimit = 10
+
+    /// Drops every stored previous value in the vault.
+    func purgeAllValueHistory() throws {
+        try store.requireUnlocked()
+        for item in store.items {
+            for field in item.fields where !field.previousValues.isEmpty {
+                field.previousValues = []
+            }
+        }
+        try store.persist()
+    }
+
+    /// Drops stored previous values for one item.
+    func purgeValueHistory(for item: SecretItemEntity) throws {
+        try store.requireUnlocked()
+        for field in item.fields where !field.previousValues.isEmpty {
+            field.previousValues = []
+        }
+        try store.persist()
     }
 
     @discardableResult
@@ -190,9 +228,15 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         item.tags = draft.tags
         item.isFavorite = draft.isFavorite
         item.isArchived = draft.isArchived
-        item.updatedAt = .now
+        // Bumped only for changes the owner would call an edit. Starring an item or archiving
+        // it used to move `updatedAt`, which pushed it to the top of "Recent" and reset the
+        // staleness clock the health audit reads.
+        if Self.isContentChange(draft: draft, previous: previous) {
+            item.updatedAt = .now
+        }
         item.workspace = workspace(for: draft.workspaceID)
         item.template = template(for: draft.templateID)
+        item.linkedFile = draft.linkedFile
 
         // Field keys are the merge identity, so collisions must be resolved before mapping:
         // `Dictionary(uniqueKeysWithValues:)` traps on duplicates, and the editor lets two
@@ -218,6 +262,9 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             field.isCopyable = fieldDraft.isCopyable
             field.isMasked = fieldDraft.isMasked
             field.sortOrder = fieldDraft.sortOrder
+            // Keep the outgoing value before overwriting it, so a rotated secret can be read
+            // back or restored later.
+            recordValueVersion(on: field, replacing: field.plainValue, with: fieldDraft.value)
             field.plainValue = fieldDraft.value
             field.item = item
             return field
@@ -228,6 +275,40 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         rebuildWorkspaceItems()
         try store.persist()
         return item
+    }
+
+    /// Pushes the outgoing value onto the field's history.
+    ///
+    /// Only real replacements are recorded: filling a blank field for the first time, or
+    /// saving without touching the value, adds nothing.
+    private func recordValueVersion(on field: SecretFieldValueEntity, replacing oldValue: String, with newValue: String) {
+        guard keepsValueHistory else { return }
+        guard oldValue != newValue, !oldValue.isEmpty else { return }
+        let version = SecretValueVersion(value: oldValue)
+        field.previousValues = Array(([version] + field.previousValues).prefix(Self.valueHistoryLimit))
+    }
+
+    /// True when the draft changes something the owner would describe as editing the item.
+    ///
+    /// Favourite and archive flags are state, not content: they get their own audit entries
+    /// but must not touch `updatedAt`.
+    private static func isContentChange(draft: SecretItemDraft, previous: ItemStateSnapshot?) -> Bool {
+        guard let previous else { return true }
+        if previous.title != draft.title { return true }
+        if previous.notes != draft.notes { return true }
+        if previous.type != draft.type { return true }
+        if previous.environmentTitle != draft.environment.title { return true }
+        if previous.workspaceID != draft.workspaceID { return true }
+
+        let incoming = Dictionary(
+            withUniqueKeys(draft.fieldDrafts).map { ($0.key, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        if Set(incoming.keys) != Set(previous.fields.keys) { return true }
+        return incoming.contains { key, fieldDraft in
+            guard let old = previous.fields[key] else { return true }
+            return old.value != fieldDraft.value || old.label != fieldDraft.label
+        }
     }
 
     /// Drops dismissals that can no longer match anything.
@@ -397,11 +478,27 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         return trimmed.isEmpty ? .preset(.dev) : .custom(trimmed)
     }
 
+    /// Stamps "last used" and schedules a coalesced write.
+    ///
+    /// This runs on every row selection. Writing synchronously meant re-encrypting and
+    /// rewriting the entire vault once per click — and once per keypress when walking the
+    /// list with ⌥↓. The timestamp is worth keeping, but not at that price.
     func recordItemAccess(_ item: SecretItemEntity) throws {
         try store.requireUnlocked()
         guard store.items.contains(where: { $0.id == item.id }) else { return }
         item.lastAccessedAt = .now
-        try store.persist()
+        store.persistSoon()
+    }
+
+    /// "X Copy", then "X Copy 2", "X Copy 3"… Duplicating twice used to produce two items
+    /// with byte-identical titles.
+    func uniqueDuplicateTitle(basedOn title: String) -> String {
+        let existing = Set(store.items.map(\.title))
+        let base = "\(title) Copy"
+        guard existing.contains(base) else { return base }
+        var suffix = 2
+        while existing.contains("\(base) \(suffix)") { suffix += 1 }
+        return "\(base) \(suffix)"
     }
 
     @discardableResult
@@ -409,7 +506,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         let resolved = try resolveFields(for: item)
         let duplicateDraft = SecretItemDraft(
             id: nil,
-            title: "\(item.title) Copy",
+            title: uniqueDuplicateTitle(basedOn: item.title),
             type: item.type,
             workspaceID: item.workspace?.id,
             environment: item.environmentValue,

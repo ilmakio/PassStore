@@ -78,11 +78,14 @@ struct AppView: View {
             switch sheet {
             case .newItemFlow:
                 ItemCreationFlowSheet(viewModel: viewModel)
-            case .editItem:
+            case let .editItem(itemID):
+                // The id in the case is what is edited. It used to be ignored in favour of
+                // whatever happened to be selected, which is the same thing right up until
+                // it isn't.
                 ItemEditorSheet(
                     viewModel: viewModel,
                     title: "Edit Secret Item",
-                    draft: viewModel.draftForSelectedItem(),
+                    draft: viewModel.draft(forItemID: itemID),
                     onSave: viewModel.saveItem
                 )
             case .newWorkspace:
@@ -96,13 +99,17 @@ struct AppView: View {
             case .importEncryptedExport:
                 ImportEncryptedExportSheet(viewModel: viewModel)
             case .export:
-                ExportSheet(onExport: viewModel.exportSelectedItems)
+                ExportSheet(viewModel: viewModel)
+            case .importPreview:
+                ImportPreviewSheet(viewModel: viewModel)
             case .passwordGenerator:
                 PasswordGeneratorSheet(viewModel: viewModel)
             case .vaultHealth:
                 VaultHealthSheet(viewModel: viewModel)
             case .bulkEdit:
                 BulkEditSheet(viewModel: viewModel)
+            case let .itemHistory(itemID):
+                ItemHistorySheet(viewModel: viewModel, itemID: itemID)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
@@ -1336,110 +1343,207 @@ private struct LockedVaultOverlay: View {
 
             LockedVaultView(
                 sessionManager: viewModel.container.sessionManager,
-                biometricsEnabled: viewModel.container.settings.biometricsEnabled
+                settings: viewModel.container.settings
             )
-                .frame(maxWidth: 380)
-                .padding(32)
+                .frame(maxWidth: 400)
+                .padding(VaultSpacing.xxl)
         }
     }
 }
 
 private struct LockedVaultView: View {
     @Bindable var sessionManager: VaultSessionManager
-    var biometricsEnabled: Bool
+    @Bindable var settings: AppSettingsStore
+
     @State private var password = ""
+    @State private var isConfirmingReset = false
+    /// Set once per locked session so the automatic prompt does not re-fire in a loop when
+    /// the Touch ID sheet itself hands focus back to the window.
+    @State private var didAttemptAutomaticUnlock = false
+    @FocusState private var isPasswordFocused: Bool
+
+    @Environment(\.controlActiveState) private var controlActiveState
+
+    private var isSetup: Bool { sessionManager.lockState == .setupRequired }
 
     private var showTouchIDBadge: Bool {
         sessionManager.lockState == .locked
             && sessionManager.isBiometricAvailable
-            && biometricsEnabled
+            && settings.biometricsEnabled
     }
 
     var body: some View {
-        VStack(spacing: 20) {
-            appLockHeaderImage
-                .frame(width: 100, height: 100)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-                .overlay(alignment: .bottomTrailing) {
-                    if showTouchIDBadge {
-                        Image("touch_id")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 30, height: 30)
-                            .padding(5)
-                            .background(
-                                Circle()
-                                    .fill(Color.white)
-                            )
-                            .overlay(
-                                Circle()
-                                    .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
-                            )
-                            .offset(x: 4, y: 4)
-                    }
-                }
+        VStack(spacing: VaultSpacing.xl) {
+            icon
 
-            VStack(spacing: 6) {
-                Text(sessionManager.lockState == .setupRequired ? "Create Your Password" : "PassStore is Locked")
-                    .font(.title3.weight(.semibold))
-                Text(sessionManager.lockState == .setupRequired
+            VStack(spacing: VaultSpacing.xs) {
+                Text(isSetup ? "Create Your Password" : "PassStore is Locked")
+                    .font(.title2.weight(.semibold))
+                Text(isSetup
                      ? "Set a master password to protect your secrets."
-                     : "Enter your master password to unlock.")
+                     : "Unlock with Touch ID, or enter your master password.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            VStack(spacing: 10) {
-                SecureField("Master Password", text: $password)
+            VStack(spacing: VaultSpacing.m) {
+                SecureField(isSetup ? "New master password" : "Master password", text: $password)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-                    .onSubmit(submit)
+                    .controlSize(.large)
+                    .frame(width: 300)
+                    .focused($isPasswordFocused)
+                    .disabled(sessionManager.isBusy)
+                    .onSubmit { submit() }
+                    .accessibilityIdentifier("lock-password-field")
 
-                if let message = sessionManager.lastErrorMessage {
-                    Text(message)
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                }
+                statusLine
 
-                HStack(spacing: 10) {
-                    if sessionManager.lockState == .setupRequired {
-                        Button("Create Password", action: submit)
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .keyboardShortcut(.defaultAction)
-                            .disabled(password.isEmpty)
-                    } else {
-                        Button("Unlock", action: submit)
-                            .buttonStyle(.bordered)
-                            .tint(.secondary)
-                            .controlSize(.large)
-                            .keyboardShortcut(.defaultAction)
-                            .disabled(password.isEmpty)
-                    }
+                actions
+            }
 
-                    if sessionManager.lockState == .locked, sessionManager.isBiometricAvailable {
-                        Button("Use Biometrics") {
-                            Task { _ = await sessionManager.unlockWithBiometrics() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                    }
-                }
+            if !isSetup {
+                Button("Forgot your master password?") { isConfirmingReset = true }
+                    .buttonStyle(.link)
+                    .font(.vaultFootnote)
+                    .accessibilityIdentifier("lock-forgot-password")
             }
         }
-        .padding(32)
+        .padding(VaultSpacing.xxl)
+        .onAppear {
+            focusOrAuthenticate()
+        }
+        // Coming back to PassStore from another app should raise the prompt again, which is
+        // the whole point of not having to reach for the mouse.
+        .onChange(of: controlActiveState) { _, newValue in
+            guard newValue != .inactive else { return }
+            focusOrAuthenticate()
+        }
+        .onChange(of: sessionManager.lockState) { _, newValue in
+            guard newValue != .unlocked else { return }
+            didAttemptAutomaticUnlock = false
+            focusOrAuthenticate()
+        }
+        .confirmationDialog(
+            "Erase this vault and start over?",
+            isPresented: $isConfirmingReset,
+            titleVisibility: .visible
+        ) {
+            Button("Erase Vault", role: .destructive) {
+                sessionManager.resetVaultDestroyingAllData()
+                password = ""
+            }
+            .accessibilityIdentifier("lock-confirm-reset")
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("There is no way to recover a forgotten master password — your secrets are encrypted with it. Erasing deletes every stored item on this Mac and lets you set up a new vault. If you have a .pstore backup you can restore it afterwards.")
+        }
+    }
+
+    // MARK: Pieces
+
+    private var icon: some View {
+        appLockHeaderImage
+            .frame(width: 96, height: 96)
+            .clipShape(RoundedRectangle(cornerRadius: VaultRadius.hero, style: .continuous))
+            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .overlay(alignment: .bottomTrailing) {
+                if showTouchIDBadge {
+                    Image("touch_id")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .padding(5)
+                        .background(Circle().fill(Color.white))
+                        .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
+                        .offset(x: 4, y: 4)
+                        .accessibilityHidden(true)
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var statusLine: some View {
+        if sessionManager.isBusy {
+            HStack(spacing: VaultSpacing.s) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(isSetup ? "Creating your vault…" : "Unlocking…")
+                    .font(.vaultFootnote)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityIdentifier("lock-busy")
+        } else if let message = sessionManager.lastErrorMessage, !message.isEmpty {
+            Text(message)
+                .foregroundStyle(.red)
+                .font(.vaultFootnote)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("lock-error")
+        } else if isSetup {
+            PasswordStrengthBar(password: password)
+                .frame(width: 300)
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: VaultSpacing.m) {
+            // The default action and the visually prominent button are the same button now.
+            // They used to be different ones, so Return did not do what the UI implied.
+            Button(isSetup ? "Create Password" : "Unlock") { submit() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+                .disabled(password.isEmpty || sessionManager.isBusy)
+                .accessibilityIdentifier("lock-submit")
+
+            if sessionManager.lockState == .locked, sessionManager.isBiometricAvailable {
+                Button("Use Touch ID") {
+                    Task { await sessionManager.unlockWithBiometrics() }
+                }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .disabled(sessionManager.isBusy)
+                .accessibilityIdentifier("lock-biometrics")
+            }
+        }
+    }
+
+    // MARK: Behaviour
+
+    /// Raises Touch ID by itself when it can succeed, and otherwise puts the caret where the
+    /// owner is about to type. Previously the field never took focus, so every single unlock
+    /// started with a mouse click.
+    private func focusOrAuthenticate() {
+        guard sessionManager.lockState != .unlocked else { return }
+
+        if settings.unlocksWithBiometricsAutomatically,
+           !didAttemptAutomaticUnlock,
+           sessionManager.canAttemptBiometricUnlock {
+            didAttemptAutomaticUnlock = true
+            Task {
+                let unlocked = await sessionManager.unlockWithBiometrics()
+                if !unlocked { isPasswordFocused = true }
+            }
+            return
+        }
+
+        isPasswordFocused = true
     }
 
     private func submit() {
-        guard !password.isEmpty else { return }
-        if sessionManager.lockState == .setupRequired {
-            sessionManager.createVault(password: password)
-        } else {
-            _ = sessionManager.unlockWithPassword(password)
-        }
+        guard !password.isEmpty, !sessionManager.isBusy else { return }
+        let entered = password
         password = ""
+        Task {
+            if sessionManager.lockState == .setupRequired {
+                await sessionManager.createVault(password: entered)
+            } else {
+                await sessionManager.unlockWithPassword(entered)
+            }
+            if sessionManager.lockState != .unlocked {
+                isPasswordFocused = true
+            }
+        }
     }
 
     @ViewBuilder

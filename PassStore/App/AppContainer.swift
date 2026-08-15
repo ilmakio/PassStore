@@ -7,6 +7,7 @@ final class AppContainer {
     let clipboard: ClipboardService
     let envImport: EnvImportService
     let exportService: ExportService
+    let linkedFiles: LinkedFileService
     let memoryStore: VaultMemoryStore
 
     let workspaceRepository: WorkspaceRepository
@@ -39,8 +40,9 @@ final class AppContainer {
         self.clipboard = ClipboardService(settings: settings)
         self.envImport = EnvImportService()
         self.exportService = ExportService(cryptoService: cryptoService)
+        self.linkedFiles = LinkedFileService()
         self.workspaceRepository = WorkspaceRepository(store: memoryStore)
-        self.itemRepository = SecretItemRepository(store: memoryStore)
+        self.itemRepository = SecretItemRepository(store: memoryStore, settings: settings)
         self.templateRepository = TemplateRepository(store: memoryStore)
 
         sessionManager.onLock = { [clipboard] in
@@ -53,7 +55,7 @@ final class AppContainer {
     static func preview() -> AppContainer {
         let defaults = UserDefaults(suiteName: "PassStorePreview-\(UUID().uuidString)")!
         let container = AppContainer(inMemory: true, defaults: defaults)
-        container.sessionManager.createVault(password: "preview-ok")
+        container.sessionManager.createVaultSynchronously(password: "preview-ok")
         PreviewSeeder.seedIfNeeded(container)
         return container
     }
@@ -66,7 +68,7 @@ final class AppContainer {
             keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: true),
             encryptedVaultStore: InMemoryEncryptedVaultStore()
         )
-        container.sessionManager.createVault(password: "uitest-ok")
+        container.sessionManager.createVaultSynchronously(password: "uitest-ok")
         PreviewSeeder.seedIfNeeded(container)
 
         let sshTemplate = (try? container.templateRepository.fetchAll())?.first(where: { $0.itemType == .serverSSH })

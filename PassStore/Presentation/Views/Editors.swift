@@ -3,26 +3,12 @@ import UniformTypeIdentifiers
 
 // MARK: - Sheet Button Style
 
+/// Retained so older call sites keep compiling; new code uses `VaultButtonStyle` directly.
 struct SheetCapsuleButtonStyle: ButtonStyle {
     let isPrimary: Bool
-    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.semibold))
-            .padding(.vertical, 8)
-            .padding(.horizontal, 18)
-            .background(Capsule().fill(isPrimary ? Color.accentColor : Color.primary.opacity(0.08)))
-            // `.white` rather than `.black`: the fill is the user's accent colour, which is dark
-            // for most of the macOS presets, so black text failed contrast on the default blue.
-            .foregroundStyle(isPrimary ? Color.white : Color.primary)
-            .opacity(pressedOrDisabledOpacity(isPressed: configuration.isPressed))
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
-    }
-
-    private func pressedOrDisabledOpacity(isPressed: Bool) -> Double {
-        if !isEnabled { return 0.4 }
-        return isPressed ? 0.7 : 1
+        VaultButtonStyle(isPrimary ? .primary : .secondary).makeBody(configuration: configuration)
     }
 }
 
@@ -336,7 +322,10 @@ private struct TemplateCard: View {
     }
 }
 
-// MARK: - Sheet field layout (label above control; avoids macOS `Form` two-column alignment)
+// MARK: - Legacy chrome shims
+//
+// These forward to the design system in `VaultDesignSystem.swift`. They exist so the
+// migration could land screen by screen instead of as one unreviewable rewrite.
 
 struct SheetLabeledField<Content: View>: View {
     let title: String
@@ -350,75 +339,25 @@ struct SheetLabeledField<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            titleLabel
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var titleLabel: some View {
-        if let titleAccessibilityIdentifier {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier(titleAccessibilityIdentifier)
-        } else {
-            Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        VaultField(title, titleAccessibilityIdentifier: titleAccessibilityIdentifier, content: content)
     }
 }
-
-// MARK: - Grouped sheet card chrome (light panels like macOS grouped `Form` sections)
 
 struct GroupedSheetCardBackground: View {
-    var cornerRadius: CGFloat = 12
-
-    @Environment(\.colorScheme) private var colorScheme
+    var cornerRadius: CGFloat = VaultRadius.card
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(.regularMaterial)
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(
-                        Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.07),
-                        lineWidth: 0.5
-                    )
-            )
+        VaultCardBackground(cornerRadius: cornerRadius)
     }
 }
-
-// MARK: - Grouped sheet sections
 
 struct GroupedSheetSection<Content: View>: View {
     let title: String
+    var systemImage: String?
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !title.isEmpty {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                content()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background {
-                GroupedSheetCardBackground()
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        VaultSection(title, systemImage: systemImage, content: content)
     }
 }
 
@@ -1980,12 +1919,17 @@ private struct MasterPasswordSection: View {
 
     private func submit() {
         errorMessage = nil
-        do {
-            try sessionManager.changeMasterPassword(current: currentPassword, to: newPassword)
-            reset()
-            didSucceed = true
-        } catch {
-            errorMessage = error.localizedDescription
+        Task {
+            do {
+                // Two Argon2id passes — verify the old password, wrap under the new one.
+                // Both now run off the main actor, so the sheet can show progress instead
+                // of locking up for a couple of seconds.
+                try await sessionManager.changeMasterPassword(current: currentPassword, to: newPassword)
+                reset()
+                didSucceed = true
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -2363,50 +2307,80 @@ private struct TemplateSettingsPane: View {
 
 struct ExportSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let onExport: (String, String) -> Bool
+    @Bindable var viewModel: VaultViewModel
+
     @State private var password = ""
     @State private var confirmation = ""
+    @FocusState private var isPasswordFocused: Bool
+
+    private var mismatch: Bool {
+        !confirmation.isEmpty && password != confirmation
+    }
+
+    private var canExport: Bool {
+        !password.isEmpty && !confirmation.isEmpty && !mismatch && !viewModel.isWorking
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                GroupedSheetSection(title: ".pstore backup") {
-                    SheetLabeledField(title: "Export password") {
-                        SecureField("", text: $password, prompt: Text("Choose a strong password"))
-                            .textFieldStyle(.roundedBorder)
-                    }
+        VaultSheetScaffold(
+            title: "Export Backup",
+            subtitle: "An encrypted copy of your whole vault, as a .pstore file.",
+            systemImage: "arrow.up.doc"
+        ) {
+            Button("Cancel") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .keyboardShortcut(.cancelAction)
 
-                    SheetLabeledField(title: "Confirm password") {
-                        SecureField("", text: $confirmation, prompt: Text("Re-enter the same password"))
-                            .textFieldStyle(.roundedBorder)
-                    }
+            Spacer(minLength: 0)
 
-                    Text("PassStore saves an AES-encrypted backup as a `.pstore` file. The export password is separate from your vault password. Anyone with the file can try to guess that password offline, so use a long, unique passphrase and store backups only where you trust.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
-                }
-
-                HStack(spacing: 12) {
-                    Button("Cancel") { dismiss() }
-                        .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
-                    Button("Export") {
-                        if onExport(password, confirmation) { dismiss() }
-                    }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                    .disabled(password.isEmpty || confirmation.isEmpty)
-                }
-                .frame(maxWidth: .infinity)
+            if viewModel.isWorking {
+                ProgressView()
+                    .controlSize(.small)
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Export…") { export() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canExport)
+                .accessibilityIdentifier("export-confirm")
+        } content: {
+            VaultSection("Backup password", systemImage: "key.horizontal") {
+                VaultField("Password") {
+                    SecureField("", text: $password, prompt: Text("Choose a strong password"))
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isPasswordFocused)
+                        .accessibilityIdentifier("export-password")
+                }
+
+                PasswordStrengthBar(password: password)
+
+                VaultField("Confirm password") {
+                    SecureField("", text: $confirmation, prompt: Text("Re-enter the same password"))
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { if canExport { export() } }
+                        .accessibilityIdentifier("export-confirmation")
+                }
+
+                if mismatch {
+                    VaultNote(text: "The two passwords don't match.", tone: .danger)
+                }
+            }
+
+            VaultSection("What this means", systemImage: "info.circle") {
+                VaultNote(text: "This password is separate from your master password, and it is the only thing protecting the file. Anyone holding the backup can try to guess it offline, at their own pace.")
+                VaultNote(text: "There is no recovery if you forget it. Store the file somewhere you trust.", tone: .warning)
+            }
         }
-        // minHeight rather than a fixed height: the security explainer wraps to 4-5 lines and
-        // was forcing the action buttons out of view at 320pt.
-        .frame(width: 440)
-        .frame(minHeight: 400)
-        .navigationTitle("Export .pstore Backup")
+        .frame(width: 460, height: 520)
+        .onAppear { isPasswordFocused = true }
+    }
+
+    private func export() {
+        Task {
+            if await viewModel.exportSelectedItems(password: password, confirmation: confirmation) {
+                dismiss()
+            }
+        }
     }
 }
 
@@ -2414,59 +2388,257 @@ struct ExportSheet: View {
 
 struct ImportEncryptedExportSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let viewModel: VaultViewModel
+    @Bindable var viewModel: VaultViewModel
+
     @State private var password = ""
     @State private var isPresentingFileImporter = false
+    @FocusState private var isPasswordFocused: Bool
+
+    private var canContinue: Bool {
+        !password.isEmpty && viewModel.importExportSelectedFileName != nil && !viewModel.isWorking
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                GroupedSheetSection(title: ".pstore backup") {
-                    Text("Select a `.pstore` backup (or a legacy `.json` export with the same encrypted format), then enter the export password you used when saving it. If the password is weak, the backup may be cracked offline.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
+        VaultSheetScaffold(
+            title: "Restore Backup",
+            subtitle: "Open a .pstore file. You choose what to do with it on the next step.",
+            systemImage: "arrow.down.doc"
+        ) {
+            Button("Cancel") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .keyboardShortcut(.cancelAction)
 
-                    Button {
-                        isPresentingFileImporter = true
-                    } label: {
-                        Label(
-                            viewModel.importExportSelectedFileName.map { "Selected: \($0)" } ?? "Choose export file…",
-                            systemImage: "doc.badge.arrow.up"
-                        )
-                    }
+            Spacer(minLength: 0)
 
-                    SheetLabeledField(title: "Export password") {
-                        SecureField("", text: $password, prompt: Text("Password used when exporting"))
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    Button("Cancel") { dismiss() }
-                        .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
-                    Button("Import") {
-                        if viewModel.importEncryptedExport(password: password) { dismiss() }
-                    }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                    .disabled(password.isEmpty || viewModel.importExportSelectedFileName == nil)
-                }
-                .frame(maxWidth: .infinity)
+            if viewModel.isWorking {
+                ProgressView()
+                    .controlSize(.small)
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Continue") { unlockBackup() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canContinue)
+                .accessibilityIdentifier("import-continue")
+        } content: {
+            VaultSection("Backup file", systemImage: "doc.badge.arrow.up") {
+                Button {
+                    isPresentingFileImporter = true
+                } label: {
+                    HStack(spacing: VaultSpacing.s) {
+                        Image(systemName: viewModel.importExportSelectedFileName == nil ? "doc.badge.plus" : "doc.fill")
+                        Text(viewModel.importExportSelectedFileName ?? "Choose a .pstore file…")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .accessibilityIdentifier("import-choose-file")
+
+                VaultNote(text: "Legacy .json exports written by PassStore 1.0 also work.")
+            }
+
+            VaultSection("Backup password", systemImage: "key.horizontal") {
+                VaultField("Password") {
+                    SecureField("", text: $password, prompt: Text("Password used when exporting"))
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isPasswordFocused)
+                        .onSubmit { if canContinue { unlockBackup() } }
+                        .accessibilityIdentifier("import-password")
+                }
+            }
+
+            VaultNote(text: "Nothing is written yet. PassStore will show you what the backup contains and let you choose whether to replace your vault or merge into it.", tone: .success)
         }
-        .frame(width: 440)
-        .frame(minHeight: 400)
-        .navigationTitle("Import .pstore Backup")
+        .frame(width: 460, height: 520)
         .fileImporter(
             isPresented: $isPresentingFileImporter,
             allowedContentTypes: [.passStoreBackup, .json],
             allowsMultipleSelection: false
         ) { result in
             viewModel.applyImportFilePickerResult(result)
+            isPasswordFocused = true
         }
+    }
+
+    private func unlockBackup() {
+        Task {
+            if await viewModel.prepareImport(password: password) {
+                // Hand over to the preview sheet, which owns the replace / merge decision.
+                viewModel.activeSheet = .importPreview
+            }
+        }
+    }
+}
+
+// MARK: - Import preview
+
+/// Shows what a decrypted backup contains and how it would be applied.
+///
+/// Restoring used to be a single irreversible step triggered by the password field. This is
+/// the step that was missing: the counts, the consequence spelled out, and a default that
+/// does not destroy anything.
+struct ImportPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var viewModel: VaultViewModel
+
+    @State private var mode: ImportPreview.Mode = .merge
+    @State private var isConfirmingReplace = false
+
+    var body: some View {
+        VaultSheetScaffold(
+            title: "Restore Backup",
+            subtitle: viewModel.importPreview?.fileName,
+            systemImage: "arrow.down.doc",
+            tint: mode == .replace ? .orange : .accentColor
+        ) {
+            Button("Cancel") {
+                viewModel.cancelStagedImport()
+                dismiss()
+            }
+            .buttonStyle(VaultButtonStyle(.secondary))
+            .keyboardShortcut(.cancelAction)
+
+            Spacer(minLength: 0)
+
+            Button(mode == .replace ? "Replace Vault…" : "Merge Into Vault") {
+                if mode == .replace {
+                    isConfirmingReplace = true
+                } else {
+                    apply()
+                }
+            }
+            .buttonStyle(VaultButtonStyle(mode == .replace ? .destructive : .primary))
+            .disabled(viewModel.importPreview == nil)
+            .accessibilityIdentifier("import-apply")
+        } content: {
+            if let preview = viewModel.importPreview {
+                contents(preview)
+                modePicker(preview)
+                safetyNote
+            } else {
+                VaultNote(text: "This backup could not be read.", tone: .danger)
+            }
+        }
+        .frame(width: 520, height: 560)
+        // Dismissing with Escape must not leave a decrypted backup sitting in memory.
+        .onDisappear { viewModel.cancelStagedImport() }
+        .confirmationDialog(
+            "Replace everything in your vault?",
+            isPresented: $isConfirmingReplace,
+            titleVisibility: .visible
+        ) {
+            Button("Replace Vault", role: .destructive) { apply() }
+                .accessibilityIdentifier("import-confirm-replace")
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your current \(viewModel.items.count) \(viewModel.items.count == 1 ? "item" : "items") will be discarded and replaced by the backup. PassStore keeps a copy of your current vault so you can undo this, but it is still a full replacement.")
+        }
+    }
+
+    private func contents(_ preview: ImportPreview) -> some View {
+        VaultSection("This backup contains", systemImage: "shippingbox") {
+            HStack(spacing: VaultSpacing.m) {
+                countTile(preview.itemCount, label: preview.itemCount == 1 ? "item" : "items", systemImage: "key.horizontal")
+                countTile(preview.workspaceCount, label: preview.workspaceCount == 1 ? "workspace" : "workspaces", systemImage: "folder")
+                countTile(preview.templateCount, label: preview.templateCount == 1 ? "template" : "templates", systemImage: "square.on.square")
+            }
+
+            if preview.isLegacyFormat {
+                VaultNote(text: "This is a PassStore 1.0 export. It carries items only, so it can only be merged — your workspaces, templates and settings are left alone.")
+            }
+        }
+    }
+
+    private func countTile(_ count: Int, label: String, systemImage: String) -> some View {
+        VStack(spacing: VaultSpacing.xs) {
+            Image(systemName: systemImage)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text("\(count)")
+                .font(.title2.weight(.semibold).monospacedDigit())
+            Text(label)
+                .font(.vaultFootnote)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, VaultSpacing.m)
+        .background { VaultCardBackground(cornerRadius: VaultRadius.value) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(count) \(label)")
+    }
+
+    @ViewBuilder
+    private func modePicker(_ preview: ImportPreview) -> some View {
+        if preview.isLegacyFormat {
+            VaultSection("How it will be applied", systemImage: "arrow.triangle.merge") {
+                VaultNote(text: ImportPreview.Mode.merge.explanation, tone: .success)
+            }
+        } else {
+            VaultSection("How should it be applied?", systemImage: "arrow.triangle.merge") {
+                Picker("", selection: $mode) {
+                    ForEach(ImportPreview.Mode.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityIdentifier("import-mode")
+
+                VaultNote(text: mode.explanation, tone: mode == .replace ? .warning : .success)
+
+                if mode == .merge {
+                    Divider()
+                    mergeBreakdown(preview)
+                }
+            }
+        }
+    }
+
+    private func mergeBreakdown(_ preview: ImportPreview) -> some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+            breakdownRow("\(preview.newItemCount) new", detail: "added to your vault", systemImage: "plus.circle")
+            if preview.identicalItemCount > 0 {
+                breakdownRow("\(preview.identicalItemCount) identical", detail: "already present, skipped", systemImage: "equal.circle")
+            }
+            if preview.conflictingItemCount > 0 {
+                breakdownRow(
+                    "\(preview.conflictingItemCount) changed",
+                    detail: "kept as separate copies marked “(imported)”",
+                    systemImage: "doc.on.doc"
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func breakdownRow(_ title: String, detail: String, systemImage: String) -> some View {
+        HStack(spacing: VaultSpacing.s) {
+            Image(systemName: systemImage)
+                .font(.vaultFootnote)
+                .foregroundStyle(.secondary)
+                .frame(width: 14)
+            Text(title)
+                .font(.vaultFootnote)
+                .fontWeight(.medium)
+            Text(detail)
+                .font(.vaultFootnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var safetyNote: some View {
+        VaultNote(
+            text: "Before writing anything, PassStore copies your current vault aside. You can undo this with ⌘Z, or restore the copy later from Settings → Advanced.",
+            tone: .neutral,
+            systemImage: "arrow.uturn.backward"
+        )
+    }
+
+    private func apply() {
+        viewModel.applyStagedImport(mode: mode)
+        dismiss()
     }
 }
 
