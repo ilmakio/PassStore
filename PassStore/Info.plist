@@ -4,8 +4,6 @@
 <dict>
 	<key>CFBundleIconFile</key>
 	<string>PassStore</string>
-	<key>NSAccessibilityUsageDescription</key>
-	<string>PassStore uses accessibility permission to register a global keyboard shortcut (⌘⌥P) so you can open the command palette while using other apps.</string>
 	<key>SUFeedURL</key>
 	<string>https://s3.makio.app/storage/passstore/updates/stable/appcast.xml</string>
 	<key>SUPublicEDKey</key>

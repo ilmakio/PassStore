@@ -998,9 +998,28 @@ struct WorkspaceEditorSheet: View {
 
 // MARK: - Settings
 
-private enum SettingsTab: Hashable {
+private enum SettingsTab: String, CaseIterable, Hashable, Identifiable {
     case general
+    case data
     case templates
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .data: "Data"
+        case .templates: "Templates"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: "gearshape"
+        case .data: "externaldrive"
+        case .templates: "square.on.square"
+        }
+    }
 }
 
 struct SettingsSheetView: View {
@@ -1009,18 +1028,19 @@ struct SettingsSheetView: View {
     @Bindable var viewModel: VaultViewModel
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                AppSettingsView(settings: settings, viewModel: viewModel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Button("Done") { dismiss() }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                    .padding(.vertical, 14)
-            }
-            .navigationTitle("Settings")
+        VaultSheetScaffold(
+            title: "Settings",
+            systemImage: "gearshape",
+            scrolls: false
+        ) {
+            Spacer(minLength: 0)
+            Button("Done") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+        } content: {
+            AppSettingsView(settings: settings, viewModel: viewModel)
         }
-        .frame(minWidth: 680, minHeight: 520)
+        .frame(width: 720, height: 600)
     }
 }
 
@@ -1033,15 +1053,15 @@ struct AppSettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $selectedTab) {
-                Text("General").tag(SettingsTab.general)
-                Text("Templates").tag(SettingsTab.templates)
+                ForEach(SettingsTab.allCases) { tab in
+                    Label(tab.title, systemImage: tab.systemImage).tag(tab)
+                }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .accessibilityLabel("Settings category")
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 10)
+            .padding(.horizontal, VaultSpacing.xl)
+            .padding(.vertical, VaultSpacing.m)
 
             Divider()
 
@@ -1049,6 +1069,8 @@ struct AppSettingsView: View {
                 switch selectedTab {
                 case .general:
                     GeneralSettingsPane(settings: settings, sessionManager: viewModel.container.sessionManager)
+                case .data:
+                    DataSettingsPane(settings: settings, viewModel: viewModel)
                 case .templates:
                     TemplateSettingsPane(viewModel: viewModel)
                 }
@@ -1058,31 +1080,140 @@ struct AppSettingsView: View {
     }
 }
 
-private struct GeneralSettingsPane: View {
-    @Environment(\.openURL) private var openURL
-
+/// Everything about what PassStore keeps on disk beyond the secrets themselves.
+private struct DataSettingsPane: View {
     @Bindable var settings: AppSettingsStore
-    @Bindable var sessionManager: VaultSessionManager
+    @Bindable var viewModel: VaultViewModel
 
-    @State private var globalHotkeyNeedsAccessibility = false
+    @State private var isConfirmingPurge = false
+    @State private var isConfirmingRollback = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                GroupedSheetSection(title: "Unlock") {
-                    Toggle("Use Touch ID or password to unlock", isOn: $settings.biometricsEnabled)
+            VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                VaultSection("Previous values", systemImage: "clock.arrow.circlepath") {
+                    Toggle("Keep previous values when a secret changes", isOn: $settings.keepsSecretValueHistory)
                         .toggleStyle(.checkbox)
-                    Text("When enabled, you can unlock the vault with biometrics when your Mac supports it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
+                        .accessibilityIdentifier("settings-value-history")
+
+                    VaultNote(text: "Lets you look up or restore the password an item had before you rotated it. Up to \(SecretItemRepository.valueHistoryLimit) versions per field, inside the encrypted vault.")
+
+                    VaultNote(
+                        text: "This means an old secret stays recoverable until you delete it. If a value was leaked, purge it here after rotating.",
+                        tone: .warning
+                    )
+
+                    Divider()
+
+                    HStack {
+                        Text(storedCountLabel)
+                            .font(.vaultFootnote)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        Button("Delete All Previous Values…") { isConfirmingPurge = true }
+                            .disabled(viewModel.storedPreviousValueCount == 0)
+                            .accessibilityIdentifier("settings-purge-history")
+                    }
+                }
+
+                VaultSection("Linked files", systemImage: "link") {
+                    Toggle("Check linked files when PassStore comes to the front", isOn: $settings.checksLinkedFilesOnFocus)
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("settings-check-linked-files")
+
+                    VaultNote(text: "An item imported from a .env can remember that file. When the file changes on disk, the item shows an Update button — nothing runs in the background and nothing is written without you asking.")
+
+                    if viewModel.outdatedLinkedFileCount > 0 {
+                        VaultNote(
+                            text: "\(viewModel.outdatedLinkedFileCount) linked \(viewModel.outdatedLinkedFileCount == 1 ? "file has" : "files have") changed on disk.",
+                            tone: .warning
+                        )
+                    }
+                }
+
+                VaultSection("Recovery", systemImage: "arrow.uturn.backward") {
+                    if let date = viewModel.rollbackCopyDate {
+                        VaultNote(text: "A copy of your vault from before the last backup restore is on disk, taken \(Self.formatter.string(from: date)).")
+                        HStack {
+                            Button("Restore That Copy…") { isConfirmingRollback = true }
+                                .accessibilityIdentifier("settings-restore-rollback")
+                            Spacer(minLength: 0)
+                            Button("Discard Copy") { viewModel.discardRollbackCopy() }
+                                .accessibilityIdentifier("settings-discard-rollback")
+                        }
+                    } else {
+                        VaultNote(text: "No pre-restore copy is stored. PassStore takes one automatically whenever you restore a backup, so a restore can be undone even after quitting.")
+                    }
+                }
+            }
+            .padding(VaultSpacing.xl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .confirmationDialog(
+            "Delete every stored previous value?",
+            isPresented: $isConfirmingPurge,
+            titleVisibility: .visible
+        ) {
+            Button("Delete All", role: .destructive) { viewModel.purgeAllValueHistory() }
+                .accessibilityIdentifier("settings-confirm-purge-history")
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Change logs are kept — only the old values are removed, across every item. This cannot be undone once you quit.")
+        }
+        .confirmationDialog(
+            "Restore the vault from before the last backup restore?",
+            isPresented: $isConfirmingRollback,
+            titleVisibility: .visible
+        ) {
+            Button("Restore and Lock", role: .destructive) { viewModel.restoreRollbackCopy() }
+                .accessibilityIdentifier("settings-confirm-rollback")
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Everything imported since then is discarded. PassStore will lock so the restored vault is read from disk.")
+        }
+    }
+
+    private var storedCountLabel: String {
+        let count = viewModel.storedPreviousValueCount
+        guard count > 0 else { return "No previous values stored." }
+        return "\(count) previous \(count == 1 ? "value" : "values") stored."
+    }
+
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private struct GeneralSettingsPane: View {
+    @Bindable var settings: AppSettingsStore
+    @Bindable var sessionManager: VaultSessionManager
+
+    @State private var isShortcutUnavailable = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                VaultSection("Unlock", systemImage: "touchid") {
+                    Toggle("Use Touch ID to unlock", isOn: $settings.biometricsEnabled)
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("settings-biometrics")
+
+                    Toggle("Ask automatically when PassStore opens", isOn: $settings.unlocksWithBiometricsAutomatically)
+                        .toggleStyle(.checkbox)
+                        .disabled(!settings.biometricsEnabled)
+                        .accessibilityIdentifier("settings-auto-biometrics")
+
+                    VaultNote(text: "The Touch ID prompt appears by itself on launch and when you switch back to PassStore, so unlocking needs no clicks. Turn it off to reach for it yourself.")
                 }
 
                 MasterPasswordSection(sessionManager: sessionManager)
 
-                GroupedSheetSection(title: "Privacy") {
-                    SheetLabeledField(title: "Lock after inactivity") {
+                VaultSection("Locking", systemImage: "lock") {
+                    VaultField("Lock after inactivity") {
                         Picker("", selection: $settings.autoLockInterval) {
                             ForEach(AutoLockPreset.allCases) { preset in
                                 Text(preset.label).tag(preset.seconds)
@@ -1090,9 +1221,18 @@ private struct GeneralSettingsPane: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
+                        .frame(maxWidth: 220)
                     }
 
-                    SheetLabeledField(title: "Clear clipboard after") {
+                    Toggle("Lock when the Mac sleeps or the screen locks", isOn: $settings.locksOnSystemLock)
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("settings-lock-on-sleep")
+
+                    VaultNote(text: "Closing the lid used to leave the vault open in memory until the inactivity timer happened to fire.")
+                }
+
+                VaultSection("Clipboard", systemImage: "doc.on.clipboard") {
+                    VaultField("Clear clipboard after") {
                         Picker("", selection: $settings.clipboardClearInterval) {
                             ForEach(ClipboardClearPreset.allCases) { preset in
                                 Text(preset.label).tag(preset.seconds)
@@ -1100,44 +1240,34 @@ private struct GeneralSettingsPane: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
+                        .frame(maxWidth: 220)
                     }
 
-                    Text("The system clipboard can be read by other apps and clipboard managers until PassStore clears it or you copy something else. Shorter intervals reduce that window; they do not make the clipboard private while the secret is on it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
+                    VaultNote(text: "Other apps and clipboard managers can read the system clipboard until PassStore clears it. A shorter interval narrows that window — it does not make the clipboard private while the secret is on it.")
                 }
 
-                GroupedSheetSection(title: "Shortcuts") {
+                VaultSection("Shortcuts", systemImage: "command") {
                     Toggle("Global command palette (⌘⌥P)", isOn: $settings.globalCommandPaletteHotkeyEnabled)
                         .toggleStyle(.checkbox)
                         .accessibilityIdentifier("settings-global-command-palette-hotkey")
 
-                    Text("Activate PassStore from any app and open the command palette when the vault is unlocked. PassStore must keep running (for example via the menu bar icon).")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
+                    VaultNote(text: "Opens the palette from any app while the vault is unlocked. PassStore has to keep running — the menu bar icon is enough.")
 
-                    if settings.globalCommandPaletteHotkeyEnabled, globalHotkeyNeedsAccessibility {
-                        Text("Turn on PassStore under Accessibility in System Settings so the global shortcut can run while other apps are focused.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .multilineTextAlignment(.leading)
+                    VaultNote(
+                        text: "PassStore registers this one chord with the system. It does not request Accessibility and never sees anything else you type.",
+                        tone: .success,
+                        systemImage: "lock.shield"
+                    )
 
-                        Button("Open Accessibility Settings…") {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                                openURL(url)
-                            }
-                        }
+                    if settings.globalCommandPaletteHotkeyEnabled, isShortcutUnavailable {
+                        VaultNote(
+                            text: "⌘⌥P could not be registered — another app is already using it. Quit that app or turn this off.",
+                            tone: .warning
+                        )
                     }
                 }
-
-
             }
-            .padding(20)
+            .padding(VaultSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1162,7 +1292,7 @@ private struct GeneralSettingsPane: View {
 
     private func refreshGlobalHotkeyAccessibilityState() {
         GlobalCommandPaletteHotkey.shared.reinstallMonitors()
-        globalHotkeyNeedsAccessibility = GlobalCommandPaletteHotkey.shared.isAccessibilityRequiredButMissing
+        isShortcutUnavailable = GlobalCommandPaletteHotkey.shared.isShortcutUnavailable
     }
 }
 
