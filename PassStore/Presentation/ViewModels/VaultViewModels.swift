@@ -386,6 +386,44 @@ final class VaultViewModel {
 
     // MARK: - Multi-selection
 
+    /// Bridge between SwiftUI's `List(selection:)` and the existing single/multi split.
+    ///
+    /// Handing the list a real selection set is what buys arrow keys, ⇧-click ranges and
+    /// ⌘-click toggling; the rest of the app still thinks in terms of "the selected item"
+    /// plus "a multi-selection", so this keeps both in step.
+    var listSelection: Set<UUID> {
+        get {
+            if !multiSelectedIDs.isEmpty { return multiSelectedIDs }
+            return selectedItemID.map { [$0] } ?? []
+        }
+        set {
+            guard newValue != listSelection else { return }
+            if newValue.count > 1 {
+                multiSelectedIDs = newValue
+                if let current = selectedItemID, newValue.contains(current) { return }
+                selectedItemID = filteredItems.first(where: { newValue.contains($0.id) })?.id
+            } else {
+                multiSelectedIDs = []
+                select(items.first(where: { $0.id == newValue.first }))
+            }
+        }
+    }
+
+    /// The field a one-click copy should reach for.
+    ///
+    /// Prefers a password, then any other secret, then the first copyable value — which is
+    /// what "copy this item" means for the .env and connection-string types that have no
+    /// password at all.
+    func primaryCopyField(for item: SecretItemEntity) -> FieldResolvedValue? {
+        let fields = Self.visibleFields(in: resolvedFields(for: item)).filter(\.isCopyable)
+        if let password = fields.first(where: {
+            SecretFieldClassification.isPasswordLike(key: $0.key, label: $0.label)
+        }) {
+            return password
+        }
+        return fields.first(where: \.isSensitive) ?? fields.first
+    }
+
     var isMultiSelecting: Bool { !multiSelectedIDs.isEmpty }
 
     var multiSelectedItems: [SecretItemEntity] {

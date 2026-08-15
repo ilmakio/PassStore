@@ -77,6 +77,21 @@ struct PassStoreCommands: Commands {
             }
         }
 
+        // Replaces the system Undo entry, which did nothing here: the app has no text
+        // document to undo into, but it does have destructive vault actions.
+        CommandGroup(replacing: .undoRedo) {
+            Button {
+                viewModel.undoLastDestructiveAction()
+            } label: {
+                Label(
+                    viewModel.undoActionLabel.map { "Undo \($0)" } ?? "Undo",
+                    systemImage: "arrow.uturn.backward"
+                )
+            }
+            .keyboardShortcut("z", modifiers: [.command])
+            .disabled(viewModel.undoActionLabel == nil)
+        }
+
         CommandGroup(after: .pasteboard) {
             Divider()
 
