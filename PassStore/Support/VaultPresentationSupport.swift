@@ -155,6 +155,11 @@ enum PasswordStrength: Equatable, CaseIterable {
         guard !password.isEmpty else { return .empty }
         guard password.count >= 8 else { return .tooShort }
 
+        // Length and character classes alone were far too generous: "password1234" is twelve
+        // characters with two classes, which used to score Fair — good enough that the vault
+        // health audit stayed quiet about it. Obvious structure is now checked first.
+        if isObviouslyGuessable(password) { return .weak }
+
         let hasUpper = password.contains(where: \.isUppercase)
         let hasLower = password.contains(where: \.isLowercase)
         let hasDigit = password.contains(where: \.isNumber)
@@ -163,8 +168,69 @@ enum PasswordStrength: Equatable, CaseIterable {
 
         if password.count >= 20, classes >= 4 { return .veryStrong }
         if password.count >= 16, classes >= 3 { return .strong }
-        if password.count >= 12 || classes >= 3 { return .fair }
+        if password.count >= 12, classes >= 2 { return .fair }
+        if classes >= 3 { return .fair }
         return .weak
+    }
+
+    /// Cheap local checks for the shapes that make a long password worthless.
+    ///
+    /// Deliberately offline and deliberately small — no wordlist ships with the app and
+    /// nothing is sent anywhere. It catches the common cases, not every bad password.
+    static func isObviouslyGuessable(_ password: String) -> Bool {
+        let lower = password.lowercased()
+
+        // A common base word with digits or punctuation bolted on is still that word.
+        let stripped = lower.drop(while: { !$0.isLetter })
+            .prefix(while: { $0.isLetter })
+        if commonBaseWords.contains(String(stripped)) { return true }
+        if commonBaseWords.contains(where: { lower.hasPrefix($0) && lower.count - $0.count <= 4 }) { return true }
+
+        // A handful of distinct characters, however long the string.
+        if Set(lower).count <= max(3, password.count / 6) { return true }
+
+        // Straight runs like 123456, abcdef, qwerty.
+        if hasLongRun(lower) { return true }
+        if keyboardRuns.contains(where: { lower.contains($0) }) { return true }
+
+        // One short block repeated: "abcabcabcabc".
+        for blockLength in 1...4 where password.count >= blockLength * 3 && password.count % blockLength == 0 {
+            let block = String(lower.prefix(blockLength))
+            if String(repeating: block, count: password.count / blockLength) == lower { return true }
+        }
+
+        return false
+    }
+
+    private static let commonBaseWords: Set<String> = [
+        "password", "passwd", "letmein", "welcome", "admin", "administrator", "root",
+        "secret", "changeme", "qwerty", "azerty", "iloveyou", "dragon", "monkey",
+        "sunshine", "princess", "football", "baseball", "master", "login", "test",
+        "guest", "default", "temp", "hello", "abc"
+    ]
+
+    private static let keyboardRuns = ["qwerty", "asdf", "zxcv", "1234", "0987", "abcdef"]
+
+    /// True when six or more consecutive characters step by a constant ±1.
+    private static func hasLongRun(_ value: String) -> Bool {
+        let scalars = Array(value.unicodeScalars.map(\.value))
+        guard scalars.count >= 6 else { return false }
+        var run = 1
+        var direction = 0
+        for index in 1..<scalars.count {
+            let delta = Int(scalars[index]) - Int(scalars[index - 1])
+            if delta == direction, delta == 1 || delta == -1 {
+                run += 1
+                if run >= 6 { return true }
+            } else if delta == 1 || delta == -1 {
+                direction = delta
+                run = 2
+            } else {
+                direction = 0
+                run = 1
+            }
+        }
+        return false
     }
 }
 

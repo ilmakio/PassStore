@@ -57,73 +57,79 @@ struct ItemCreationFlowSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Group {
-                    if selectedTemplateID != nil {
-                        ItemEditorContent(
-                            viewModel: viewModel,
-                            availableWorkspaces: viewModel.workspaces,
-                            draft: $draft,
-                            tagText: $tagText,
-                            showWorkspaceSheet: $showWorkspaceSheet,
-                            showAdvancedFields: $showAdvancedFields,
-                            showEnvImportStaging: true,
-                            envImportPasteBuffer: $envImportPasteBuffer,
-                            envImportParseIntoEntries: $envImportParseIntoEntries,
-                            envImportSuggestedTitleFromFile: $envImportSuggestedTitleFromFile
-                        )
-                    } else {
-                        TemplatePickerView(viewModel: viewModel) { template in
-                            selectedTemplateID = template.id
-                            draft = viewModel.newItemDraft(template: template)
-                            tagText = ""
-                            showAdvancedFields = false
-                            resetEnvImportStaging()
-                        }
-                    }
+        VaultSheetScaffold(
+            title: selectedTemplate == nil ? "New Secret" : (selectedTemplate?.name ?? "New Secret"),
+            subtitle: selectedTemplate == nil
+                ? "Pick the shape of the thing you're storing."
+                : selectedTemplate?.itemType.templateDescription,
+            systemImage: selectedTemplate?.itemType.systemImage ?? "plus.rectangle.on.folder",
+            scrolls: false
+        ) {
+            if selectedTemplate != nil {
+                Button("Back") {
+                    selectedTemplateID = nil
+                    resetEnvImportStaging()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .accessibilityIdentifier("creation-back-to-templates")
+            }
 
-                HStack(spacing: 12) {
-                    Button("Cancel") { dismiss() }
-                        .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
-                    if selectedTemplate != nil {
-                        Button("Save") {
-                            let toSave = EnvImportSaveSupport.draftForSave(
-                                viewModel: viewModel,
-                                base: draft,
-                                pasteBuffer: envImportPasteBuffer,
-                                parseIntoEntries: envImportParseIntoEntries,
-                                suggestedTitleFromFile: envImportSuggestedTitleFromFile
-                            )
-                            viewModel.saveItem(toSave)
-                            dismiss()
-                        }
-                        .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                        .disabled(!canSave)
+            Spacer(minLength: 0)
+
+            Button("Cancel") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .keyboardShortcut(.cancelAction)
+
+            if selectedTemplate != nil {
+                Button("Save") { save() }
+                    .buttonStyle(VaultButtonStyle(.primary))
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSave)
+                    .accessibilityIdentifier("creation-save")
+            }
+        } content: {
+            Group {
+                if selectedTemplateID != nil {
+                    ItemEditorContent(
+                        viewModel: viewModel,
+                        availableWorkspaces: viewModel.workspaces,
+                        draft: $draft,
+                        tagText: $tagText,
+                        showWorkspaceSheet: $showWorkspaceSheet,
+                        showAdvancedFields: $showAdvancedFields,
+                        showEnvImportStaging: true,
+                        envImportPasteBuffer: $envImportPasteBuffer,
+                        envImportParseIntoEntries: $envImportParseIntoEntries,
+                        envImportSuggestedTitleFromFile: $envImportSuggestedTitleFromFile
+                    )
+                } else {
+                    TemplatePickerView(viewModel: viewModel) { template in
+                        selectedTemplateID = template.id
+                        draft = viewModel.newItemDraft(template: template)
+                        tagText = ""
+                        showAdvancedFields = false
+                        resetEnvImportStaging()
                     }
                 }
-                .padding(.vertical, 14)
             }
-            .navigationTitle(selectedTemplate == nil ? "Choose a Template" : "New Secret Item")
-            .toolbar {
-                if selectedTemplate != nil {
-                    ToolbarItem(placement: .navigation) {
-                        Button("Templates") {
-                            selectedTemplateID = nil
-                            resetEnvImportStaging()
-                        }
-                    }
-                }
-            }
-            .sheet(isPresented: $showWorkspaceSheet) {
-                NavigationStack {
-                    WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: onSaveWorkspace)
-                }
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 620, minHeight: 520)
+        .frame(width: 660, height: 620)
+        .sheet(isPresented: $showWorkspaceSheet) {
+            WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: onSaveWorkspace)
+        }
+    }
+
+    private func save() {
+        let toSave = EnvImportSaveSupport.draftForSave(
+            viewModel: viewModel,
+            base: draft,
+            pasteBuffer: envImportPasteBuffer,
+            parseIntoEntries: envImportParseIntoEntries,
+            suggestedTitleFromFile: envImportSuggestedTitleFromFile
+        )
+        viewModel.saveItem(toSave)
+        dismiss()
     }
 
     private var selectedTemplate: SecretFieldTemplateEntity? {
@@ -177,42 +183,45 @@ struct ItemEditorSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                ItemEditorContent(
-                    viewModel: viewModel,
-                    availableWorkspaces: viewModel.workspaces,
-                    draft: $draft,
-                    tagText: $tagText,
-                    showWorkspaceSheet: $showWorkspaceSheet,
-                    showAdvancedFields: $showAdvancedFields,
-                    showEnvImportStaging: false,
-                    envImportPasteBuffer: .constant(""),
-                    envImportParseIntoEntries: .constant(true),
-                    envImportSuggestedTitleFromFile: .constant(nil)
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VaultSheetScaffold(
+            title: title,
+            subtitle: draft.title.isEmpty ? nil : draft.title,
+            systemImage: draft.type.systemImage,
+            scrolls: false
+        ) {
+            Spacer(minLength: 0)
 
-                HStack(spacing: 12) {
-                    Button("Cancel") { dismiss() }
-                        .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
-                    Button("Save") {
-                        onSave(draft)
-                        dismiss()
-                    }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                    .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .padding(.vertical, 14)
+            Button("Cancel") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .keyboardShortcut(.cancelAction)
+
+            Button("Save") {
+                onSave(draft)
+                dismiss()
             }
-            .navigationTitle(title)
-            .sheet(isPresented: $showWorkspaceSheet) {
-                NavigationStack {
-                    WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: handleWorkspaceSave)
-                }
-            }
+            .buttonStyle(VaultButtonStyle(.primary))
+            .keyboardShortcut(.defaultAction)
+            .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("editor-save")
+        } content: {
+            ItemEditorContent(
+                viewModel: viewModel,
+                availableWorkspaces: viewModel.workspaces,
+                draft: $draft,
+                tagText: $tagText,
+                showWorkspaceSheet: $showWorkspaceSheet,
+                showAdvancedFields: $showAdvancedFields,
+                showEnvImportStaging: false,
+                envImportPasteBuffer: .constant(""),
+                envImportParseIntoEntries: .constant(true),
+                envImportSuggestedTitleFromFile: .constant(nil)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 580, minHeight: 480)
+        .frame(width: 660, height: 620)
+        .sheet(isPresented: $showWorkspaceSheet) {
+            WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: handleWorkspaceSave)
+        }
     }
 
     private func handleWorkspaceSave(_ workspaceDraft: WorkspaceDraft) {
@@ -231,15 +240,15 @@ private struct TemplatePickerView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !viewModel.featuredTemplates.isEmpty {
-                    GroupedSheetSection(title: "Common") {
+                    VaultSection("Common", systemImage: "star") {
                         templateGrid(templates: viewModel.featuredTemplates)
                     }
                 }
-                GroupedSheetSection(title: "Built-in") {
+                VaultSection("Built-in", systemImage: "square.grid.2x2") {
                     templateGrid(templates: viewModel.standardBuiltInTemplates)
                 }
                 if !viewModel.customTemplates.isEmpty {
-                    GroupedSheetSection(title: "Custom") {
+                    VaultSection("Custom", systemImage: "wrench.and.screwdriver") {
                         templateGrid(templates: viewModel.customTemplates)
                     }
                 }
@@ -389,7 +398,7 @@ private struct EnvGroupImportSection: View {
     @State private var stagedPickedEnvFileName: String?
 
     var body: some View {
-        GroupedSheetSection(title: "Import .env") {
+        VaultSection("Import .env", systemImage: "square.and.arrow.down") {
             Toggle("Parse KEY=value lines into separate fields", isOn: $parseIntoEntries)
                 .toggleStyle(.checkbox)
                 .help("When off, the entire file is stored as one multiline .env field.")
@@ -587,7 +596,7 @@ private struct ItemEditorContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                GroupedSheetSection(title: "Basics") {
+                VaultSection("Basics", systemImage: "textformat") {
                     SheetLabeledField(title: "Name") {
                         TextField("", text: $draft.title, prompt: Text("Required"))
                             .textFieldStyle(.roundedBorder)
@@ -648,7 +657,7 @@ private struct ItemEditorContent: View {
                     }
                 }
 
-                GroupedSheetSection(title: "Environment") {
+                VaultSection("Environment", systemImage: "circle.hexagongrid") {
                     SheetLabeledField(title: "Preset") {
                         Picker("", selection: Binding(
                             get: { draft.environment.kind },
@@ -739,7 +748,7 @@ private struct ItemEditorContent: View {
                     }
                 }
 
-                GroupedSheetSection(title: "Tags") {
+                VaultSection("Tags", systemImage: "tag") {
                     SheetLabeledField(title: "Add tags") {
                         HStack(alignment: .center, spacing: 8) {
                             TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
@@ -760,7 +769,7 @@ private struct ItemEditorContent: View {
                     }
                 }
 
-                GroupedSheetSection(title: "Notes") {
+                VaultSection("Notes", systemImage: "note.text") {
                     SheetLabeledField(title: "Notes") {
                         ZStack(alignment: .topLeading) {
                             TextEditor(text: $draft.notes)
@@ -859,10 +868,34 @@ struct WorkspaceEditorSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    GroupedSheetSection(title: "") {
+        VaultSheetScaffold(
+            title: title,
+            subtitle: "Workspaces group secrets by project or team.",
+            systemImage: draft.icon,
+            tint: Color(hex: draft.colorHex)
+        ) {
+            Spacer(minLength: 0)
+            Button("Cancel") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .keyboardShortcut(.cancelAction)
+            Button("Save") {
+                onSave(draft)
+                dismiss()
+            }
+            .buttonStyle(VaultButtonStyle(.primary))
+            .keyboardShortcut(.defaultAction)
+            .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("workspace-save")
+        } content: {
+            legacyBody
+        }
+        .frame(width: 460, height: 620)
+    }
+
+    private var legacyBody: some View {
+        Group {
+                VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                    VaultCard {
                         HStack(spacing: 14) {
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 .fill(Color(hex: draft.colorHex).opacity(0.15))
@@ -887,7 +920,7 @@ struct WorkspaceEditorSheet: View {
                         .padding(.vertical, 2)
                     }
 
-                    GroupedSheetSection(title: "Basics") {
+                    VaultSection("Basics", systemImage: "textformat") {
                         SheetLabeledField(title: "Name") {
                             TextField("", text: $draft.name, prompt: Text("e.g. Production API"))
                                 .textFieldStyle(.roundedBorder)
@@ -922,7 +955,7 @@ struct WorkspaceEditorSheet: View {
                         }
                     }
 
-                    GroupedSheetSection(title: "Icon") {
+                    VaultSection("Icon", systemImage: "app.badge") {
                         LazyVGrid(
                             columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5),
                             spacing: 6
@@ -952,7 +985,7 @@ struct WorkspaceEditorSheet: View {
                         .padding(.vertical, 2)
                     }
 
-                    GroupedSheetSection(title: "Color") {
+                    VaultSection("Color", systemImage: "paintpalette") {
                         ForEach(WorkspaceStylePresets.colors) { preset in
                             Button { draft.colorHex = preset.hex } label: {
                                 HStack(spacing: 10) {
@@ -974,25 +1007,8 @@ struct WorkspaceEditorSheet: View {
                         }
                     }
                 }
-                .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            HStack(spacing: 12) {
-                Button("Cancel") { dismiss() }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
-                Button("Save") {
-                    onSave(draft)
-                    dismiss()
-                }
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                .disabled(draft.name.isEmpty)
-            }
-            .padding(.vertical, 14)
         }
-        .frame(width: 400, height: 580)
-        .navigationTitle(title)
     }
 }
 
@@ -1305,42 +1321,36 @@ struct VaultHealthSheet: View {
     @State private var report: VaultHealthReport?
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    if let report {
-                        summary(for: report)
-                        if report.isClean {
-                            cleanState(auditedItemCount: report.auditedItemCount, ignoredCount: report.ignoredCount)
-                        } else {
-                            findingsList(report.findings)
-                        }
-                        if !report.ignoredFindings.isEmpty {
-                            ignoredList(report.ignoredFindings)
-                        }
-                    } else {
-                        ProgressView()
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 40)
-                    }
-
-                    Text("This report is built from your unlocked vault and never shows or stores secret values.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
+        VaultSheetScaffold(
+            title: "Vault Health",
+            subtitle: report.map { "Checked \($0.auditedItemCount) active \($0.auditedItemCount == 1 ? "item" : "items")." },
+            systemImage: "checkmark.shield",
+            tint: (report?.isClean ?? true) ? .green : .orange
+        ) {
+            Spacer(minLength: 0)
+            Button("Done") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+        } content: {
+            if let report {
+                summary(for: report)
+                if report.isClean {
+                    cleanState(auditedItemCount: report.auditedItemCount, ignoredCount: report.ignoredCount)
+                } else {
+                    findingsList(report.findings)
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                if !report.ignoredFindings.isEmpty {
+                    ignoredList(report.ignoredFindings)
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 40)
             }
 
-            Button("Done") { dismiss() }
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                .padding(.vertical, 14)
+            VaultNote(text: "This report is built from your unlocked vault. It names items and field labels, and never shows or stores a secret value.", tone: .success, systemImage: "lock.shield")
         }
-        .frame(width: 560)
-        .frame(minHeight: 480)
-        .navigationTitle("Vault Health")
+        .frame(width: 580, height: 620)
         .onAppear { report = viewModel.vaultHealthReport() }
     }
 
@@ -1404,7 +1414,7 @@ struct VaultHealthSheet: View {
     }
 
     private func findingsList(_ findings: [VaultHealthFinding]) -> some View {
-        GroupedSheetSection(title: "\(findings.count) \(findings.count == 1 ? "finding" : "findings")") {
+        VaultSection("\(findings.count) \(findings.count == 1 ? "finding" : "findings")", systemImage: "exclamationmark.triangle", tint: .orange) {
             ForEach(Array(findings.enumerated()), id: \.element.id) { index, finding in
                 HStack(alignment: .top, spacing: 8) {
                     Button {
@@ -1475,7 +1485,7 @@ struct VaultHealthSheet: View {
     }
 
     private func ignoredList(_ findings: [VaultHealthFinding]) -> some View {
-        GroupedSheetSection(title: "Ignored (\(findings.count))") {
+        VaultSection("Ignored (\(findings.count))", systemImage: "bell.slash") {
             ForEach(Array(findings.enumerated()), id: \.element.id) { index, finding in
                 HStack(alignment: .top, spacing: 8) {
                     findingRow(finding, showsChevron: false)
@@ -1539,61 +1549,40 @@ struct BulkEditSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    header
-                    tagsSection
-                    organizeSection
-                    flagsSection
-                }
-                .padding(20)
+        VaultSheetScaffold(
+            title: "Edit \(targetCount) \(targetCount == 1 ? "Item" : "Items")",
+            subtitle: "Only what you change is applied. Everything else is left as it is on each item.",
+            systemImage: "slider.horizontal.3"
+        ) {
+            Text(draft.hasChanges ? draft.summary : "Nothing to change yet")
+                .font(.vaultFootnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Cancel") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .keyboardShortcut(.cancelAction)
+
+            Button("Apply") {
+                viewModel.applyBulkEdit(draft)
+                dismiss()
             }
-
-            Divider()
-
-            HStack(spacing: 10) {
-                Text(draft.hasChanges ? draft.summary : "Nothing selected to change")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Button("Cancel") { dismiss() }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
-
-                Button("Apply") {
-                    viewModel.applyBulkEdit(draft)
-                    dismiss()
-                }
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                .disabled(!draft.hasChanges)
-                .accessibilityIdentifier("bulk-edit-apply")
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .buttonStyle(VaultButtonStyle(.primary))
+            .keyboardShortcut(.defaultAction)
+            .disabled(!draft.hasChanges)
+            .accessibilityIdentifier("bulk-edit-apply")
+        } content: {
+            tagsSection
+            organizeSection
+            flagsSection
         }
-        .frame(width: 560)
-        .frame(minHeight: 520)
-        .navigationTitle("Edit Items")
+        .frame(width: 580, height: 600)
         .onAppear { targetCount = viewModel.multiSelectedIDs.count }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Editing \(targetCount) \(targetCount == 1 ? "item" : "items")")
-                .font(.headline)
-            Text("Only the options you change are applied. Everything else is left as it is on each item.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .multilineTextAlignment(.leading)
-        }
-    }
-
     private var tagsSection: some View {
-        GroupedSheetSection(title: "Tags") {
+        VaultSection("Tags", systemImage: "tag") {
             SheetLabeledField(title: "Add to every item") {
                 HStack(alignment: .center, spacing: 8) {
                     TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
@@ -1633,7 +1622,7 @@ struct BulkEditSheet: View {
     }
 
     private var organizeSection: some View {
-        GroupedSheetSection(title: "Organize") {
+        VaultSection("Organize", systemImage: "folder") {
             SheetLabeledField(title: "Workspace") {
                 Picker("", selection: workspaceBinding) {
                     Text("Keep current").tag(BulkEditWorkspaceAction.keep)
@@ -1660,7 +1649,7 @@ struct BulkEditSheet: View {
     }
 
     private var flagsSection: some View {
-        GroupedSheetSection(title: "Status") {
+        VaultSection("Status", systemImage: "flag") {
             SheetLabeledField(title: "Favorite") {
                 Picker("", selection: $draft.favoriteAction) {
                     Text("Keep").tag(BulkEditBooleanAction.keep)
@@ -1738,7 +1727,7 @@ struct PasswordGeneratorPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            GroupedSheetSection(title: "Generated password") {
+            VaultSection("Generated password", systemImage: "wand.and.sparkles") {
                 generatedValue
 
                 HStack(spacing: 10) {
@@ -1764,7 +1753,7 @@ struct PasswordGeneratorPanel: View {
                 PasswordStrengthBar(password: password)
             }
 
-            GroupedSheetSection(title: "Options") {
+            VaultSection("Options", systemImage: "slider.horizontal.3") {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Length")
@@ -1860,7 +1849,7 @@ struct PasswordGeneratorSheet: View {
             onDismiss: { dismiss() },
             onCopy: { viewModel.copyGeneratedPassword($0) }
         )
-        .navigationTitle("Password Generator")
+        .accessibilityIdentifier("password-generator-sheet")
     }
 }
 
@@ -1892,7 +1881,7 @@ private struct MasterPasswordSection: View {
     }
 
     var body: some View {
-        GroupedSheetSection(title: "Master Password") {
+        VaultSection("Master Password", systemImage: "key.horizontal") {
             if isExpanded {
                 expandedForm
             } else {
@@ -2267,7 +2256,7 @@ private struct TemplateSettingsPane: View {
     private var templateDetail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                GroupedSheetSection(title: "Definition") {
+                VaultSection("Definition", systemImage: "square.on.square") {
                     SheetLabeledField(title: "Template name") {
                         TextField("", text: $draft.name, prompt: Text("e.g. My API template"))
                             .textFieldStyle(.roundedBorder)
@@ -2296,18 +2285,22 @@ private struct TemplateSettingsPane: View {
                     }
                 }
 
-                GroupedSheetSection(title: "Fields") {
+                VaultSection("Fields", systemImage: "list.bullet") {
                     if draft.fieldDefinitions.isEmpty {
                         Text("No fields yet")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        VStack(alignment: .leading, spacing: 16) {
-                            ForEach($draft.fieldDefinitions) { $field in
+                        VStack(alignment: .leading, spacing: VaultSpacing.l) {
+                            ForEach(Array($draft.fieldDefinitions.enumerated()), id: \.element.id) { index, $field in
                                 templateFieldRow(
                                     field: $field,
                                     readOnly: isBuiltInSelected,
-                                    onRemove: isBuiltInSelected ? nil : { removeTemplateField(id: field.id) }
+                                    onRemove: isBuiltInSelected ? nil : { removeTemplateField(id: field.id) },
+                                    canMoveUp: !isBuiltInSelected && index > 0,
+                                    canMoveDown: !isBuiltInSelected && index < draft.fieldDefinitions.count - 1,
+                                    onMoveUp: { moveTemplateField(from: index, by: -1) },
+                                    onMoveDown: { moveTemplateField(from: index, by: 1) }
                                 )
                                 if field.id != draft.fieldDefinitions.last?.id {
                                     Divider()
@@ -2335,15 +2328,24 @@ private struct TemplateSettingsPane: View {
                     }
                 }
 
-                if !isBuiltInSelected {
-                    GroupedSheetSection(title: "") {
-                        HStack(alignment: .center) {
+                VaultCard {
+                    HStack(alignment: .center, spacing: VaultSpacing.m) {
+                        if isBuiltInSelected {
+                            // Built-ins are read-only, and there used to be no way to start
+                            // from one: adding a field to "Database" meant rebuilding the
+                            // whole template by hand.
+                            Button("Duplicate as Custom Template") { duplicateSelected() }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityIdentifier("template-duplicate")
+                            Spacer(minLength: 0)
+                        } else {
                             if case .template(let id) = selection,
                                let tpl = viewModel.template(for: id), !tpl.isBuiltIn {
-                                Button("Delete template", role: .destructive) {
+                                Button("Delete Template", role: .destructive) {
                                     viewModel.deleteTemplate(tpl)
                                     selectFirstAvailable()
                                 }
+                                .accessibilityIdentifier("template-delete")
                             }
                             Spacer(minLength: 0)
                             Button("Save") {
@@ -2354,6 +2356,7 @@ private struct TemplateSettingsPane: View {
                             .buttonStyle(.borderedProminent)
                             .keyboardShortcut(.defaultAction)
                             .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityIdentifier("template-save")
                         }
                     }
                 }
@@ -2365,8 +2368,41 @@ private struct TemplateSettingsPane: View {
         .navigationTitle(detailTitle)
     }
 
+    /// Copies a built-in into an editable custom template, so it can be used as a starting
+    /// point instead of a dead end.
+    private func duplicateSelected() {
+        guard let template = selectedTemplateEntity else { return }
+        var copy = viewModel.draftForTemplate(template)
+        copy.id = nil
+        copy.name = "\(template.name) Copy"
+        copy.fieldDefinitions = copy.fieldDefinitions.map { field in
+            var field = field
+            // New ids: the originals belong to the built-in and must not be re-parented.
+            field.id = UUID()
+            return field
+        }
+        guard let saved = viewModel.saveTemplate(copy) else { return }
+        selection = .template(saved.id)
+        draft = viewModel.draftForTemplate(saved)
+    }
+
     private func removeTemplateField(id: UUID) {
         draft.fieldDefinitions.removeAll { $0.id == id }
+        renumberTemplateFields()
+    }
+
+    /// Field order drives display order everywhere downstream. The item editor got move
+    /// up/down in 1.1.0; the template editor did not, so a template's field order was fixed
+    /// at whatever sequence you happened to add them in.
+    private func moveTemplateField(from index: Int, by offset: Int) {
+        let target = index + offset
+        guard draft.fieldDefinitions.indices.contains(index),
+              draft.fieldDefinitions.indices.contains(target) else { return }
+        draft.fieldDefinitions.swapAt(index, target)
+        renumberTemplateFields()
+    }
+
+    private func renumberTemplateFields() {
         for index in draft.fieldDefinitions.indices {
             draft.fieldDefinitions[index].sortOrder = index
         }
@@ -2376,20 +2412,46 @@ private struct TemplateSettingsPane: View {
     private func templateFieldRow(
         field: Binding<TemplateFieldDraft>,
         readOnly: Bool,
-        onRemove: (() -> Void)?
+        onRemove: (() -> Void)?,
+        canMoveUp: Bool,
+        canMoveDown: Bool,
+        onMoveUp: @escaping () -> Void,
+        onMoveDown: @escaping () -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let onRemove {
-                HStack {
-                    Spacer(minLength: 0)
-                    Button(role: .destructive, action: onRemove) {
-                        Label("Remove Field", systemImage: "minus.circle")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 12))
-                    }
-                    .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            HStack(spacing: VaultSpacing.xs) {
+                Text(field.wrappedValue.label.isEmpty ? "Untitled field" : field.wrappedValue.label)
+                    .font(.vaultFieldLabel)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: VaultSpacing.s)
+
+                if !readOnly {
+                    Button(action: onMoveUp) {
+                        Image(systemName: "chevron.up")
+                    }
+                    .buttonStyle(VaultIconButtonStyle())
+                    .disabled(!canMoveUp)
+                    .help("Move this field up")
+                    .accessibilityLabel("Move field up")
+
+                    Button(action: onMoveDown) {
+                        Image(systemName: "chevron.down")
+                    }
+                    .buttonStyle(VaultIconButtonStyle())
+                    .disabled(!canMoveDown)
+                    .help("Move this field down")
+                    .accessibilityLabel("Move field down")
+                }
+
+                if let onRemove {
+                    Button(role: .destructive, action: onRemove) {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(VaultIconButtonStyle())
                     .help("Remove this field from the template")
+                    .accessibilityLabel("Remove field")
                 }
             }
 
