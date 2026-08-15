@@ -462,6 +462,81 @@ final class VaultViewModel {
         reload()
     }
 
+    // MARK: - Bulk edit
+
+    /// Applies one set of edits across the whole multi-selection.
+    ///
+    /// Every item goes through the normal `saveItem` path, so each one gets its own audit
+    /// entries and the same normalization a single-item edit would get.
+    func applyBulkEdit(_ draft: BulkEditDraft) {
+        let targets = multiSelectedItems
+        guard !targets.isEmpty, draft.hasChanges else { return }
+
+        let removals = Set(draft.tagsToRemove.map { $0.lowercased() })
+        var didArchive = false
+
+        for item in targets {
+            var itemDraft = makeDraft(from: item)
+            itemDraft.id = item.id
+
+            var tags = itemDraft.tags.filter { !removals.contains($0.lowercased()) }
+            tags.append(contentsOf: draft.tagsToAdd)
+            itemDraft.tags = tags
+
+            switch draft.workspaceAction {
+            case .keep: break
+            case .clear: itemDraft.workspaceID = nil
+            case let .move(id): itemDraft.workspaceID = id
+            }
+
+            if case let .set(environment) = draft.environmentAction {
+                itemDraft.environment = environment
+            }
+
+            switch draft.favoriteAction {
+            case .keep: break
+            case .enable: itemDraft.isFavorite = true
+            case .disable: itemDraft.isFavorite = false
+            }
+
+            switch draft.archiveAction {
+            case .keep: break
+            case .enable:
+                itemDraft.isArchived = true
+                didArchive = true
+            case .disable:
+                itemDraft.isArchived = false
+            }
+
+            do {
+                try container.itemRepository.saveItem(itemDraft)
+            } catch {
+                alertMessage = error.localizedDescription
+                break
+            }
+        }
+
+        // Edited items can drop out of the current destination (archived, moved, retagged),
+        // so the stale selection is cleared rather than left pointing at rows that vanished.
+        multiSelectedIDs.removeAll()
+        selectedItemID = nil
+        if didArchive {
+            selectedDestination = .library(.archived)
+        }
+        reload()
+    }
+
+    /// Tags shared by every selected item — the ones a bulk "remove" can meaningfully offer.
+    var commonTagsInMultiSelection: [String] {
+        let selected = multiSelectedItems
+        guard let first = selected.first else { return [] }
+        var shared = Set(first.tags.map { $0.lowercased() })
+        for item in selected.dropFirst() {
+            shared.formIntersection(item.tags.map { $0.lowercased() })
+        }
+        return Array(Set(selected.flatMap(\.tags)).filter { shared.contains($0.lowercased()) }).sorted()
+    }
+
     func saveItem(_ draft: SecretItemDraft) {
         do {
             let item = try container.itemRepository.saveItem(draft)
@@ -630,18 +705,21 @@ final class VaultViewModel {
     /// Audits stored secrets for weak, reused and stale entries.
     /// Findings deliberately carry only item titles and field labels — never secret values —
     /// so the report itself is safe to show, screenshot, or read aloud.
+    ///
+    /// Findings the owner dismissed are moved to `ignoredFindings` rather than dropped, so the
+    /// sheet can still say how many are hidden and offer to bring them back.
     func vaultHealthReport() -> VaultHealthReport {
         let active = items.filter { !$0.isArchived }
         var findings: [VaultHealthFinding] = []
 
         // Group sensitive values to spot reuse. Hashed so plaintext never lands in the report.
-        var occurrencesByDigest: [String: [(item: SecretItemEntity, label: String)]] = [:]
+        var occurrencesByDigest: [String: [(item: SecretItemEntity, key: String, label: String)]] = [:]
 
         for item in active {
             let fields = Self.visibleFields(in: resolvedFields(for: item))
             for field in fields where field.isSensitive {
                 let digest = Self.digest(field.value)
-                occurrencesByDigest[digest, default: []].append((item, field.label))
+                occurrencesByDigest[digest, default: []].append((item, field.key, field.label))
 
                 let strength = PasswordStrength.evaluate(field.value)
                 if strength.needsAttention {
@@ -651,14 +729,16 @@ final class VaultViewModel {
                             kind: .weak,
                             itemID: item.id,
                             itemTitle: item.title,
-                            detail: "\(field.label) — \(strength.label.lowercased())"
+                            detail: "\(field.label) — \(strength.label.lowercased())",
+                            fieldKey: field.key,
+                            valueDigest: digest
                         )
                     )
                 }
             }
         }
 
-        for (_, occurrences) in occurrencesByDigest {
+        for (digest, occurrences) in occurrencesByDigest {
             let distinctItems = Set(occurrences.map(\.item.id))
             guard distinctItems.count > 1 else { continue }
             let titles = occurrences.map(\.item.title).sorted()
@@ -670,40 +750,93 @@ final class VaultViewModel {
                         kind: .reused,
                         itemID: occurrence.item.id,
                         itemTitle: occurrence.item.title,
-                        detail: "\(occurrence.label) — also used in \(others.joined(separator: ", "))"
+                        detail: "\(occurrence.label) — also used in \(others.joined(separator: ", "))",
+                        fieldKey: occurrence.key,
+                        valueDigest: digest
                     )
                 )
             }
         }
 
         let staleCutoff = Date().addingTimeInterval(-Self.staleItemInterval)
-        for item in active where item.updatedAt < staleCutoff {
-            let months = Int(Date().timeIntervalSince(item.updatedAt) / (30 * 24 * 3600))
+        for item in active {
+            // Dated from the password's own rotation when history knows it, so editing a
+            // title no longer makes a years-old credential look freshly reviewed.
+            let reference = item.healthReferenceDate
+            guard reference < staleCutoff else { continue }
+            let months = Int(Date().timeIntervalSince(reference) / (30 * 24 * 3600))
+            let detail = item.passwordLastChangedAt == nil
+                ? "Not updated in about \(months) months"
+                : "Password not rotated in about \(months) months"
             findings.append(
                 VaultHealthFinding(
                     id: "stale-\(item.id.uuidString)",
                     kind: .stale,
                     itemID: item.id,
                     itemTitle: item.title,
-                    detail: "Not updated in about \(months) months"
+                    detail: detail,
+                    referenceDate: reference
                 )
             )
         }
 
+        let ignoresByItem = Dictionary(active.map { ($0.id, $0.ignoredHealthIssues) }, uniquingKeysWith: { first, _ in first })
+        let isSilenced = { (finding: VaultHealthFinding) in
+            (ignoresByItem[finding.itemID] ?? []).contains { finding.isSilenced(by: $0) }
+        }
+
+        let sorter: (VaultHealthFinding, VaultHealthFinding) -> Bool = {
+            if $0.kind != $1.kind { return $0.kind.severity < $1.kind.severity }
+            return $0.itemTitle.localizedCaseInsensitiveCompare($1.itemTitle) == .orderedAscending
+        }
+
         return VaultHealthReport(
             auditedItemCount: active.count,
-            findings: findings.sorted {
-                if $0.kind != $1.kind { return $0.kind.severity < $1.kind.severity }
-                return $0.itemTitle.localizedCaseInsensitiveCompare($1.itemTitle) == .orderedAscending
-            }
+            findings: findings.filter { !isSilenced($0) }.sorted(by: sorter),
+            ignoredFindings: findings.filter(isSilenced).sorted(by: sorter)
         )
+    }
+
+    /// Dismisses a finding for the value that produced it. Rotating that secret makes the
+    /// finding come back on its own.
+    func ignoreHealthFinding(_ finding: VaultHealthFinding) {
+        guard let item = items.first(where: { $0.id == finding.itemID }) else { return }
+        let record = finding.ignoreRecord
+        guard !item.ignoredHealthIssues.contains(where: { $0.id == record.id }) else { return }
+        item.ignoredHealthIssues.append(record)
+        persistIgnoredHealthIssues()
+    }
+
+    func restoreIgnoredFinding(_ finding: VaultHealthFinding) {
+        guard let item = items.first(where: { $0.id == finding.itemID }) else { return }
+        item.ignoredHealthIssues.removeAll { finding.isSilenced(by: $0) }
+        persistIgnoredHealthIssues()
+    }
+
+    func restoreAllIgnoredFindings() {
+        for item in items where !item.ignoredHealthIssues.isEmpty {
+            item.ignoredHealthIssues = []
+        }
+        persistIgnoredHealthIssues()
+    }
+
+    /// Writes the vault directly: dismissals live on the item but are not an edit to it, so
+    /// they must not bump `updatedAt` or land in the audit trail.
+    private func persistIgnoredHealthIssues() {
+        do {
+            try container.memoryStore.persist()
+        } catch {
+            alertMessage = error.localizedDescription
+        }
     }
 
     /// Items untouched for a year are surfaced as worth rotating or retiring.
     private static let staleItemInterval: TimeInterval = 365 * 24 * 3600
 
+    /// Must stay the same function the repository uses to prune dismissals — a mismatch
+    /// would make every ignore look orphaned and get swept away on the next save.
     private static func digest(_ value: String) -> String {
-        Data(SHA256.hash(data: Data(value.utf8))).base64EncodedString()
+        SecretItemRepository.digest(value)
     }
 
     func selectItem(id: UUID) {

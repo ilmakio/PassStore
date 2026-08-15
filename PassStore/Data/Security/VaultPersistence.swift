@@ -220,6 +220,9 @@ final class VaultMemoryStore {
     var workspaces: [WorkspaceEntity] = []
     var items: [SecretItemEntity] = []
     var customTemplates: [SecretFieldTemplateEntity] = []
+    /// Newest-first record of master password changes. Kept here rather than in `VaultMetadata`
+    /// because the metadata file is written unencrypted.
+    var masterPasswordHistory: [MasterPasswordChangeEntry] = []
     private let builtInTemplates: [SecretFieldTemplateEntity]
     private var persistHandler: (() throws -> Void)?
 
@@ -251,8 +254,19 @@ final class VaultMemoryStore {
         workspaces = []
         items = []
         customTemplates = []
+        masterPasswordHistory = []
         persistHandler = nil
     }
+
+    /// Appends a master password event and persists. Called on vault creation and on every
+    /// successful password change.
+    func recordMasterPasswordChange(_ kind: MasterPasswordChangeKind, at date: Date = .now) {
+        masterPasswordHistory.insert(MasterPasswordChangeEntry(kind: kind, changedAt: date), at: 0)
+        masterPasswordHistory = Array(masterPasswordHistory.prefix(Self.masterPasswordHistoryLimit))
+    }
+
+    /// Bounded so a long-lived vault can't grow an unbounded audit trail.
+    static let masterPasswordHistoryLimit = 50
 
     func requireUnlocked() throws {
         guard isUnlocked else { throw VaultCryptoError.vaultLocked }
@@ -313,7 +327,9 @@ final class VaultMemoryStore {
                         sortOrder: $0.sortOrder,
                         plainValue: $0.plainValue
                     )
-                }.sorted { $0.sortOrder < $1.sortOrder }
+                }.sorted { $0.sortOrder < $1.sortOrder },
+                changeHistory: item.changeHistory,
+                ignoredHealthIssues: item.ignoredHealthIssues
             )
         }
 
@@ -342,7 +358,8 @@ final class VaultMemoryStore {
         return VaultSnapshot(
             workspaces: workspaceSnapshots,
             items: itemSnapshots,
-            customTemplates: templateSnapshots
+            customTemplates: templateSnapshots,
+            masterPasswordHistory: masterPasswordHistory
         )
     }
 
@@ -408,7 +425,9 @@ final class VaultMemoryStore {
                 updatedAt: itemSnapshot.updatedAt,
                 lastAccessedAt: itemSnapshot.lastAccessedAt,
                 workspace: itemSnapshot.workspaceID.flatMap { workspaceMap[$0] },
-                template: itemSnapshot.templateID.flatMap { templatesByID[$0] }
+                template: itemSnapshot.templateID.flatMap { templatesByID[$0] },
+                changeHistory: itemSnapshot.changeHistory,
+                ignoredHealthIssues: itemSnapshot.ignoredHealthIssues
             )
             item.fields = itemSnapshot.fields.map { fieldSnapshot in
                 SecretFieldValueEntity(
@@ -436,6 +455,7 @@ final class VaultMemoryStore {
         workspaces = loadedWorkspaces.sorted { $0.sortOrder < $1.sortOrder }
         self.items = items
         customTemplates = customTemplateMap.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        masterPasswordHistory = snapshot.masterPasswordHistory.sorted { $0.changedAt > $1.changedAt }
 
         for workspace in workspaces {
             workspace.items = items

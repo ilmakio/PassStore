@@ -209,10 +209,17 @@ final class VaultSessionManager {
                 biometricUnlockEnabled: false,
                 updatedAt: .now
             )
-            let envelope = try cryptoService.encryptVault(.empty, using: vaultKey)
+            // The vault starts with one audit entry so "last changed" has an answer from day one.
+            let initialSnapshot = VaultSnapshot(
+                workspaces: [],
+                items: [],
+                customTemplates: [],
+                masterPasswordHistory: [MasterPasswordChangeEntry(kind: .vaultCreated)]
+            )
+            let envelope = try cryptoService.encryptVault(initialSnapshot, using: vaultKey)
             _ = syncBiometricState(using: vaultKey, metadata: &metadata)
             try vaultStore.save(metadata: metadata, envelope: envelope)
-            activate(snapshot: .empty, key: vaultKey, metadata: metadata)
+            activate(snapshot: initialSnapshot, key: vaultKey, metadata: metadata)
             lastErrorMessage = nil
         } catch {
             lastErrorMessage = error.localizedDescription
@@ -317,7 +324,24 @@ final class VaultSessionManager {
         metadata.wrappedVaultKey = try cryptoService.wrapVaultKey(activeVaultKey, password: newPassword)
         metadata.updatedAt = .now
         self.metadata = metadata
+        // Recorded before the save so the new entry rides along in the same encrypted write.
+        memoryStore.recordMasterPasswordChange(.changed)
         try saveCurrentVault(metadataOverride: metadata)
+    }
+
+    /// Newest-first record of master password events, or empty while locked.
+    var masterPasswordHistory: [MasterPasswordChangeEntry] {
+        guard lockState == .unlocked else { return [] }
+        return memoryStore.masterPasswordHistory
+    }
+
+    /// When the master password was last rotated. Nil if it has never been changed since
+    /// the vault was created, or if the vault predates 1.1.1.
+    var masterPasswordLastChangedAt: Date? {
+        masterPasswordHistory
+            .filter { $0.kind == .changed }
+            .map(\.changedAt)
+            .max()
     }
 
     static let minimumPasswordLength = 8

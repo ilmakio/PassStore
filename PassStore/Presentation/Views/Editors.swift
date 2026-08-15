@@ -1242,9 +1242,12 @@ struct VaultHealthSheet: View {
                     if let report {
                         summary(for: report)
                         if report.isClean {
-                            cleanState(auditedItemCount: report.auditedItemCount)
+                            cleanState(auditedItemCount: report.auditedItemCount, ignoredCount: report.ignoredCount)
                         } else {
                             findingsList(report.findings)
+                        }
+                        if !report.ignoredFindings.isEmpty {
+                            ignoredList(report.ignoredFindings)
                         }
                     } else {
                         ProgressView()
@@ -1315,12 +1318,12 @@ struct VaultHealthSheet: View {
         .accessibilityLabel("\(count) \(label)")
     }
 
-    private func cleanState(auditedItemCount: Int) -> some View {
+    private func cleanState(auditedItemCount: Int, ignoredCount: Int) -> some View {
         VStack(spacing: 10) {
             Image(systemName: "checkmark.shield.fill")
                 .font(.system(size: 32))
                 .foregroundStyle(.green)
-            Text("No issues found")
+            Text(ignoredCount > 0 ? "No open issues" : "No issues found")
                 .font(.headline)
             Text("Checked \(auditedItemCount) active \(auditedItemCount == 1 ? "item" : "items") for reused, weak, and stale secrets.")
                 .font(.callout)
@@ -1334,39 +1337,105 @@ struct VaultHealthSheet: View {
     private func findingsList(_ findings: [VaultHealthFinding]) -> some View {
         GroupedSheetSection(title: "\(findings.count) \(findings.count == 1 ? "finding" : "findings")") {
             ForEach(Array(findings.enumerated()), id: \.element.id) { index, finding in
-                Button {
-                    viewModel.selectItem(id: finding.itemID)
-                    dismiss()
-                } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: finding.kind.systemImage)
-                            .font(.system(size: 13))
-                            .foregroundStyle(tint(for: finding.kind))
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(finding.itemTitle)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Text(finding.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .multilineTextAlignment(.leading)
-                        }
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.tertiary)
+                HStack(alignment: .top, spacing: 8) {
+                    Button {
+                        viewModel.selectItem(id: finding.itemID)
+                        dismiss()
+                    } label: {
+                        findingRow(finding, showsChevron: true)
                     }
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .help("Reveal this item in the list")
+                    .accessibilityIdentifier("health-finding-\(finding.id)")
+
+                    Button {
+                        viewModel.ignoreHealthFinding(finding)
+                        report = viewModel.vaultHealthReport()
+                    } label: {
+                        Image(systemName: "bell.slash")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(ignoreHelp(for: finding.kind))
+                    .accessibilityLabel("Ignore this finding")
+                    .accessibilityIdentifier("health-ignore-\(finding.id)")
                 }
-                .buttonStyle(.plain)
-                .help("Reveal this item in the list")
-                .accessibilityIdentifier("health-finding-\(finding.id)")
 
                 if index != findings.count - 1 {
                     Divider()
                 }
+            }
+        }
+    }
+
+    private func findingRow(_ finding: VaultHealthFinding, showsChevron: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: finding.kind.systemImage)
+                .font(.system(size: 13))
+                .foregroundStyle(tint(for: finding.kind))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(finding.itemTitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(finding.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+            }
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// Spells out that dismissing is not permanent, which is the whole point of keying the
+    /// dismissal to the value.
+    private func ignoreHelp(for kind: VaultHealthFinding.Kind) -> String {
+        kind == .stale
+            ? "Ignore until this item changes again"
+            : "Ignore for this value — comes back if the secret is changed"
+    }
+
+    private func ignoredList(_ findings: [VaultHealthFinding]) -> some View {
+        GroupedSheetSection(title: "Ignored (\(findings.count))") {
+            ForEach(Array(findings.enumerated()), id: \.element.id) { index, finding in
+                HStack(alignment: .top, spacing: 8) {
+                    findingRow(finding, showsChevron: false)
+                        .opacity(0.55)
+
+                    Button("Restore") {
+                        viewModel.restoreIgnoredFinding(finding)
+                        report = viewModel.vaultHealthReport()
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .accessibilityIdentifier("health-restore-\(finding.id)")
+                }
+
+                if index != findings.count - 1 {
+                    Divider()
+                }
+            }
+
+            if findings.count > 1 {
+                Divider()
+                Button("Restore All") {
+                    viewModel.restoreAllIgnoredFindings()
+                    report = viewModel.vaultHealthReport()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("health-restore-all")
             }
         }
     }
@@ -1377,6 +1446,211 @@ struct VaultHealthSheet: View {
         case .weak: .orange
         case .stale: .yellow
         }
+    }
+}
+
+// MARK: - Bulk edit
+
+/// Applies one set of changes to every item in the multi-selection.
+///
+/// Each control defaults to "keep", so the sheet can only do what was explicitly asked for —
+/// opening it and pressing Apply without touching anything is impossible (Apply stays disabled).
+struct BulkEditSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var viewModel: VaultViewModel
+
+    @State private var draft = BulkEditDraft.empty
+    @State private var tagText = ""
+    /// Captured on appear: applying the edit clears the selection, and the footer should keep
+    /// showing the count it acted on rather than dropping to zero mid-dismiss.
+    @State private var targetCount = 0
+
+    private var removableTags: [String] {
+        viewModel.commonTagsInMultiSelection
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    header
+                    tagsSection
+                    organizeSection
+                    flagsSection
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Text(draft.hasChanges ? draft.summary : "Nothing selected to change")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
+
+                Button("Apply") {
+                    viewModel.applyBulkEdit(draft)
+                    dismiss()
+                }
+                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+                .disabled(!draft.hasChanges)
+                .accessibilityIdentifier("bulk-edit-apply")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .frame(width: 560)
+        .frame(minHeight: 520)
+        .navigationTitle("Edit Items")
+        .onAppear { targetCount = viewModel.multiSelectedIDs.count }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Editing \(targetCount) \(targetCount == 1 ? "item" : "items")")
+                .font(.headline)
+            Text("Only the options you change are applied. Everything else is left as it is on each item.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+        }
+    }
+
+    private var tagsSection: some View {
+        GroupedSheetSection(title: "Tags") {
+            SheetLabeledField(title: "Add to every item") {
+                HStack(alignment: .center, spacing: 8) {
+                    TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.leading)
+                        .onSubmit(addTag)
+                        .accessibilityIdentifier("bulk-edit-tag-field")
+                    Button("Add", action: addTag)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(tagText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            if !draft.tagsToAdd.isEmpty {
+                FlowTagView(tags: draft.tagsToAdd) { tag in
+                    draft.tagsToAdd.removeAll { $0 == tag }
+                }
+            }
+
+            if !removableTags.isEmpty {
+                Divider()
+                SheetLabeledField(title: "Remove from every item") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(removableTags, id: \.self) { tag in
+                            Toggle(isOn: removalBinding(for: tag)) {
+                                Text("#\(tag)")
+                                    .font(.callout)
+                            }
+                            .toggleStyle(.checkbox)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private var organizeSection: some View {
+        GroupedSheetSection(title: "Organize") {
+            SheetLabeledField(title: "Workspace") {
+                Picker("", selection: workspaceBinding) {
+                    Text("Keep current").tag(BulkEditWorkspaceAction.keep)
+                    Text("No workspace").tag(BulkEditWorkspaceAction.clear)
+                    ForEach(viewModel.workspaces) { workspace in
+                        Text(workspace.name).tag(BulkEditWorkspaceAction.move(workspace.id))
+                    }
+                }
+                .labelsHidden()
+                .accessibilityIdentifier("bulk-edit-workspace")
+            }
+
+            SheetLabeledField(title: "Environment") {
+                Picker("", selection: environmentBinding) {
+                    Text("Keep current").tag(BulkEditEnvironmentAction.keep)
+                    ForEach(EnvironmentKind.allCases.filter { $0 != .custom }) { kind in
+                        Text(kind.title).tag(BulkEditEnvironmentAction.set(.preset(kind)))
+                    }
+                }
+                .labelsHidden()
+                .accessibilityIdentifier("bulk-edit-environment")
+            }
+        }
+    }
+
+    private var flagsSection: some View {
+        GroupedSheetSection(title: "Status") {
+            SheetLabeledField(title: "Favorite") {
+                Picker("", selection: $draft.favoriteAction) {
+                    Text("Keep").tag(BulkEditBooleanAction.keep)
+                    Text("Add").tag(BulkEditBooleanAction.enable)
+                    Text("Remove").tag(BulkEditBooleanAction.disable)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityIdentifier("bulk-edit-favorite")
+            }
+
+            SheetLabeledField(title: "Archive") {
+                Picker("", selection: $draft.archiveAction) {
+                    Text("Keep").tag(BulkEditBooleanAction.keep)
+                    Text("Archive").tag(BulkEditBooleanAction.enable)
+                    Text("Restore").tag(BulkEditBooleanAction.disable)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityIdentifier("bulk-edit-archive")
+            }
+
+            Text("Archiving keeps items recoverable — nothing here deletes anything.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var workspaceBinding: Binding<BulkEditWorkspaceAction> {
+        Binding(get: { draft.workspaceAction }, set: { draft.workspaceAction = $0 })
+    }
+
+    private var environmentBinding: Binding<BulkEditEnvironmentAction> {
+        Binding(get: { draft.environmentAction }, set: { draft.environmentAction = $0 })
+    }
+
+    private func removalBinding(for tag: String) -> Binding<Bool> {
+        Binding(
+            get: { draft.tagsToRemove.contains(tag) },
+            set: { isOn in
+                if isOn {
+                    guard !draft.tagsToRemove.contains(tag) else { return }
+                    draft.tagsToRemove.append(tag)
+                } else {
+                    draft.tagsToRemove.removeAll { $0 == tag }
+                }
+            }
+        )
+    }
+
+    private func addTag() {
+        let tag = tagText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tag.isEmpty, !draft.tagsToAdd.contains(tag) else {
+            tagText = ""
+            return
+        }
+        draft.tagsToAdd.append(tag)
+        tagText = ""
     }
 }
 
@@ -1529,6 +1803,7 @@ private struct MasterPasswordSection: View {
     @Bindable var sessionManager: VaultSessionManager
 
     @State private var isExpanded = false
+    @State private var isHistoryExpanded = false
     @State private var currentPassword = ""
     @State private var newPassword = ""
     @State private var confirmPassword = ""
@@ -1564,6 +1839,9 @@ private struct MasterPasswordSection: View {
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.green)
             }
+
+            lastChangedRow
+
             Text("Your master password unwraps the vault key. Changing it does not re-encrypt your secrets and does not affect Touch ID.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1574,8 +1852,68 @@ private struct MasterPasswordSection: View {
                 isExpanded = true
             }
             .accessibilityIdentifier("settings-change-master-password")
+
+            if history.count > 1 {
+                Button(isHistoryExpanded ? "Hide history" : "Show history (\(history.count))") {
+                    isHistoryExpanded.toggle()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .accessibilityIdentifier("master-password-history-toggle")
+            }
+
+            if isHistoryExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(history) { entry in
+                        HStack(spacing: 6) {
+                            Text(entry.kind.title)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                            Text(Self.absoluteFormatter.string(from: entry.changedAt))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.top, 2)
+            }
         }
     }
+
+    /// Vaults created before 1.1.1 have no recorded history, so this stays honest about
+    /// not knowing rather than implying the password has never been changed.
+    @ViewBuilder
+    private var lastChangedRow: some View {
+        if let changedAt = sessionManager.masterPasswordLastChangedAt {
+            Label("Last changed \(Self.relativeFormatter.localizedString(for: changedAt, relativeTo: Date()))", systemImage: "clock.arrow.circlepath")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("master-password-last-changed")
+        } else if let created = history.first(where: { $0.kind == .vaultCreated }) {
+            Label("Never changed since the vault was created \(Self.relativeFormatter.localizedString(for: created.changedAt, relativeTo: Date()))", systemImage: "clock.arrow.circlepath")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("master-password-last-changed")
+        }
+    }
+
+    private var history: [MasterPasswordChangeEntry] {
+        sessionManager.masterPasswordHistory
+    }
+
+    private static let absoluteFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
 
     private var expandedForm: some View {
         VStack(alignment: .leading, spacing: 12) {

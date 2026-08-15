@@ -75,6 +75,105 @@ enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// What happened to an item, as recorded in its audit history.
+///
+/// Entries describe *that* something changed, never *what it changed to*: a history entry
+/// must stay safe to render next to a locked field, so no case ever carries a secret value.
+enum SecretItemChangeKind: String, Codable, CaseIterable {
+    case created
+    case detailsUpdated
+    case typeChanged
+    case environmentChanged
+    case workspaceChanged
+    case fieldAdded
+    case fieldRemoved
+    case fieldValueChanged
+    case sensitiveValueChanged
+    case passwordRotated
+    case favoriteEnabled
+    case favoriteDisabled
+    case archived
+    case restored
+
+    var title: String {
+        switch self {
+        case .created: "Created"
+        case .detailsUpdated: "Details updated"
+        case .typeChanged: "Type changed"
+        case .environmentChanged: "Environment changed"
+        case .workspaceChanged: "Workspace changed"
+        case .fieldAdded: "Field added"
+        case .fieldRemoved: "Field removed"
+        case .fieldValueChanged: "Value changed"
+        case .sensitiveValueChanged: "Secret changed"
+        case .passwordRotated: "Password rotated"
+        case .favoriteEnabled: "Added to favorites"
+        case .favoriteDisabled: "Removed from favorites"
+        case .archived: "Archived"
+        case .restored: "Restored"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .created: "plus.circle"
+        case .detailsUpdated: "pencil"
+        case .typeChanged: "square.on.square"
+        case .environmentChanged: "circle.hexagongrid"
+        case .workspaceChanged: "shippingbox"
+        case .fieldAdded: "plus.square"
+        case .fieldRemoved: "minus.square"
+        case .fieldValueChanged: "pencil.line"
+        case .sensitiveValueChanged: "lock.rotation"
+        case .passwordRotated: "key.horizontal"
+        case .favoriteEnabled: "star.fill"
+        case .favoriteDisabled: "star.slash"
+        case .archived: "archivebox"
+        case .restored: "tray.and.arrow.up"
+        }
+    }
+
+    /// Rotating a password is what "when did this secret last change?" actually means;
+    /// the vault health audit reads only these entries when dating a credential.
+    var isPasswordRotation: Bool {
+        self == .passwordRotated
+    }
+}
+
+/// Why the master password entry was written.
+enum MasterPasswordChangeKind: String, Codable {
+    case vaultCreated
+    case changed
+
+    var title: String {
+        switch self {
+        case .vaultCreated: "Vault created"
+        case .changed: "Password changed"
+        }
+    }
+}
+
+/// Tri-state toggle for bulk edits: leave every item alone, or force one value across all of them.
+enum BulkEditBooleanAction: String, CaseIterable, Identifiable {
+    case keep
+    case enable
+    case disable
+
+    var id: String { rawValue }
+}
+
+/// Bulk workspace reassignment. `.clear` un-assigns without deleting anything.
+enum BulkEditWorkspaceAction: Hashable {
+    case keep
+    case move(UUID)
+    case clear
+}
+
+enum BulkEditEnvironmentAction: Hashable {
+    case keep
+    case set(EnvironmentValue)
+}
+
 enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
     case allItems
     case favorites
@@ -118,6 +217,7 @@ enum VaultSheet: Identifiable {
     case export
     case passwordGenerator
     case vaultHealth
+    case bulkEdit
 
     var id: String {
         switch self {
@@ -129,6 +229,7 @@ enum VaultSheet: Identifiable {
         case .export: "export"
         case .passwordGenerator: "password-generator"
         case .vaultHealth: "vault-health"
+        case .bulkEdit: "bulk-edit"
         }
     }
 }

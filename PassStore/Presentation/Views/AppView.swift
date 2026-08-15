@@ -101,6 +101,8 @@ struct AppView: View {
                 PasswordGeneratorSheet(viewModel: viewModel)
             case .vaultHealth:
                 VaultHealthSheet(viewModel: viewModel)
+            case .bulkEdit:
+                BulkEditSheet(viewModel: viewModel)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
@@ -697,6 +699,10 @@ private struct ItemRow: View {
     @ViewBuilder
     private var multiSelectionContextMenu: some View {
         let count = viewModel.multiSelectedIDs.count
+        Button("Edit \(count) Items…", systemImage: "slider.horizontal.3") {
+            viewModel.activeSheet = .bulkEdit
+        }
+        Divider()
         Button("Add to Favorites", systemImage: "star") {
             viewModel.bulkAddFavorite()
         }
@@ -746,6 +752,16 @@ private struct MultiSelectionBar: View {
                     .foregroundStyle(.secondary)
 
                 Spacer()
+
+                Button {
+                    viewModel.activeSheet = .bulkEdit
+                } label: {
+                    Text("Edit…")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .help("Edit tags, workspace, environment and status for every selected item")
+                .accessibilityIdentifier("multi-selection-edit")
 
                 Button {
                     if allSelected {
@@ -823,6 +839,12 @@ private struct ItemDetailView: View {
 
                             GroupedSheetSection(title: "Details") {
                                 metadataRows(for: item)
+                            }
+
+                            if !item.changeHistory.isEmpty {
+                                GroupedSheetSection(title: "History") {
+                                    historyRows(for: item)
+                                }
                             }
 
                             if let notes = viewModel.selectedNotes {
@@ -1016,6 +1038,51 @@ private struct ItemDetailView: View {
             }
         }
     }
+
+    // MARK: History
+
+    /// Audit trail for the item. Entries name the kind of change and, at most, a field
+    /// label — a secret value never reaches this view.
+    @ViewBuilder
+    private func historyRows(for item: SecretItemEntity) -> some View {
+        let entries = item.orderedChangeHistory
+        let visible = entries.prefix(Self.historyPreviewLimit)
+
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(visible)) { entry in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: entry.kind.systemImage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+                    Text(entry.kind.title)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                    if let detail = entry.detail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Text(Self.relative(entry.changedAt))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .accessibilityElement(children: .combine)
+            }
+
+            if entries.count > visible.count {
+                Text("+\(entries.count - visible.count) older \(entries.count - visible.count == 1 ? "change" : "changes")")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .accessibilityIdentifier("detail-history")
+    }
+
+    /// Enough to see recent activity without turning the detail pane into a log viewer.
+    private static let historyPreviewLimit = 8
 
     private func metadataRow(_ label: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {

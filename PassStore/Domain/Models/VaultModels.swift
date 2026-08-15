@@ -64,6 +64,11 @@ final class SecretItemEntity: Identifiable, Hashable {
     weak var workspace: WorkspaceEntity?
     weak var template: SecretFieldTemplateEntity?
     var fields: [SecretFieldValueEntity]
+    /// Newest-first audit trail. Never contains secret values — see `SecretItemChangeKind`.
+    var changeHistory: [SecretItemChangeEntry]
+    /// Health findings the owner chose to dismiss. Keyed to the value that produced them,
+    /// so rotating a secret brings its finding back instead of hiding it forever.
+    var ignoredHealthIssues: [IgnoredHealthIssue]
 
     init(
         id: UUID = UUID(),
@@ -79,7 +84,9 @@ final class SecretItemEntity: Identifiable, Hashable {
         lastAccessedAt: Date? = nil,
         workspace: WorkspaceEntity? = nil,
         template: SecretFieldTemplateEntity? = nil,
-        fields: [SecretFieldValueEntity] = []
+        fields: [SecretFieldValueEntity] = [],
+        changeHistory: [SecretItemChangeEntry] = [],
+        ignoredHealthIssues: [IgnoredHealthIssue] = []
     ) {
         self.id = id
         self.title = title
@@ -96,6 +103,8 @@ final class SecretItemEntity: Identifiable, Hashable {
         self.workspace = workspace
         self.template = template
         self.fields = fields
+        self.changeHistory = changeHistory
+        self.ignoredHealthIssues = ignoredHealthIssues
     }
 
     static func == (lhs: SecretItemEntity, rhs: SecretItemEntity) -> Bool {
@@ -355,6 +364,154 @@ struct FieldResolvedValue: Identifiable, Hashable {
     let sortOrder: Int
 }
 
+/// Shared rules for reading meaning out of a field's key and label.
+enum SecretFieldClassification {
+    /// True for fields that hold a rotatable login password rather than some other secret.
+    /// Used both to offer the generator and to date credentials in the health audit.
+    static func isPasswordLike(key: String, label: String) -> Bool {
+        let descriptor = "\(key) \(label)".lowercased()
+        return descriptor.contains("password") || descriptor.contains("passphrase")
+    }
+}
+
+// MARK: - Audit history
+
+/// One recorded change to an item.
+///
+/// `detail` carries a field *label* at most. Storing a value here — even a redacted one —
+/// would put plaintext secrets in a structure the UI renders unmasked, so it never happens.
+struct SecretItemChangeEntry: Identifiable, Codable, Hashable {
+    let id: UUID
+    let kindRawValue: String
+    let changedAt: Date
+    let detail: String?
+
+    var kind: SecretItemChangeKind {
+        SecretItemChangeKind(rawValue: kindRawValue) ?? .detailsUpdated
+    }
+
+    init(id: UUID = UUID(), kind: SecretItemChangeKind, changedAt: Date = .now, detail: String? = nil) {
+        self.id = id
+        self.kindRawValue = kind.rawValue
+        self.changedAt = changedAt
+        self.detail = detail
+    }
+
+    /// Older vaults never wrote history, so every field tolerates absence rather than
+    /// failing the whole vault decode.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kindRawValue = try container.decodeIfPresent(String.self, forKey: .kindRawValue) ?? SecretItemChangeKind.detailsUpdated.rawValue
+        changedAt = try container.decodeIfPresent(Date.self, forKey: .changedAt) ?? .now
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+    }
+}
+
+/// A vault-health finding the owner dismissed.
+///
+/// The identity includes a digest of the offending value, so an ignore silently stops
+/// applying the moment that value changes — dismissing a weak password hides today's
+/// warning, not tomorrow's.
+struct IgnoredHealthIssue: Identifiable, Codable, Hashable {
+    let kindRawValue: String
+    let fieldKey: String
+    let valueDigest: String
+    let ignoredAt: Date
+
+    var id: String { "\(kindRawValue)|\(fieldKey)|\(valueDigest)" }
+
+    init(kindRawValue: String, fieldKey: String, valueDigest: String, ignoredAt: Date = .now) {
+        self.kindRawValue = kindRawValue
+        self.fieldKey = fieldKey
+        self.valueDigest = valueDigest
+        self.ignoredAt = ignoredAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kindRawValue = try container.decodeIfPresent(String.self, forKey: .kindRawValue) ?? ""
+        fieldKey = try container.decodeIfPresent(String.self, forKey: .fieldKey) ?? ""
+        valueDigest = try container.decodeIfPresent(String.self, forKey: .valueDigest) ?? ""
+        ignoredAt = try container.decodeIfPresent(Date.self, forKey: .ignoredAt) ?? .now
+    }
+}
+
+/// When the master password was set or rotated.
+///
+/// Lives inside the encrypted vault payload, not in `vault.meta`: the metadata file is
+/// plaintext on disk, and when someone changes their master password is nobody's business.
+struct MasterPasswordChangeEntry: Identifiable, Codable, Hashable {
+    let id: UUID
+    let kindRawValue: String
+    let changedAt: Date
+
+    var kind: MasterPasswordChangeKind {
+        MasterPasswordChangeKind(rawValue: kindRawValue) ?? .changed
+    }
+
+    init(id: UUID = UUID(), kind: MasterPasswordChangeKind, changedAt: Date = .now) {
+        self.id = id
+        self.kindRawValue = kind.rawValue
+        self.changedAt = changedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kindRawValue = try container.decodeIfPresent(String.self, forKey: .kindRawValue) ?? MasterPasswordChangeKind.changed.rawValue
+        changedAt = try container.decodeIfPresent(Date.self, forKey: .changedAt) ?? .now
+    }
+}
+
+// MARK: - Bulk edit
+
+/// Edits applied across a multi-selection. Every action defaults to "leave it alone",
+/// so an empty draft is a no-op and the sheet can only ever do what was explicitly asked.
+struct BulkEditDraft {
+    var tagsToAdd: [String] = []
+    var tagsToRemove: [String] = []
+    var workspaceAction: BulkEditWorkspaceAction = .keep
+    var environmentAction: BulkEditEnvironmentAction = .keep
+    var favoriteAction: BulkEditBooleanAction = .keep
+    var archiveAction: BulkEditBooleanAction = .keep
+
+    static let empty = BulkEditDraft()
+
+    var hasChanges: Bool {
+        !tagsToAdd.isEmpty
+            || !tagsToRemove.isEmpty
+            || workspaceAction != .keep
+            || environmentAction != .keep
+            || favoriteAction != .keep
+            || archiveAction != .keep
+    }
+
+    /// Human summary for the confirm button, e.g. "2 tags added, moved to workspace".
+    var summary: String {
+        var parts: [String] = []
+        if !tagsToAdd.isEmpty { parts.append("\(tagsToAdd.count) \(tagsToAdd.count == 1 ? "tag" : "tags") added") }
+        if !tagsToRemove.isEmpty { parts.append("\(tagsToRemove.count) \(tagsToRemove.count == 1 ? "tag" : "tags") removed") }
+        switch workspaceAction {
+        case .keep: break
+        case .move: parts.append("moved to workspace")
+        case .clear: parts.append("workspace cleared")
+        }
+        if case .set = environmentAction { parts.append("environment set") }
+        switch favoriteAction {
+        case .keep: break
+        case .enable: parts.append("favorited")
+        case .disable: parts.append("unfavorited")
+        }
+        switch archiveAction {
+        case .keep: break
+        case .enable: parts.append("archived")
+        case .disable: parts.append("restored")
+        }
+        return parts.isEmpty ? "No changes" : parts.joined(separator: ", ")
+    }
+}
+
 struct ExportedItemPayload: Codable {
     let id: UUID
     let workspaceName: String?
@@ -438,8 +595,30 @@ struct VaultSnapshot: Codable {
     var workspaces: [WorkspaceSnapshot]
     var items: [SecretItemSnapshot]
     var customTemplates: [TemplateSnapshot]
+    /// Newest-first. Added in 1.1.1; vaults written before that decode to an empty trail.
+    var masterPasswordHistory: [MasterPasswordChangeEntry]
 
-    static let empty = VaultSnapshot(workspaces: [], items: [], customTemplates: [])
+    static let empty = VaultSnapshot(workspaces: [], items: [], customTemplates: [], masterPasswordHistory: [])
+
+    init(
+        workspaces: [WorkspaceSnapshot],
+        items: [SecretItemSnapshot],
+        customTemplates: [TemplateSnapshot],
+        masterPasswordHistory: [MasterPasswordChangeEntry] = []
+    ) {
+        self.workspaces = workspaces
+        self.items = items
+        self.customTemplates = customTemplates
+        self.masterPasswordHistory = masterPasswordHistory
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaces = try container.decode([WorkspaceSnapshot].self, forKey: .workspaces)
+        items = try container.decode([SecretItemSnapshot].self, forKey: .items)
+        customTemplates = try container.decode([TemplateSnapshot].self, forKey: .customTemplates)
+        masterPasswordHistory = try container.decodeIfPresent([MasterPasswordChangeEntry].self, forKey: .masterPasswordHistory) ?? []
+    }
 }
 
 struct WorkspaceSnapshot: Codable {
@@ -495,6 +674,68 @@ struct SecretItemSnapshot: Codable {
     let workspaceID: UUID?
     let templateID: UUID?
     let fields: [FieldValueSnapshot]
+    /// Added in 1.1.1. Absent in vaults written by 1.1.0 and earlier.
+    let changeHistory: [SecretItemChangeEntry]
+    let ignoredHealthIssues: [IgnoredHealthIssue]
+
+    init(
+        id: UUID,
+        title: String,
+        typeRawValue: String,
+        environmentRawValue: String,
+        customEnvironmentName: String?,
+        notes: String,
+        tagsRawValue: String,
+        isFavorite: Bool,
+        isArchived: Bool,
+        createdAt: Date,
+        updatedAt: Date,
+        lastAccessedAt: Date?,
+        workspaceID: UUID?,
+        templateID: UUID?,
+        fields: [FieldValueSnapshot],
+        changeHistory: [SecretItemChangeEntry] = [],
+        ignoredHealthIssues: [IgnoredHealthIssue] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.typeRawValue = typeRawValue
+        self.environmentRawValue = environmentRawValue
+        self.customEnvironmentName = customEnvironmentName
+        self.notes = notes
+        self.tagsRawValue = tagsRawValue
+        self.isFavorite = isFavorite
+        self.isArchived = isArchived
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.lastAccessedAt = lastAccessedAt
+        self.workspaceID = workspaceID
+        self.templateID = templateID
+        self.fields = fields
+        self.changeHistory = changeHistory
+        self.ignoredHealthIssues = ignoredHealthIssues
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        typeRawValue = try container.decode(String.self, forKey: .typeRawValue)
+        environmentRawValue = try container.decode(String.self, forKey: .environmentRawValue)
+        customEnvironmentName = try container.decodeIfPresent(String.self, forKey: .customEnvironmentName)
+        notes = try container.decode(String.self, forKey: .notes)
+        tagsRawValue = try container.decode(String.self, forKey: .tagsRawValue)
+        isFavorite = try container.decode(Bool.self, forKey: .isFavorite)
+        isArchived = try container.decode(Bool.self, forKey: .isArchived)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        lastAccessedAt = try container.decodeIfPresent(Date.self, forKey: .lastAccessedAt)
+        workspaceID = try container.decodeIfPresent(UUID.self, forKey: .workspaceID)
+        templateID = try container.decodeIfPresent(UUID.self, forKey: .templateID)
+        fields = try container.decode([FieldValueSnapshot].self, forKey: .fields)
+        changeHistory = try container.decodeIfPresent([SecretItemChangeEntry].self, forKey: .changeHistory) ?? []
+        ignoredHealthIssues = try container.decodeIfPresent([IgnoredHealthIssue].self, forKey: .ignoredHealthIssues) ?? []
+    }
 }
 
 struct FieldValueSnapshot: Codable {
@@ -532,7 +773,7 @@ struct TemplateFieldSnapshot: Codable {
 // MARK: - Vault health audit
 
 struct VaultHealthFinding: Identifiable, Hashable {
-    enum Kind: Hashable {
+    enum Kind: String, Hashable {
         case reused
         case weak
         case stale
@@ -569,17 +810,72 @@ struct VaultHealthFinding: Identifiable, Hashable {
     let itemTitle: String
     /// Human-readable explanation. Never contains a secret value.
     let detail: String
+    /// Field this finding is about; empty for item-level findings such as `.stale`.
+    let fieldKey: String
+    /// Digest of the offending value, so an ignore expires when the value is rotated.
+    /// Empty for `.stale`, which is dated rather than valued.
+    let valueDigest: String
+    /// For `.stale`: the date the finding is measured against. An ignore recorded before
+    /// this date is out of date and stops applying.
+    let referenceDate: Date?
+
+    init(
+        id: String,
+        kind: Kind,
+        itemID: UUID,
+        itemTitle: String,
+        detail: String,
+        fieldKey: String = "",
+        valueDigest: String = "",
+        referenceDate: Date? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.itemID = itemID
+        self.itemTitle = itemTitle
+        self.detail = detail
+        self.fieldKey = fieldKey
+        self.valueDigest = valueDigest
+        self.referenceDate = referenceDate
+    }
+
+    /// The dismissal record this finding would produce.
+    var ignoreRecord: IgnoredHealthIssue {
+        IgnoredHealthIssue(kindRawValue: kind.rawValue, fieldKey: fieldKey, valueDigest: valueDigest)
+    }
+
+    /// True when `ignored` still describes this exact finding.
+    ///
+    /// Value-based findings match on the digest, so changing the secret invalidates the
+    /// dismissal. `.stale` has no value to key on, so it matches only while the item has
+    /// not been touched since the dismissal.
+    func isSilenced(by ignored: IgnoredHealthIssue) -> Bool {
+        guard ignored.kindRawValue == kind.rawValue, ignored.fieldKey == fieldKey else { return false }
+        guard kind == .stale else { return ignored.valueDigest == valueDigest }
+        guard let referenceDate else { return true }
+        return ignored.ignoredAt >= referenceDate
+    }
 }
 
 struct VaultHealthReport {
     let auditedItemCount: Int
     let findings: [VaultHealthFinding]
+    /// Findings that were produced but suppressed by an explicit dismissal.
+    let ignoredFindings: [VaultHealthFinding]
+
+    init(auditedItemCount: Int, findings: [VaultHealthFinding], ignoredFindings: [VaultHealthFinding] = []) {
+        self.auditedItemCount = auditedItemCount
+        self.findings = findings
+        self.ignoredFindings = ignoredFindings
+    }
 
     func count(of kind: VaultHealthFinding.Kind) -> Int {
         findings.filter { $0.kind == kind }.count
     }
 
     var isClean: Bool { findings.isEmpty }
+
+    var ignoredCount: Int { ignoredFindings.count }
 }
 
 struct ParsedEnvDocument {
@@ -629,6 +925,30 @@ extension SecretItemEntity {
                 .filter { !$0.isEmpty }
                 .joined(separator: ",")
         }
+    }
+}
+
+extension SecretItemEntity {
+    /// When a password field on this item was last rotated, as recorded in the audit trail.
+    ///
+    /// Nil for items that predate history or have never had a password changed — callers
+    /// fall back to `updatedAt`, which is what the audit did before 1.1.1.
+    var passwordLastChangedAt: Date? {
+        changeHistory
+            .filter { $0.kind.isPasswordRotation }
+            .map(\.changedAt)
+            .max()
+    }
+
+    /// The date the staleness audit measures against: a password's own rotation date when
+    /// known, otherwise the item's last edit. Renaming an item no longer makes its
+    /// two-year-old password look fresh.
+    var healthReferenceDate: Date {
+        passwordLastChangedAt ?? updatedAt
+    }
+
+    var orderedChangeHistory: [SecretItemChangeEntry] {
+        changeHistory.sorted { $0.changedAt > $1.changedAt }
     }
 }
 
