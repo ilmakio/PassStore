@@ -360,6 +360,51 @@ struct PolishAndRecoveryTests {
         #expect(titles.contains("Token Copy 2"))
     }
 
+    // MARK: - Automatic unlock
+
+    /// Locking on purpose must not be undone by a Touch ID prompt a second later.
+    @Test func lockingSuppressesTheAutomaticBiometricPrompt() {
+        let defaults = UserDefaults(suiteName: "AutoUnlockSuppression-\(UUID().uuidString)")!
+        let container = AppContainer(
+            inMemory: true,
+            defaults: defaults,
+            keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: true),
+            encryptedVaultStore: InMemoryEncryptedVaultStore()
+        )
+        container.settings.biometricsEnabled = true
+        container.sessionManager.createVaultSynchronously(password: "test-password")
+
+        container.sessionManager.lock()
+
+        #expect(container.sessionManager.suppressesAutomaticUnlock)
+        // The manual button stays available — only the automatic prompt is held back.
+        #expect(container.sessionManager.canAttemptBiometricUnlock)
+        #expect(!container.sessionManager.shouldOfferAutomaticUnlock)
+
+        // Leaving the app and coming back is a different intent, and does prompt again.
+        container.sessionManager.allowAutomaticUnlockOnNextActivation()
+        #expect(container.sessionManager.shouldOfferAutomaticUnlock)
+    }
+
+    @Test func lockingDoesNotClearAFailedAttemptPenalty() {
+        let defaults = UserDefaults(suiteName: "LockoutPersistence-\(UUID().uuidString)")!
+        let container = AppContainer(
+            inMemory: true,
+            defaults: defaults,
+            keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: false),
+            encryptedVaultStore: InMemoryEncryptedVaultStore()
+        )
+        container.sessionManager.createVaultSynchronously(password: "test-password")
+        container.sessionManager.lock()
+
+        #expect(!container.sessionManager.unlockWithPasswordSynchronously("wrong-password"))
+
+        // Locking again must not be a way to shrug off the penalty.
+        container.sessionManager.lock()
+        #expect(!container.sessionManager.unlockWithPasswordSynchronously("test-password"))
+        #expect(container.sessionManager.lastErrorMessage?.contains("Try again") == true)
+    }
+
     // MARK: - Quick copy
 
     @Test func quickCopyPrefersThePasswordField() throws {

@@ -1664,15 +1664,21 @@ private struct LockedVaultView: View {
             focusOrAuthenticate()
         }
         // Coming back to PassStore from another app should raise the prompt again, which is
-        // the whole point of not having to reach for the mouse.
+        // the whole point of not having to reach for the mouse. Leaving is what re-arms it
+        // after a manual lock.
         .onChange(of: controlActiveState) { _, newValue in
-            guard newValue != .inactive else { return }
+            guard newValue != .inactive else {
+                sessionManager.allowAutomaticUnlockOnNextActivation()
+                didAttemptAutomaticUnlock = false
+                return
+            }
             focusOrAuthenticate()
         }
+        // Locking deliberately does *not* authenticate: it just puts the caret where the
+        // owner would type if they change their mind.
         .onChange(of: sessionManager.lockState) { _, newValue in
             guard newValue != .unlocked else { return }
-            didAttemptAutomaticUnlock = false
-            focusOrAuthenticate()
+            isPasswordFocused = true
         }
         .confirmationDialog(
             "Erase this vault and start over?",
@@ -1762,12 +1768,15 @@ private struct LockedVaultView: View {
     /// Raises Touch ID by itself when it can succeed, and otherwise puts the caret where the
     /// owner is about to type. Previously the field never took focus, so every single unlock
     /// started with a mouse click.
+    ///
+    /// `shouldOfferAutomaticUnlock` is false right after a lock the owner asked for, so
+    /// locking does not immediately offer to unlock again.
     private func focusOrAuthenticate() {
         guard sessionManager.lockState != .unlocked else { return }
 
         if settings.unlocksWithBiometricsAutomatically,
            !didAttemptAutomaticUnlock,
-           sessionManager.canAttemptBiometricUnlock {
+           sessionManager.shouldOfferAutomaticUnlock {
             didAttemptAutomaticUnlock = true
             Task {
                 let unlocked = await sessionManager.unlockWithBiometrics()

@@ -393,14 +393,32 @@ final class VaultSessionManager {
         lastErrorMessage = nil
     }
 
-    /// True when a Touch ID prompt would actually succeed right now — used to decide whether
-    /// to raise the prompt automatically on launch and on window focus.
+    /// True when a Touch ID prompt would succeed right now. Governs the manual "Use Touch ID"
+    /// button, which must stay available even when the automatic prompt is suppressed.
     var canAttemptBiometricUnlock: Bool {
         lockState == .locked
             && settings.biometricsEnabled
             && isBiometricAvailable
             && !isBusy
             && !isPresentingBiometricPrompt
+    }
+
+    /// True when PassStore should raise the prompt by itself.
+    var shouldOfferAutomaticUnlock: Bool {
+        canAttemptBiometricUnlock && !suppressesAutomaticUnlock
+    }
+
+    /// Set whenever the vault locks, and cleared when the app next goes to the background.
+    ///
+    /// Locking is a deliberate act. Prompting for Touch ID a moment later — while the owner
+    /// is still sitting in front of the window they just locked — undoes it and makes the
+    /// lock command look broken. Leaving the app and coming back is a different intent, and
+    /// that does prompt again.
+    private(set) var suppressesAutomaticUnlock = false
+
+    /// Called when PassStore resigns active, so returning to it prompts normally again.
+    func allowAutomaticUnlockOnNextActivation() {
+        suppressesAutomaticUnlock = false
     }
 
     /// Guards against stacking prompts when several triggers fire at once (launch + focus,
@@ -627,8 +645,10 @@ final class VaultSessionManager {
         }
         metadata = nil
         memoryStore.clear()
-        failedPasswordAttempts = 0
-        lastFailedAttemptAt = nil
+        // The failed-attempt penalty is deliberately left alone: a successful unlock clears
+        // it, and locking must not become a way to shrug one off.
+        // Do not immediately offer to undo what was just asked for.
+        suppressesAutomaticUnlock = true
         lockState = vaultStore.hasVault() ? .locked : .setupRequired
         refreshBiometricAvailability()
         onLock?()

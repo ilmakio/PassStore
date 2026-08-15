@@ -17,8 +17,9 @@ All notable changes to PassStore are documented here.
   recoverable until you delete it — so it can be purged per item, purged across the whole
   vault, or switched off entirely in Settings → Data.
 - **Automatic Touch ID.** The unlock prompt now appears by itself when PassStore launches and
-  when you switch back to it, so unlocking takes no clicks at all. Turn it off in
-  Settings → General.
+  when you switch back to it, so unlocking takes no clicks at all. Locking on purpose never
+  triggers it — that would undo the thing you just asked for — so the prompt only returns
+  once you have left the app and come back. Turn it off in Settings → General.
 - **Restore from a backup during setup.** The welcome screen now has an "I already have a
   backup" path, instead of leaving a new arrival to find the import command in a menu.
 - **A way out of a forgotten master password.** The lock screen now offers to erase the vault
