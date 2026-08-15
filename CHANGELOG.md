@@ -2,7 +2,7 @@
 
 All notable changes to PassStore are documented here.
 
-## [1.1.1] - Unreleased
+## [1.1.1] - 2026-08-16
 
 ### Added
 
