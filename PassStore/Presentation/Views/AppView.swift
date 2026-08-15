@@ -1407,11 +1407,13 @@ private struct FieldRow: View {
     let onOpenURL: () -> Void
     var onShowHistory: (() -> Void)?
 
-    /// Explicit, per-field, and reachable from the keyboard.
+    /// Pinned reveal: stays shown after the pointer leaves.
     ///
-    /// Revealing used to be bound to `onHover` alone: there was no button, no shortcut and no
-    /// other affordance, so a keyboard or VoiceOver user simply could not see a stored secret.
-    @State private var isRevealed = false
+    /// Hovering reveals on its own — that is the quick, mouse-driven way and it is what the
+    /// app has always done. The button exists because hover was the *only* way, which left
+    /// keyboard and VoiceOver users unable to read a stored secret at all.
+    @State private var isRevealPinned = false
+    @State private var isHoveringValue = false
 
     private var isOpenableURL: Bool {
         field.kind == .url && !field.isSensitive && FieldURLSupport.url(from: field.value) != nil
@@ -1419,7 +1421,8 @@ private struct FieldRow: View {
 
     private var showsPlaintext: Bool {
         guard field.isSensitive else { return true }
-        return canRevealSecrets && isRevealed
+        guard canRevealSecrets else { return false }
+        return isRevealPinned || isHoveringValue
     }
 
     var body: some View {
@@ -1438,7 +1441,21 @@ private struct FieldRow: View {
             }
         }
         .accessibilityIdentifier("detail-field-\(field.key)")
-        .onChange(of: field.value) { _, _ in isRevealed = false }
+        // A pinned reveal must not carry over to a value the owner has not asked to see.
+        .onChange(of: field.value) { _, _ in isRevealPinned = false }
+        .onChange(of: field.id) { _, _ in
+            isRevealPinned = false
+            isHoveringValue = false
+        }
+    }
+
+    private var helpText: String {
+        switch (field.isCopyable, field.isSensitive && canRevealSecrets) {
+        case (true, true): "Hover to show, click to copy"
+        case (true, false): "Click to copy"
+        case (false, true): "Hover to show"
+        case (false, false): ""
+        }
     }
 
     private var header: some View {
@@ -1459,13 +1476,13 @@ private struct FieldRow: View {
 
             if field.isSensitive, canRevealSecrets {
                 Button {
-                    isRevealed.toggle()
+                    isRevealPinned.toggle()
                 } label: {
-                    Image(systemName: isRevealed ? "eye.slash" : "eye")
+                    Image(systemName: isRevealPinned ? "eye.slash" : "eye")
                 }
-                .buttonStyle(VaultIconButtonStyle(isActive: isRevealed))
-                .help(isRevealed ? "Hide value" : "Show value")
-                .accessibilityLabel(isRevealed ? "Hide \(field.label)" : "Show \(field.label)")
+                .buttonStyle(VaultIconButtonStyle(isActive: isRevealPinned))
+                .help(isRevealPinned ? "Hide value" : "Keep value shown")
+                .accessibilityLabel(isRevealPinned ? "Hide \(field.label)" : "Show \(field.label)")
                 .accessibilityIdentifier("detail-field-reveal-\(field.key)")
             }
 
@@ -1501,14 +1518,16 @@ private struct FieldRow: View {
                 .lineLimit(valueLineLimit)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        // Clicking the value still copies, but it is now a shortcut rather than the only way.
         .contentShape(Rectangle())
         .onTapGesture { if field.isCopyable { onCopy() } }
         .onHover { hovering in
+            if field.isSensitive, canRevealSecrets {
+                isHoveringValue = hovering
+            }
             guard field.isCopyable else { return }
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
-        .help(field.isCopyable ? "Click to copy" : "")
+        .help(helpText)
         .accessibilityIdentifier("detail-field-value-\(field.key)")
         .accessibilityLabel("\(field.label): \(showsPlaintext ? "shown" : "hidden")")
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isCopied)

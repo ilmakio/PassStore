@@ -46,9 +46,10 @@ All notable changes to PassStore are documented here.
   Settings → Data.
 - **Restoring a backup no longer duplicates everything on a second import.** Item ids were
   discarded on restore, so re-importing the same file made a second copy of every secret.
-- **Secret values can be revealed from the keyboard.** Revealing was bound to mouse hover
-  alone, with no button and no shortcut, which meant keyboard and VoiceOver users could not
-  read a stored secret at all. Every sensitive field now has a reveal button.
+- **Secret values can be revealed from the keyboard.** Hovering a secret still shows it and
+  clicking still copies it, exactly as before — but that was the *only* way, so keyboard and
+  VoiceOver users could not read a stored secret at all. Every sensitive field now also has a
+  reveal button, which keeps the value shown after the pointer moves away.
 - **The item list is a real list.** Arrow keys, ⇧-click ranges and ⌘-click toggling all work,
   and the list takes focus properly.
 - **Selecting an item no longer re-encrypts and rewrites the entire vault.** The "last used"
