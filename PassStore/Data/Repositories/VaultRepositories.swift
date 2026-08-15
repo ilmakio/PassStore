@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 @MainActor
@@ -166,14 +167,21 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
     @discardableResult
     func saveItem(_ draft: SecretItemDraft) throws -> SecretItemEntity {
         try store.requireUnlocked()
+        let draft = Self.normalized(draft)
         let item: SecretItemEntity
+        let isNewItem: Bool
         if let id = draft.id,
            let existing = store.items.first(where: { $0.id == id }) {
             item = existing
+            isNewItem = false
         } else {
             item = SecretItemEntity(title: draft.title, type: draft.type, environment: draft.environment)
             store.items.append(item)
+            isNewItem = true
         }
+
+        // Snapshot before mutating: the diff is what becomes the audit trail.
+        let previous = isNewItem ? nil : ItemStateSnapshot(item: item)
 
         item.title = draft.title
         item.type = draft.type
@@ -215,9 +223,178 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             return field
         }.sorted { $0.sortOrder < $1.sortOrder }
 
+        recordHistory(for: item, previous: previous)
+        pruneStaleIgnores(on: item)
         rebuildWorkspaceItems()
         try store.persist()
         return item
+    }
+
+    /// Drops dismissals that can no longer match anything.
+    ///
+    /// A dismissal is pinned to the value that caused the finding, so once that value is
+    /// rotated the record is dead weight. Without this, every dismiss-then-rotate cycle
+    /// would leave a permanent orphan in the vault.
+    private func pruneStaleIgnores(on item: SecretItemEntity) {
+        guard !item.ignoredHealthIssues.isEmpty else { return }
+        let liveDigests = Set(
+            item.fields
+                .filter(\.isSensitive)
+                .map { "\($0.fieldKey)|\(Self.digest($0.plainValue))" }
+        )
+        item.ignoredHealthIssues.removeAll { ignored in
+            // An item-level dismissal is measured against the item's own timeline, and this
+            // save just moved it — so the dismissal is out of date by definition.
+            guard ignored.kindRawValue != VaultHealthFinding.Kind.stale.rawValue else { return true }
+            return !liveDigests.contains("\(ignored.fieldKey)|\(ignored.valueDigest)")
+        }
+    }
+
+    static func digest(_ value: String) -> String {
+        Data(SHA256.hash(data: Data(value.utf8))).base64EncodedString()
+    }
+
+    // MARK: - Audit history
+
+    /// The subset of item state the audit trail compares. Captured before the entity is
+    /// mutated, since the entity is a reference type and the draft overwrites it in place.
+    private struct ItemStateSnapshot {
+        let title: String
+        let notes: String
+        let type: SecretItemType
+        let environmentTitle: String
+        let workspaceID: UUID?
+        let isFavorite: Bool
+        let isArchived: Bool
+        let fields: [String: FieldState]
+
+        struct FieldState {
+            let label: String
+            let value: String
+            let isSensitive: Bool
+        }
+
+        init(item: SecretItemEntity) {
+            title = item.title
+            notes = item.notes
+            type = item.type
+            environmentTitle = item.environmentValue.title
+            workspaceID = item.workspace?.id
+            isFavorite = item.isFavorite
+            isArchived = item.isArchived
+            fields = Dictionary(
+                item.fields.map { ($0.fieldKey, FieldState(label: $0.labelSnapshot, value: $0.plainValue, isSensitive: $0.isSensitive)) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }
+    }
+
+    /// Appends entries describing how `item` just changed.
+    ///
+    /// Entries record the *kind* of change and, at most, a field label. Values — especially
+    /// sensitive ones — are compared here but never written into the trail.
+    private func recordHistory(for item: SecretItemEntity, previous: ItemStateSnapshot?) {
+        let entries = Self.historyEntries(for: item, previous: previous)
+        guard !entries.isEmpty else { return }
+        item.changeHistory = Array((entries + item.changeHistory).prefix(Self.historyLimit))
+    }
+
+    /// Bounded per item so a heavily edited secret can't grow the vault without limit.
+    static let historyLimit = 60
+
+    private static func historyEntries(for item: SecretItemEntity, previous: ItemStateSnapshot?) -> [SecretItemChangeEntry] {
+        guard let previous else { return [SecretItemChangeEntry(kind: .created)] }
+        var entries: [SecretItemChangeEntry] = []
+
+        if previous.title != item.title || previous.notes != item.notes {
+            entries.append(SecretItemChangeEntry(kind: .detailsUpdated))
+        }
+        if previous.type != item.type {
+            entries.append(SecretItemChangeEntry(kind: .typeChanged, detail: item.type.title))
+        }
+        if previous.environmentTitle != item.environmentValue.title {
+            entries.append(SecretItemChangeEntry(kind: .environmentChanged, detail: item.environmentValue.title))
+        }
+        if previous.workspaceID != item.workspace?.id {
+            entries.append(SecretItemChangeEntry(kind: .workspaceChanged, detail: item.workspace?.name))
+        }
+        if previous.isFavorite != item.isFavorite {
+            entries.append(SecretItemChangeEntry(kind: item.isFavorite ? .favoriteEnabled : .favoriteDisabled))
+        }
+        if previous.isArchived != item.isArchived {
+            entries.append(SecretItemChangeEntry(kind: item.isArchived ? .archived : .restored))
+        }
+
+        let currentKeys = Set(item.fields.map(\.fieldKey))
+        for (key, old) in previous.fields where !currentKeys.contains(key) {
+            entries.append(SecretItemChangeEntry(kind: .fieldRemoved, detail: old.label))
+        }
+
+        for field in item.fields {
+            guard let old = previous.fields[field.fieldKey] else {
+                entries.append(SecretItemChangeEntry(kind: .fieldAdded, detail: field.labelSnapshot))
+                continue
+            }
+            guard old.value != field.plainValue else { continue }
+            if field.isSensitive || old.isSensitive {
+                let isPassword = SecretFieldClassification.isPasswordLike(key: field.fieldKey, label: field.labelSnapshot)
+                entries.append(
+                    SecretItemChangeEntry(
+                        kind: isPassword ? .passwordRotated : .sensitiveValueChanged,
+                        detail: field.labelSnapshot
+                    )
+                )
+            } else {
+                entries.append(SecretItemChangeEntry(kind: .fieldValueChanged, detail: field.labelSnapshot))
+            }
+        }
+
+        return entries
+    }
+
+    // MARK: - Draft normalization
+
+    /// Cleans a draft at the repository boundary so the same hygiene applies no matter which
+    /// caller produced it — editor, bulk edit, `.env` import or a restored backup.
+    ///
+    /// Field *values* are deliberately left untouched: trimming a password would silently
+    /// corrupt a stored secret.
+    static func normalized(_ draft: SecretItemDraft) -> SecretItemDraft {
+        var draft = draft
+        draft.title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.notes = draft.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.tags = normalizedTags(draft.tags)
+        draft.environment = normalizedEnvironment(draft.environment)
+        draft.fieldDrafts = draft.fieldDrafts.map { field in
+            var field = field
+            field.key = field.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            field.label = field.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            return field
+        }
+        return draft
+    }
+
+    /// Tags are persisted as one comma-joined string, so a tag containing a comma would
+    /// silently split into two on the next load. Commas are stripped rather than escaped.
+    static func normalizedTags(_ tags: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for tag in tags {
+            let cleaned = tag
+                .replacingOccurrences(of: ",", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { continue }
+            let fingerprint = cleaned.lowercased()
+            guard seen.insert(fingerprint).inserted else { continue }
+            result.append(cleaned)
+        }
+        return result
+    }
+
+    private static func normalizedEnvironment(_ environment: EnvironmentValue) -> EnvironmentValue {
+        guard environment.kind == .custom else { return environment }
+        let trimmed = (environment.customName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? .preset(.dev) : .custom(trimmed)
     }
 
     func recordItemAccess(_ item: SecretItemEntity) throws {

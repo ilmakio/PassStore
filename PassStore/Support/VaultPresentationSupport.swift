@@ -250,8 +250,7 @@ extension SecretItemType {
 extension FieldDraft {
     var supportsGeneratedPassword: Bool {
         guard kind == .secret else { return false }
-        let descriptor = "\(key) \(label)".lowercased()
-        return descriptor.contains("password") || descriptor.contains("passphrase")
+        return SecretFieldClassification.isPasswordLike(key: key, label: label)
     }
 }
 
