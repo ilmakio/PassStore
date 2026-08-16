@@ -463,14 +463,6 @@ private struct ItemListView: View {
                         }
                     }
                     .listStyle(.inset)
-                    .onKeyPress(.upArrow) {
-                        viewModel.moveSelection(by: -1)
-                        return .handled
-                    }
-                    .onKeyPress(.downArrow) {
-                        viewModel.moveSelection(by: 1)
-                        return .handled
-                    }
                     .accessibilityIdentifier("item-list")
                 }
 
@@ -480,11 +472,16 @@ private struct ItemListView: View {
                     StatusFooter(message: message, viewModel: viewModel)
                 }
             }
-            .onKeyPress(.escape) {
-                guard viewModel.isMultiSelecting else { return .ignored }
-                viewModel.clearMultiSelection()
-                return .handled
-            }
+            .itemListKeyboardShortcuts(
+                isEnabled: !isVaultLocked && viewModel.activeSheet == nil
+                    && !viewModel.isSettingsPresented && !viewModel.isCommandPalettePresented,
+                onMove: { viewModel.moveSelection(by: $0) },
+                onEscape: {
+                    guard viewModel.isMultiSelecting else { return false }
+                    viewModel.clearMultiSelection()
+                    return true
+                }
+            )
             .onChange(of: viewModel.searchFocusRequests) { _, _ in
                 isSearchFocused = true
             }
@@ -914,6 +911,75 @@ private struct ItemRow: View {
         Button("Delete \(count) Items…", systemImage: "trash", role: .destructive) {
             viewModel.requestDeletionOfMultiSelection()
         }
+    }
+}
+
+// MARK: - List keyboard handling
+
+/// Bare ↑ / ↓ / Escape for the item list.
+///
+/// SwiftUI's `onKeyPress` only fires for a focused view, and the list deliberately no longer
+/// owns an AppKit selection — that is what was painting a solid accent block over every
+/// selected row. A local monitor gives the keys back without that, and without the menu-level
+/// key equivalents that would steal arrows and Escape from every text field in the app.
+private struct ItemListKeyboardShortcuts: ViewModifier {
+    let isEnabled: Bool
+    let onMove: (Int) -> Void
+    let onEscape: () -> Bool
+
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { install() }
+            .onDisappear { remove() }
+            .onChange(of: isEnabled) { _, _ in install() }
+    }
+
+    private func install() {
+        remove()
+        guard isEnabled else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard Self.isAddressedToTheList(event) else { return event }
+            switch event.keyCode {
+            case 126:
+                onMove(-1)
+                return nil
+            case 125:
+                onMove(1)
+                return nil
+            case 53:
+                return onEscape() ? nil : event
+            default:
+                return event
+            }
+        }
+    }
+
+    private func remove() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    /// True only for an unmodified key press that nothing else is entitled to.
+    private static func isAddressedToTheList(_ event: NSEvent) -> Bool {
+        // ⌥↑ / ⌥↓ belong to the menu command, and any other modifier is somebody else's.
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
+        guard let window = event.window, window.attachedSheet == nil else { return false }
+        // Typing anywhere keeps its own arrow and Escape behaviour. A focused `TextField`
+        // reports its field editor, which is an `NSTextView`.
+        if window.firstResponder is NSTextView { return false }
+        return true
+    }
+}
+
+private extension View {
+    func itemListKeyboardShortcuts(
+        isEnabled: Bool,
+        onMove: @escaping (Int) -> Void,
+        onEscape: @escaping () -> Bool
+    ) -> some View {
+        modifier(ItemListKeyboardShortcuts(isEnabled: isEnabled, onMove: onMove, onEscape: onEscape))
     }
 }
 

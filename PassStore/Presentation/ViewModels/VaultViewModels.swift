@@ -154,7 +154,9 @@ final class VaultViewModel {
             return
         }
         let next = min(max(index + offset, 0), visible.count - 1)
-        guard next != index else { return }
+        // At the edge of the list an arrow press still collapses a multi-selection back to a
+        // single row, rather than appearing to do nothing.
+        guard next != index || isMultiSelecting else { return }
         select(visible[next])
     }
 
@@ -421,17 +423,28 @@ final class VaultViewModel {
         selectedItemID = item.id
     }
 
+    /// ⌘-click: adds or removes one row.
+    ///
+    /// Seeded from whatever is highlighted rather than from `multiSelectedIDs` alone. With a
+    /// single row selected that set is empty, so ⌘-clicking a second row used to drop the
+    /// first one and start a new selection from the row just clicked.
     func toggleMultiSelect(_ item: SecretItemEntity) {
-        if multiSelectedIDs.contains(item.id) {
-            multiSelectedIDs.remove(item.id)
+        var selection = multiSelectedIDs.isEmpty ? listSelection : multiSelectedIDs
+
+        if selection.contains(item.id) {
+            selection.remove(item.id)
         } else {
-            multiSelectedIDs.insert(item.id)
+            selection.insert(item.id)
         }
-        // Keep selectedItemID pointing to the last toggled item for detail view
-        if multiSelectedIDs.isEmpty {
+        multiSelectedIDs = selection
+
+        if selection.isEmpty {
             selectedItemID = nil
-        } else {
+        } else if selection.contains(item.id) {
+            // The row just added becomes the anchor for a following ⇧-click.
             selectedItemID = item.id
+        } else if let current = selectedItemID, !selection.contains(current) {
+            selectedItemID = filteredItems.first { selection.contains($0.id) }?.id
         }
     }
 
@@ -440,8 +453,11 @@ final class VaultViewModel {
         selectedItemID = filteredItems.first?.id
     }
 
+    /// Drops the whole selection — used by Escape and by the selection bar's dismiss button,
+    /// which should both leave nothing highlighted.
     func clearMultiSelection() {
         multiSelectedIDs.removeAll()
+        selectedItemID = nil
     }
 
     func bulkAddFavorite() {

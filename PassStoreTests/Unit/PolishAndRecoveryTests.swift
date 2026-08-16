@@ -393,6 +393,65 @@ struct PolishAndRecoveryTests {
         #expect(!viewModel.isSelected(rows[2]))
     }
 
+    /// ⌘-clicking a second row must add to what is already highlighted. It used to start a
+    /// fresh selection from the row just clicked, silently dropping the current one.
+    @Test func commandClickExtendsTheExistingSingleSelection() throws {
+        let container = makeContainer("SelectionCommandClick")
+        let viewModel = VaultViewModel(container: container)
+        for title in ["A", "B", "C"] {
+            _ = try container.itemRepository.saveItem(draft(title: title))
+        }
+        viewModel.reload()
+        viewModel.sortOrder = .title
+        let rows = viewModel.filteredItems
+
+        viewModel.select(rows[0])
+        viewModel.toggleMultiSelect(rows[2])
+
+        #expect(viewModel.multiSelectedItems.map(\.title) == ["A", "C"])
+        #expect(viewModel.selectedItemID == rows[2].id)
+    }
+
+    @Test func escapeClearsTheWholeSelection() throws {
+        let container = makeContainer("SelectionEscape")
+        let viewModel = VaultViewModel(container: container)
+        for title in ["A", "B"] {
+            _ = try container.itemRepository.saveItem(draft(title: title))
+        }
+        viewModel.reload()
+        let rows = viewModel.filteredItems
+
+        viewModel.select(rows[0])
+        viewModel.toggleMultiSelect(rows[1])
+        #expect(viewModel.isMultiSelecting)
+
+        viewModel.clearMultiSelection()
+        #expect(!viewModel.isMultiSelecting)
+        #expect(viewModel.selectedItemID == nil)
+        #expect(viewModel.listSelection.isEmpty)
+    }
+
+    /// An arrow press at the end of the list still collapses a multi-selection to one row.
+    @Test func arrowKeysCollapseAMultiSelection() throws {
+        let container = makeContainer("SelectionArrows")
+        let viewModel = VaultViewModel(container: container)
+        for title in ["A", "B"] {
+            _ = try container.itemRepository.saveItem(draft(title: title))
+        }
+        viewModel.reload()
+        viewModel.sortOrder = .title
+        let rows = viewModel.filteredItems
+
+        viewModel.select(rows[1])
+        viewModel.toggleMultiSelect(rows[0])
+        #expect(viewModel.isMultiSelecting)
+
+        // Already at the top, so the row does not change — but the run does collapse.
+        viewModel.moveSelection(by: -1)
+        #expect(!viewModel.isMultiSelecting)
+        #expect(viewModel.selectedItemID == rows[0].id)
+    }
+
     @Test func shiftClickWithoutAnAnchorJustSelects() throws {
         let container = makeContainer("SelectionNoAnchor")
         let viewModel = VaultViewModel(container: container)
