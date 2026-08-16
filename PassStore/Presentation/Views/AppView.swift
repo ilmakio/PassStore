@@ -141,10 +141,15 @@ struct AppView: View {
                     await Task.yield()
                     viewModel.reload()
                 }
-            case .locked, .setupRequired:
+            case .locked:
                 // Sensitive view-model state is cleared synchronously by the session's lock
                 // callback, including when this window is closed.
                 break
+            case .setupRequired:
+                // Reached by erasing the vault. Setting up again is the same job a new arrival
+                // has, restoring a backup included, so it gets the same guided flow instead of
+                // a bare "create a password" box.
+                withAnimation(.easeOut(duration: 0.3)) { showOnboarding = true }
             }
         }
         .alert("PassStore", isPresented: Binding(

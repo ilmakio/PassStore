@@ -801,6 +801,86 @@ struct EnvRoundTripTests {
         #expect(!EnvImportService.looksSensitive(key: "PORT"))
     }
 
+    private func field(_ key: String, _ value: String, order: Int = 0) -> FieldResolvedValue {
+        FieldResolvedValue(
+            id: UUID(), key: key, label: key, value: value, kind: .text,
+            isSensitive: false, isCopyable: true, isMasked: false, sortOrder: order
+        )
+    }
+
+    /// Writing used to regenerate the whole document, so the first Write destroyed every
+    /// comment and blank line in the owner's file.
+    @Test func updatingAFilePreservesCommentsBlankLinesAndOrder() {
+        let original = """
+        # Production credentials
+        # Do not commit
+
+        DB_HOST=old.example.dev
+        DB_PORT=5432 # the default
+
+        # Third-party
+        STRIPE_KEY=sk_old
+        """
+
+        let updated = CopyFormatter.envFileByUpdating(original, with: [
+            field("DB_HOST", "new.example.dev", order: 0),
+            field("DB_PORT", "6543", order: 1),
+            field("STRIPE_KEY", "sk_new", order: 2)
+        ])
+
+        #expect(updated.contains("# Production credentials"))
+        #expect(updated.contains("# Do not commit"))
+        #expect(updated.contains("# Third-party"))
+        #expect(updated.contains("\n\n"))
+        #expect(updated.contains("DB_HOST=\"new.example.dev\""))
+        #expect(updated.contains("sk_new"))
+        #expect(!updated.contains("old.example.dev"))
+        #expect(!updated.contains("sk_old"))
+        // The note beside a value is part of the file, not of the value.
+        #expect(updated.contains("# the default"))
+        // Order is the file's, not the item's.
+        let hostLine = try? #require(updated.components(separatedBy: "\n").firstIndex { $0.hasPrefix("DB_HOST") })
+        let stripeLine = try? #require(updated.components(separatedBy: "\n").firstIndex { $0.hasPrefix("STRIPE_KEY") })
+        #expect((hostLine ?? 0) < (stripeLine ?? 0))
+    }
+
+    @Test func updatingKeepsUntrackedVariablesAndAppendsNewOnes() {
+        let original = """
+        KNOWN=one
+        MANAGED_ELSEWHERE=leave-me
+        """
+
+        let updated = CopyFormatter.envFileByUpdating(original, with: [
+            field("KNOWN", "two", order: 0),
+            field("BRAND_NEW", "three", order: 1)
+        ])
+
+        #expect(updated.contains("MANAGED_ELSEWHERE=leave-me"))
+        #expect(updated.contains("KNOWN=\"two\""))
+        #expect(updated.contains("BRAND_NEW=\"three\""))
+    }
+
+    @Test func updatingReplacesAMultiLineValueAndKeepsTheExportPrefix() {
+        let original = """
+        # key below
+        export PRIVATE_KEY="-----BEGIN-----
+        abc
+        -----END-----"
+        AFTER=kept
+        """
+
+        let updated = CopyFormatter.envFileByUpdating(original, with: [
+            field("PRIVATE_KEY", "replaced", order: 0)
+        ])
+
+        #expect(updated.contains("export PRIVATE_KEY=\"replaced\""))
+        #expect(updated.contains("# key below"))
+        #expect(updated.contains("AFTER=kept"))
+        #expect(!updated.contains("BEGIN"))
+        // The wrapped lines went with it rather than being orphaned.
+        #expect(!updated.contains("abc"))
+    }
+
     @Test func writingAndReadingBackPreservesKeysAndValues() {
         let fields = [
             FieldResolvedValue(id: UUID(), key: "Api_Key", label: "API key", value: "abc 123", kind: .secret, isSensitive: true, isCopyable: true, isMasked: true, sortOrder: 0),

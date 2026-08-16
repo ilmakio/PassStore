@@ -10,8 +10,11 @@ All notable changes to PassStore are documented here.
   If that file later changes on disk, the item offers **Update from file**; **Write to file**
   sends your changes back out. Linked files are checked when you switch back to PassStore —
   nothing runs in the background, and nothing is written unless you ask. If the file and the
-  item have both changed, PassStore says so and lets you choose which one wins. Untick
-  "Keep a link to this file" during import if you only want a one-off copy.
+  item have both changed, PassStore says so and lets you choose which one wins. Writing edits
+  the file in place — it replaces the values of the variables the item tracks and leaves your
+  comments, blank lines, ordering and any variable PassStore does not know about exactly where
+  they were, appending anything new at the end. Untick "Keep a link to this file" during import
+  if you only want a one-off copy.
 - **File → Import .env File… (⇧⌘O)** creates the item, fills in its keys and links the file in
   a single step. Also available from the command palette and the empty-vault screen.
 - **Previous values.** When you change a secret, the value it replaced is kept, so you can look

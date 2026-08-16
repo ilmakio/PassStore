@@ -1206,11 +1206,24 @@ final class VaultViewModel {
             alertMessage = LinkedFileError.noLink.localizedDescription
             return false
         }
-        let contents = envContents(for: item)
-        let contentsDigest = LinkedFileService.digest(contents)
         let itemID = item.id
         let sessionGeneration = container.sessionManager.captureSecurityGeneration()
         let service = container.linkedFiles
+
+        // Update the file in place rather than regenerating it. Writing `envContents` over the
+        // top replaced the whole document, so every comment, blank line and untracked variable
+        // in the owner's `.env` disappeared the first time they pressed Write.
+        let vaultContents = envContents(for: item)
+        let contents: String
+        if link.parsedIntoFields, let existing = try? await Task.detached(priority: .userInitiated, operation: {
+            try service.read(link).contents
+        }).value {
+            contents = CopyFormatter.envFileByUpdating(existing, with: resolvedFields(for: item))
+        } else {
+            contents = vaultContents
+        }
+        let contentsDigest = LinkedFileService.digest(contents)
+        let vaultDigest = LinkedFileService.digest(vaultContents)
         var didWriteFile = false
         do {
             let writeResult = try await Task.detached(priority: .userInitiated) { () -> LinkedFileService.WriteResult in
@@ -1236,10 +1249,12 @@ final class VaultViewModel {
             var updatedLink = current.linkedFile ?? link
             updatedLink.bookmark = writeResult.refreshedBookmark ?? link.bookmark
             if writeResult.refreshedBookmark != nil { updatedLink.displayPath = writeResult.resolvedPath }
+            // The two digests are no longer the same string: the file keeps its comments and
+            // untracked variables, so what landed on disk is not what the item alone renders.
             updatedLink.syncedDigest = contentsDigest
-            // This is the exact vault state written, not necessarily the current state: an
-            // edit can complete while the file operation is suspended off-main.
-            updatedLink.syncedVaultDigest = contentsDigest
+            // The exact vault state written, not necessarily the current one: an edit can
+            // complete while the file operation is suspended off-main.
+            updatedLink.syncedVaultDigest = vaultDigest
             updatedLink.syncedAt = .now
             updatedLink.requiresInitialSync = false
             let previousLink = current.linkedFile

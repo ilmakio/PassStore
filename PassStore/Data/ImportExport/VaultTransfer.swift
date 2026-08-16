@@ -78,6 +78,40 @@ struct CopyFormatter {
         }.joined(separator: "\n")
     }
 
+    /// Rewrites `original` so every known key carries its stored value, leaving everything
+    /// else exactly as it was.
+    ///
+    /// Regenerating the file from the stored fields — which is what writing used to do —
+    /// silently destroyed comments, blank lines, key order and any variable the item does not
+    /// track. A `.env` is a file its owner maintains, not something PassStore owns, so an
+    /// update only ever replaces the value on an assignment it recognises.
+    ///
+    /// Keys the item has and the file lacks are appended. Keys the file has and the item lacks
+    /// are left alone: deleting somebody's line because a field was removed here would be the
+    /// same mistake in a smaller form.
+    static func envFileByUpdating(_ original: String, with fields: [FieldResolvedValue]) -> String {
+        let assignments = EnvImportService.assignments(in: original)
+        var pending = Dictionary(fields.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var lines = original.components(separatedBy: "\n")
+        // Rewrite back-to-front so earlier line indices stay valid as multi-line spans shrink.
+        for assignment in assignments.reversed() {
+            guard let field = pending.removeValue(forKey: assignment.key) else { continue }
+            let rebuilt = "\(assignment.prefix)\(assignment.key)=\(envQuoted(field.value))\(assignment.trailingComment)"
+            lines.replaceSubrange(assignment.lineRange, with: [rebuilt])
+        }
+
+        let additions = fields
+            .filter { pending[$0.key] != nil }
+            .map { "\(safeEnvKey($0.key))=\(envQuoted($0.value))" }
+        guard !additions.isEmpty else { return lines.joined(separator: "\n") }
+
+        if lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            lines.removeLast()
+        }
+        return (lines + additions).joined(separator: "\n") + "\n"
+    }
+
     /// Always quoting makes the output safe both for dotenv readers and for developers who
     /// load the file with `source`. Dollar signs and backticks must be escaped as well as
     /// ordinary string escapes; otherwise a value restored from a backup could trigger shell
@@ -291,6 +325,62 @@ nonisolated struct EnvImportService: Sendable {
         }
 
         return ParsedEnvDocument(notes: notes.joined(separator: "\n"), entries: entries)
+    }
+
+    /// Where each assignment lives in the original text, so a value can be replaced without
+    /// disturbing the lines around it.
+    struct Assignment {
+        /// Whitespace and any `export ` that preceded the key, reproduced verbatim.
+        let prefix: String
+        let key: String
+        /// A trailing `# comment` on a single-line unquoted value, kept so updating a value
+        /// does not throw away the note explaining it.
+        let trailingComment: String
+        /// The physical lines this assignment occupies — more than one for a quoted value
+        /// that wraps.
+        let lineRange: Range<Int>
+    }
+
+    /// Locates every assignment, using the same rules as `parse`.
+    static func assignments(in text: String) -> [Assignment] {
+        let lines = text.components(separatedBy: "\n")
+        var result: [Assignment] = []
+        var index = 0
+
+        while index < lines.count {
+            let start = index
+            let rawLine = lines[index]
+            index += 1
+
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#"), let separator = line.firstIndex(of: "=") else { continue }
+
+            let head = String(line[line.startIndex..<separator])
+            var key = head.trimmingCharacters(in: .whitespaces)
+            var prefix = String(rawLine.prefix(while: { $0 == " " || $0 == "\t" }))
+            if key.hasPrefix("export "), key.count > "export ".count {
+                key = String(key.dropFirst("export ".count)).trimmingCharacters(in: .whitespaces)
+                prefix += "export "
+            }
+            guard !key.isEmpty, key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "." }) else { continue }
+
+            var remainder = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+            var trailingComment = ""
+
+            if let quote = remainder.first, quote == "\"" || quote == "'" {
+                while !isClosed(remainder, quote: quote), index < lines.count {
+                    remainder += "\n" + lines[index]
+                    index += 1
+                }
+            } else if let hash = remainder.range(of: " #") {
+                trailingComment = String(remainder[hash.lowerBound...])
+            }
+
+            result.append(
+                Assignment(prefix: prefix, key: key, trailingComment: trailingComment, lineRange: start..<index)
+            )
+        }
+        return result
     }
 
     /// True once the opening quote has a matching unescaped closing quote.
