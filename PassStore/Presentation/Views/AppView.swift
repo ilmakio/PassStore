@@ -473,8 +473,12 @@ private struct ItemListView: View {
                 }
             }
             .itemListKeyboardShortcuts(
-                isEnabled: !isVaultLocked && viewModel.activeSheet == nil
-                    && !viewModel.isSettingsPresented && !viewModel.isCommandPalettePresented,
+                isEnabled: {
+                    viewModel.container.sessionManager.lockState == .unlocked
+                        && viewModel.activeSheet == nil
+                        && !viewModel.isSettingsPresented
+                        && !viewModel.isCommandPalettePresented
+                },
                 onMove: { viewModel.moveSelection(by: $0) },
                 onEscape: {
                     guard viewModel.isMultiSelecting else { return false }
@@ -923,32 +927,38 @@ private struct ItemRow: View {
 /// selected row. A local monitor gives the keys back without that, and without the menu-level
 /// key equivalents that would steal arrows and Escape from every text field in the app.
 private struct ItemListKeyboardShortcuts: ViewModifier {
-    let isEnabled: Bool
+    /// Read at event time rather than captured, so the monitor can be installed once and
+    /// still respect state that changes while it is running.
+    let isEnabled: () -> Bool
     let onMove: (Int) -> Void
     let onEscape: () -> Bool
 
     @State private var monitor: Any?
 
+    private enum Key {
+        static let upArrow: UInt16 = 126
+        static let downArrow: UInt16 = 125
+        static let escape: UInt16 = 53
+    }
+
     func body(content: Content) -> some View {
         content
             .onAppear { install() }
             .onDisappear { remove() }
-            .onChange(of: isEnabled) { _, _ in install() }
     }
 
     private func install() {
         remove()
-        guard isEnabled else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard Self.isAddressedToTheList(event) else { return event }
+            guard isEnabled(), Self.isAddressedToTheList(event) else { return event }
             switch event.keyCode {
-            case 126:
+            case Key.upArrow:
                 onMove(-1)
                 return nil
-            case 125:
+            case Key.downArrow:
                 onMove(1)
                 return nil
-            case 53:
+            case Key.escape:
                 return onEscape() ? nil : event
             default:
                 return event
@@ -961,10 +971,14 @@ private struct ItemListKeyboardShortcuts: ViewModifier {
         monitor = nil
     }
 
-    /// True only for an unmodified key press that nothing else is entitled to.
+    /// True only for a key press nothing else is entitled to.
     private static func isAddressedToTheList(_ event: NSEvent) -> Bool {
-        // ⌥↑ / ⌥↓ belong to the menu command, and any other modifier is somebody else's.
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
+        // Only the chord modifiers disqualify an event. Testing the whole
+        // `deviceIndependentFlagsMask` looked equivalent but was not: macOS sets `.function`
+        // and `.numericPad` on every arrow key, so that check rejected all of them and the
+        // arrows never reached the list.
+        let chordModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        guard event.modifierFlags.intersection(chordModifiers).isEmpty else { return false }
         guard let window = event.window, window.attachedSheet == nil else { return false }
         // Typing anywhere keeps its own arrow and Escape behaviour. A focused `TextField`
         // reports its field editor, which is an `NSTextView`.
@@ -975,7 +989,7 @@ private struct ItemListKeyboardShortcuts: ViewModifier {
 
 private extension View {
     func itemListKeyboardShortcuts(
-        isEnabled: Bool,
+        isEnabled: @escaping () -> Bool,
         onMove: @escaping (Int) -> Void,
         onEscape: @escaping () -> Bool
     ) -> some View {
