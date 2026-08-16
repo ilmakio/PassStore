@@ -485,7 +485,10 @@ private struct ItemListView: View {
                         && viewModel.activeSheet == nil
                         && !viewModel.isSettingsPresented
                         && !viewModel.isCommandPalettePresented
-                        && focusedArea == .list
+                        // Anywhere but the search field: requiring the list to hold focus
+                        // meant the arrows did nothing until a row had been clicked, which is
+                        // exactly the state you are in right after unlocking.
+                        && focusedArea != .search
                 },
                 onMove: { viewModel.moveSelection(by: $0) },
                 onEscape: {
