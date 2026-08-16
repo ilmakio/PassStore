@@ -15,8 +15,16 @@ final class LaunchReadinessUITests: XCTestCase {
         let workspaceButton = app.buttons.matching(identifier: "sidebar-workspace-pokeos-api").firstMatch
         XCTAssertTrue(workspaceButton.waitForExistence(timeout: 5))
 
-        XCTAssertTrue(app.buttons.matching(identifier: "item-row-primary-postgres").firstMatch.waitForExistence(timeout: 2))
-        XCTAssertFalse(app.buttons.matching(identifier: "item-row-edge-storage").firstMatch.exists)
+        // Rows are `List` cells rather than buttons since 1.2.0 — that is what buys arrow-key
+        // navigation and shift-click ranges — so the query must not assume an element type.
+        XCTAssertTrue(app.descendants(matching: .any)
+            .matching(identifier: "item-row-primary-postgres")
+            .firstMatch
+            .waitForExistence(timeout: 2))
+        XCTAssertFalse(app.descendants(matching: .any)
+            .matching(identifier: "item-row-edge-storage")
+            .firstMatch
+            .exists)
 
         let fileMenu = app.menuBarItems["File"]
         XCTAssertTrue(fileMenu.waitForExistence(timeout: 2))

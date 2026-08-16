@@ -174,6 +174,62 @@ enum BulkEditEnvironmentAction: Hashable {
     case set(EnvironmentValue)
 }
 
+/// How the item list is ordered. Persisted in settings.
+///
+/// Before 1.2.0 the order was hard-coded to title-ascending everywhere except "Recent",
+/// so there was no way to ask "what did I touch last?" from any other destination.
+enum ItemSortOrder: String, CaseIterable, Identifiable {
+    case title
+    case recentlyUsed
+    case recentlyUpdated
+    case newestFirst
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .title: "Name"
+        case .recentlyUsed: "Last used"
+        case .recentlyUpdated: "Last modified"
+        case .newestFirst: "Date created"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .title: "textformat.abc"
+        case .recentlyUsed: "clock.arrow.circlepath"
+        case .recentlyUpdated: "pencil.circle"
+        case .newestFirst: "calendar.badge.plus"
+        }
+    }
+}
+
+/// State of the `.env` file a record was imported from, relative to what is stored.
+enum LinkedFileStatus: Equatable {
+    /// No file is linked to this item.
+    case unlinked
+    /// The file is reachable and matches what the vault holds.
+    case upToDate
+    /// The file and vault differed when the link was created; the owner must pick a side.
+    case needsInitialSync
+    /// The file on disk has changed since the last sync.
+    case fileChanged
+    /// The vault has changed since the last sync, so writing back would push local edits out.
+    case vaultChanged
+    /// Both sides moved since the last sync.
+    case diverged
+    /// The bookmark no longer resolves — file moved, renamed or deleted.
+    case unavailable
+
+    var isActionable: Bool {
+        switch self {
+        case .unlinked, .upToDate, .unavailable: false
+        case .needsInitialSync, .fileChanged, .vaultChanged, .diverged: true
+        }
+    }
+}
+
 enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
     case allItems
     case favorites
@@ -218,6 +274,10 @@ enum VaultSheet: Identifiable {
     case passwordGenerator
     case vaultHealth
     case bulkEdit
+    /// Preview of a backup before it is applied, with the replace / merge choice.
+    case importPreview
+    /// Full audit trail and previous values for one item.
+    case itemHistory(UUID)
 
     var id: String {
         switch self {
@@ -230,6 +290,8 @@ enum VaultSheet: Identifiable {
         case .passwordGenerator: "password-generator"
         case .vaultHealth: "vault-health"
         case .bulkEdit: "bulk-edit"
+        case .importPreview: "import-preview"
+        case let .itemHistory(id): "item-history-\(id.uuidString)"
         }
     }
 }

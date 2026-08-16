@@ -7,13 +7,54 @@ struct CommandPaletteEntry: Identifiable {
     let subtitle: String?
     let keywords: [String]
     let isEnabled: Bool
+    /// Nudges frequently useful rows up when scores tie. Higher sorts first.
+    var priority: Int = 0
     let perform: () -> Void
 
     func matches(query: String) -> Bool {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return true }
-        let bundle = ([title, subtitle].compactMap(\.self) + keywords).joined(separator: " ")
-        return bundle.localizedCaseInsensitiveContains(trimmed)
+        score(for: query) != nil
+    }
+
+    /// Relevance score, or nil when the entry does not match at all.
+    ///
+    /// The palette used to do one flat `contains` over title + subtitle + keywords, which
+    /// meant an item matching on an obscure tag ranked exactly as high as one whose name you
+    /// had just typed in full. Prefix and word-start matches now win.
+    func score(for query: String) -> Int? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return priority }
+
+        let lowerTitle = title.lowercased()
+        var best: Int?
+
+        func consider(_ candidate: Int) {
+            best = max(best ?? Int.min, candidate)
+        }
+
+        if lowerTitle == trimmed { consider(1000) }
+        if lowerTitle.hasPrefix(trimmed) { consider(800) }
+        if lowerTitle.split(separator: " ").contains(where: { $0.hasPrefix(trimmed) }) { consider(600) }
+        if lowerTitle.contains(trimmed) { consider(400) }
+        if let subtitle, subtitle.lowercased().contains(trimmed) { consider(250) }
+        if keywords.contains(where: { $0.lowercased().hasPrefix(trimmed) }) { consider(200) }
+        if keywords.contains(where: { $0.lowercased().contains(trimmed) }) { consider(120) }
+        // Last resort: letters in order, so "pgpr" still finds "Postgres Prod".
+        if Self.matchesSubsequence(trimmed, in: lowerTitle) { consider(60) }
+
+        guard let best else { return nil }
+        return best + priority
+    }
+
+    private static func matchesSubsequence(_ needle: String, in haystack: String) -> Bool {
+        var iterator = haystack.makeIterator()
+        for character in needle {
+            var found = false
+            while let next = iterator.next() {
+                if next == character { found = true; break }
+            }
+            guard found else { return false }
+        }
+        return true
     }
 }
 
@@ -23,13 +64,24 @@ struct CommandPaletteOverlay: View {
     @State private var selectedIndex: Int = 0
     @State private var escapeKeyMonitor: Any?
 
-    private var allEntries: [CommandPaletteEntry] {
-        viewModel.makeCommandPaletteEntries()
-    }
+    /// Built once per presentation rather than on every keystroke.
+    ///
+    /// The entry list contains one row per item plus one per workspace, each with its own
+    /// closure — rebuilding all of that on every character typed was pure waste.
+    @State private var allEntries: [CommandPaletteEntry] = []
 
     private var filteredEntries: [CommandPaletteEntry] {
-        let q = viewModel.commandPaletteQuery
-        return allEntries.filter { $0.matches(query: q) }
+        let query = viewModel.commandPaletteQuery
+        return allEntries
+            .compactMap { entry -> (entry: CommandPaletteEntry, score: Int)? in
+                guard let score = entry.score(for: query) else { return nil }
+                return (entry, score)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.entry.title.localizedCaseInsensitiveCompare(rhs.entry.title) == .orderedAscending
+            }
+            .map(\.entry)
     }
 
     var body: some View {
@@ -109,6 +161,7 @@ struct CommandPaletteOverlay: View {
             .shadow(color: .black.opacity(0.2), radius: 24, y: 12)
         }
         .onAppear {
+            allEntries = viewModel.makeCommandPaletteEntries()
             clampSelection()
             searchFocused = true
             escapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -122,6 +175,9 @@ struct CommandPaletteOverlay: View {
                 NSEvent.removeMonitor(escapeKeyMonitor)
             }
             escapeKeyMonitor = nil
+            // Entry titles/keywords can contain secret item metadata; actions also capture
+            // the view model. Release all of it as soon as the overlay closes.
+            allEntries = []
         }
         .onExitCommand {
             viewModel.dismissCommandPalette()
@@ -213,7 +269,7 @@ extension VaultViewModel {
             .init(
                 id: "cmd.newItem",
                 title: "New Secret Item…",
-                subtitle: "Shortcut: ⌘⇧N",
+                subtitle: "Shortcut: ⌘N",
                 keywords: ["new", "add", "create", "item"],
                 isEnabled: true,
                 perform: wrap { self.activeSheet = .newItemFlow }
@@ -225,6 +281,15 @@ extension VaultViewModel {
                 keywords: ["workspace", "folder"],
                 isEnabled: true,
                 perform: wrap { self.activeSheet = .newWorkspace }
+            ),
+            .init(
+                id: "cmd.importEnvFile",
+                title: "Import .env File…",
+                subtitle: "Creates an item linked to that file",
+                keywords: ["import", "env", "dotenv", "file", "link"],
+                isEnabled: container.sessionManager.lockState == .unlocked,
+                priority: 10,
+                perform: wrap { self.importEnvFileCreatingItem() }
             ),
             .init(
                 id: "cmd.importExport",
@@ -303,7 +368,8 @@ extension VaultViewModel {
         var dynamic: [CommandPaletteEntry] = []
 
         for workspace in workspaces.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
-            let id = workspace.id.uuidString
+            let workspaceID = workspace.id
+            let id = workspaceID.uuidString
             dynamic.append(
                 .init(
                     id: "go.workspace.\(id)",
@@ -312,7 +378,7 @@ extension VaultViewModel {
                     keywords: ["workspace", "folder", workspace.name],
                     isEnabled: true,
                     perform: wrap {
-                        self.selectDestination(.workspace(workspace.id))
+                        self.selectDestination(.workspace(workspaceID))
                         self.setSelectedType(nil)
                     }
                 )
@@ -324,20 +390,38 @@ extension VaultViewModel {
             if t != .orderedSame { return t == .orderedAscending }
             return lhs.id.uuidString < rhs.id.uuidString
         }) {
-            let id = item.id.uuidString
+            let itemID = item.id
+            let id = itemID.uuidString
             let subtitleParts = [item.type.title, item.workspace?.name].compactMap { $0 }
             dynamic.append(
                 .init(
                     id: "open.item.\(id)",
-                    title: "Open \(item.title)",
+                    title: item.title,
                     subtitle: subtitleParts.joined(separator: " · "),
-                    keywords: ["open", "item", item.title, item.type.title] + item.tags + [item.environmentValue.title],
+                    keywords: ["open", "item", item.type.title] + item.tags + [item.environmentValue.title],
                     isEnabled: true,
-                    perform: wrap {
-                        self.revealAndSelectItemFromPalette(item)
-                    }
+                    // Items outrank commands: the palette is mostly used to reach a secret.
+                    priority: 40,
+                    perform: wrap { self.selectItem(id: itemID) }
                 )
             )
+
+            // Copying a single field used to mean: open the palette, open the item, move to
+            // the detail pane, then copy. The palette can just do it.
+            if let primary = primaryCopyField(for: item) {
+                let fieldID = primary.id
+                dynamic.append(
+                    .init(
+                        id: "copy.field.\(id).\(primary.key)",
+                        title: "Copy \(primary.label) — \(item.title)",
+                        subtitle: subtitleParts.joined(separator: " · "),
+                        keywords: ["copy", "clipboard", primary.label, item.title] + item.tags,
+                        isEnabled: true,
+                        priority: 20,
+                        perform: wrap { self.copyField(itemID: itemID, fieldID: fieldID) }
+                    )
+                )
+            }
         }
 
         return staticCommands + dynamic

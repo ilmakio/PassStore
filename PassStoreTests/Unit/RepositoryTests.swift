@@ -13,7 +13,7 @@ struct RepositoryTests {
             keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: true),
             encryptedVaultStore: vaultStore
         )
-        container.sessionManager.createVault(password: "test-secret")
+        container.sessionManager.createVaultSynchronously(password: "test-secret")
 
         let template = try #require(container.templateRepository.fetchAll().first(where: { $0.itemType == SecretItemType.apiCredential }))
         _ = try container.itemRepository.saveItem(SecretItemDraft(

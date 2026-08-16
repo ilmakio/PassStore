@@ -28,11 +28,20 @@ struct OnboardingView: View {
     @State private var isCreating = false
     @State private var errorMessage: String?
     @State private var hasBiometricHardware = false
+    /// Set from the welcome step. A restore still needs a master password and a vault to
+    /// restore into, so the flow is unchanged — it just opens the import sheet at the end
+    /// instead of leaving a new arrival to find it in a menu.
+    @State private var wantsBackupRestore = false
 
     private var steps: [OnboardingStep] {
         var s: [OnboardingStep] = [.welcome, .masterPassword]
         if hasBiometricHardware { s.append(.touchID) }
-        s.append(contentsOf: [.workspace, .ready])
+        // Restoring brings its own workspaces, and "You're all set" is a lie until the backup
+        // has actually been chosen. Both steps are dropped and the picker opens straight away.
+        if !wantsBackupRestore {
+            s.append(.workspace)
+            s.append(.ready)
+        }
         return s
     }
 
@@ -46,8 +55,7 @@ struct OnboardingView: View {
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
+            VaultHeroBackground()
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -63,7 +71,10 @@ struct OnboardingView: View {
                 ZStack {
                     switch currentStep {
                     case .welcome:
-                        WelcomeStepView(onContinue: goNext)
+                        WelcomeStepView(onContinue: goNext, onRestore: {
+                            wantsBackupRestore = true
+                            goNext()
+                        })
                             .transition(stepTransition)
                     case .masterPassword:
                         PasswordStepView(
@@ -71,14 +82,14 @@ struct OnboardingView: View {
                             confirmPassword: $confirmPassword,
                             errorMessage: errorMessage,
                             onBack: goBack,
-                            onContinue: goNext
+                            onContinue: advance
                         )
                         .transition(stepTransition)
                     case .touchID:
                         TouchIDStepView(
                             enableTouchID: $enableTouchID,
                             onBack: goBack,
-                            onContinue: goNext
+                            onContinue: advance
                         )
                         .transition(stepTransition)
                     case .workspace:
@@ -92,8 +103,13 @@ struct OnboardingView: View {
                         )
                         .transition(stepTransition)
                     case .ready:
-                        ReadyStepView(onComplete: onComplete)
-                            .transition(stepTransition)
+                        ReadyStepView(wantsBackupRestore: wantsBackupRestore) {
+                            if wantsBackupRestore {
+                                viewModel.activeSheet = .importEncryptedExport
+                            }
+                            onComplete()
+                        }
+                        .transition(stepTransition)
                     }
                 }
                 .frame(maxWidth: 450)
@@ -102,6 +118,10 @@ struct OnboardingView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(32)
+            // Setup runs on the hero end to end. The backdrop is fixed dark in both
+            // appearances, so its content resolves against a dark scheme and uses opaque
+            // fills rather than inheriting the window's and dissolving into the animation.
+            .vaultHeroContent()
         }
         .onAppear {
             let context = LAContext()
@@ -118,6 +138,20 @@ struct OnboardingView: View {
             insertion: .move(edge: isForward ? .trailing : .leading).combined(with: .opacity),
             removal: .move(edge: isForward ? .leading : .trailing).combined(with: .opacity)
         )
+    }
+
+    /// Moves on, creating the vault when the next stop is the final screen.
+    ///
+    /// Vault creation used to live only in the workspace step's continue action, so skipping
+    /// that step would have walked to "You're all set" without ever making a vault.
+    private func advance() {
+        guard let idx = steps.firstIndex(of: currentStep) else { return }
+        let isFinalStep = idx + 1 >= steps.count
+        if isFinalStep || steps[idx + 1] == .ready {
+            completeOnboarding()
+        } else {
+            goNext()
+        }
     }
 
     private func goNext() {
@@ -141,15 +175,22 @@ struct OnboardingView: View {
     // MARK: - Vault Creation
 
     private func completeOnboarding() {
+        Task { await createVault() }
+    }
+
+    private func createVault() async {
         isCreating = true
         errorMessage = nil
+        defer { isCreating = false }
 
         settings.biometricsEnabled = enableTouchID
-        sessionManager.createVault(password: password)
+        // Key derivation runs off the main actor, so the step stays responsive and the
+        // "Creating your vault…" state is actually visible rather than a frozen window.
+        await sessionManager.createVault(password: password)
 
-        if let error = sessionManager.lastErrorMessage {
-            errorMessage = error
-            isCreating = false
+        guard sessionManager.lockState == .unlocked else {
+            errorMessage = sessionManager.lastErrorMessage
+                ?? "Vault creation was interrupted. Try again."
             return
         }
 
@@ -158,7 +199,13 @@ struct OnboardingView: View {
             viewModel.saveWorkspace(workspaceDraft)
         }
 
-        isCreating = false
+        // Restoring goes straight to the file picker: the vault exists but is empty, and
+        // congratulating somebody before they have chosen their backup is premature.
+        if wantsBackupRestore {
+            viewModel.activeSheet = .importEncryptedExport
+            onComplete()
+            return
+        }
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
             previousStep = currentStep
@@ -176,12 +223,14 @@ private struct OnboardingStepIndicator: View {
     var body: some View {
         HStack(spacing: 6) {
             ForEach(0..<totalSteps, id: \.self) { index in
-                Circle()
-                    .fill(index == currentIndex ? Color.accentColor : Color.primary.opacity(0.2))
-                    .frame(width: index == currentIndex ? 7 : 6, height: index == currentIndex ? 7 : 6)
+                Capsule(style: .continuous)
+                    .fill(index == currentIndex ? Color.vaultAccent : VaultHeroPalette.surfaceActive)
+                    .frame(width: index == currentIndex ? 20 : 6, height: 6)
                     .animation(.spring(response: 0.32, dampingFraction: 0.82), value: currentIndex)
             }
         }
+        .accessibilityElement()
+        .accessibilityLabel("Step \(currentIndex + 1) of \(totalSteps)")
     }
 }
 
@@ -189,48 +238,36 @@ private struct OnboardingStepIndicator: View {
 
 private struct WelcomeStepView: View {
     let onContinue: () -> Void
+    let onRestore: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        // One centred block — logo, wordmark, choice — rather than three groups pushed apart
+        // by spacers, which left a hole in the middle of the screen.
+        VStack(spacing: 0) {
+            Spacer(minLength: VaultSpacing.xl)
 
-            appIcon
-                .frame(width: 80, height: 80)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+            VaultHeroLogo(size: 108)
 
-            VStack(spacing: 8) {
-                Text("PassStore")
-                    .font(.title2.weight(.semibold))
-                Text("Your secrets, locked down.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            VaultHeroWordmark(tagline: "Developer secrets that never leave your Mac.")
+                .padding(.top, VaultSpacing.xxl)
+
+            VStack(spacing: VaultSpacing.m) {
+                Button("Get Started", action: onContinue)
+                    .buttonStyle(VaultButtonStyle(.primary))
+                    .controlSize(.large)
+                    .accessibilityIdentifier("onboarding-get-started")
+
+                // A real button, not a link: restoring a backup is the other half of the
+                // decision on this screen, not a footnote to it.
+                Button("I already have a backup", action: onRestore)
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("onboarding-restore-backup")
             }
+            .padding(.top, 38)
 
-            Spacer()
-
-            Button("Get Started", action: onContinue)
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                .accessibilityIdentifier("onboarding-get-started")
-
-            Spacer()
-                .frame(height: 16)
+            Spacer(minLength: VaultSpacing.xl)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private var appIcon: some View {
-        if let nsImage = NSImage(named: NSImage.applicationIconName) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-        } else {
-            Image("icon")
-                .resizable()
-                .scaledToFit()
-        }
     }
 }
 
@@ -243,6 +280,10 @@ private struct PasswordStepView: View {
     let onBack: () -> Void
     let onContinue: () -> Void
 
+    @FocusState private var isConfirmFocused: Bool
+    @FocusState private var isPasswordFocused: Bool
+    @State private var hasVisitedConfirmField = false
+
     private var passwordsMatch: Bool {
         !confirmPassword.isEmpty && password == confirmPassword
     }
@@ -251,8 +292,13 @@ private struct PasswordStepView: View {
         password.count >= 8 && passwordsMatch
     }
 
+    /// Only once the confirmation field has been left alone.
+    ///
+    /// Judging every keystroke meant "Passwords don't match" appeared on the first character
+    /// and stayed there while you typed the rest, which is scolding somebody for not having
+    /// finished yet.
     private var showMismatch: Bool {
-        !confirmPassword.isEmpty && !passwordsMatch
+        hasVisitedConfirmField && !isConfirmFocused && !confirmPassword.isEmpty && !passwordsMatch
     }
 
     var body: some View {
@@ -260,25 +306,27 @@ private struct PasswordStepView: View {
             Spacer()
 
             VStack(spacing: 20) {
-                VStack(spacing: 8) {
-                    Text("Create your master password")
-                        .font(.title3.weight(.semibold))
-                    Text("This is the only password you need to remember.\nIt protects everything in your vault.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                OnboardingStepHeading(
+                    title: "Create your master password",
+                    subtitle: "This is the only password you need to remember.\nIt protects everything in your vault."
+                )
 
                 VStack(spacing: 10) {
-                    SecureField("Password", text: $password)
-                        .textFieldStyle(.roundedBorder)
+                    SecureField("", text: $password, prompt: Text("Password"))
+                        .vaultHeroField(isFocused: isPasswordFocused)
+                        .focused($isPasswordFocused)
                         .onSubmit(submitIfReady)
+                        .accessibilityLabel("Password")
                         .accessibilityIdentifier("onboarding-password-field")
 
-                    SecureField("Confirm password", text: $confirmPassword)
-                        .textFieldStyle(.roundedBorder)
+                    SecureField("", text: $confirmPassword, prompt: Text("Confirm password"))
+                        .vaultHeroField(isFocused: isConfirmFocused)
+                        .focused($isConfirmFocused)
                         .onSubmit(submitIfReady)
+                        .onChange(of: isConfirmFocused) { _, focused in
+                            if focused { hasVisitedConfirmField = true }
+                        }
+                        .accessibilityLabel("Confirm password")
                         .accessibilityIdentifier("onboarding-confirm-field")
                 }
                 .frame(width: 300)
@@ -336,27 +384,25 @@ private struct TouchIDStepView: View {
                 Image("touch_id")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 48, height: 48)
+                    .frame(width: 52, height: 52)
 
-                VStack(spacing: 8) {
-                    Text("Unlock with Touch ID")
-                        .font(.title3.weight(.semibold))
-                    Text("Use your fingerprint to unlock PassStore\ninstead of typing your master password each time.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                OnboardingStepHeading(
+                    title: "Unlock with Touch ID",
+                    subtitle: "Use your fingerprint to unlock PassStore\ninstead of typing your master password each time."
+                )
 
                 VStack(spacing: 12) {
-                    Toggle("Enable Touch ID", isOn: $enableTouchID)
-                        .toggleStyle(.switch)
-                        .frame(width: 300)
-                        .accessibilityIdentifier("onboarding-touchid-toggle")
+                    VaultHeroCard(padding: VaultSpacing.m) {
+                        Toggle("Enable Touch ID", isOn: $enableTouchID)
+                            .toggleStyle(.switch)
+                            .tint(.vaultAccent)
+                            .accessibilityIdentifier("onboarding-touchid-toggle")
+                    }
+                    .frame(width: 300)
 
                     Text("You can change this later in Settings.")
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.white.opacity(0.4))
                 }
             }
 
@@ -382,6 +428,8 @@ private struct WorkspaceStepView: View {
     let onContinue: () -> Void
     let onSkip: () -> Void
 
+    @FocusState private var isNameFocused: Bool
+
     private var canContinue: Bool {
         !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isCreating
     }
@@ -390,21 +438,16 @@ private struct WorkspaceStepView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 20) {
-                    VStack(spacing: 8) {
-                        Text("Create your first workspace")
-                            .font(.title3.weight(.semibold))
-                        Text("Workspaces help you organize secrets\nby project or team.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    OnboardingStepHeading(
+                        title: "Create your first workspace",
+                        subtitle: "Workspaces help you organize secrets\nby project or team."
+                    )
                     .padding(.top, 8)
 
                     // Preview
                     HStack(spacing: 12) {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(hex: draft.colorHex).opacity(0.15))
+                            .fill(Color(hex: draft.colorHex).opacity(0.18))
                             .frame(width: 40, height: 40)
                             .overlay(
                                 Image(systemName: draft.icon)
@@ -414,26 +457,35 @@ private struct WorkspaceStepView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(draft.name.isEmpty ? "Workspace" : draft.name)
                                 .font(.headline)
-                                .foregroundStyle(draft.name.isEmpty ? .tertiary : .primary)
+                                .foregroundStyle(draft.name.isEmpty ? .white.opacity(0.35) : .white)
                             if let preset = WorkspaceStylePresets.color(for: draft.colorHex) {
                                 Text(preset.name)
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(.white.opacity(0.5))
                             }
                         }
                         Spacer()
                     }
                     .padding(12)
-                    .background { GroupedSheetCardBackground(cornerRadius: 10) }
+                    .background(
+                        RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                            .fill(VaultHeroPalette.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                            .strokeBorder(VaultHeroPalette.stroke, lineWidth: 1)
+                    )
 
                     // Name
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Name")
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.6))
                         TextField("", text: $draft.name, prompt: Text("e.g. Production API"))
-                            .textFieldStyle(.roundedBorder)
+                            .vaultHeroField(isFocused: isNameFocused)
+                            .focused($isNameFocused)
                             .onSubmit { if canContinue { onContinue() } }
+                            .accessibilityLabel("Workspace name")
                             .accessibilityIdentifier("onboarding-workspace-name")
                     }
 
@@ -441,7 +493,7 @@ private struct WorkspaceStepView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Icon")
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.6))
                         LazyVGrid(
                             columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5),
                             spacing: 6
@@ -456,11 +508,18 @@ private struct WorkspaceStepView: View {
                                             .font(.caption2)
                                             .lineLimit(1)
                                     }
-                                    .foregroundStyle(isActive ? Color(hex: draft.colorHex) : .secondary)
+                                    .foregroundStyle(isActive ? Color(hex: draft.colorHex) : .white.opacity(0.55))
                                     .frame(maxWidth: .infinity, minHeight: 44)
                                     .background(
                                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(isActive ? Color(hex: draft.colorHex).opacity(0.12) : .clear)
+                                            .fill(isActive ? Color(hex: draft.colorHex).opacity(0.16) : VaultHeroPalette.surface)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .strokeBorder(
+                                                isActive ? Color(hex: draft.colorHex).opacity(0.55) : VaultHeroPalette.stroke,
+                                                lineWidth: 1
+                                            )
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -472,7 +531,7 @@ private struct WorkspaceStepView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Color")
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.6))
                         HStack(spacing: 8) {
                             ForEach(WorkspaceStylePresets.colors) { preset in
                                 Button { draft.colorHex = preset.hex } label: {
@@ -517,7 +576,7 @@ private struct WorkspaceStepView: View {
                 Button("Skip", action: onSkip)
                     .buttonStyle(.plain)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.45))
                     .accessibilityIdentifier("onboarding-skip-workspace")
             }
         }
@@ -528,37 +587,35 @@ private struct WorkspaceStepView: View {
 // MARK: - Ready Step
 
 private struct ReadyStepView: View {
+    var wantsBackupRestore = false
     let onComplete: () -> Void
     @State private var showCheck = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        VStack(spacing: 0) {
+            Spacer(minLength: VaultSpacing.xl)
 
-            if showCheck {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.green)
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
-            }
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 52))
+                .foregroundStyle(.black, Color.vaultAccent)
+                .scaleEffect(showCheck ? 1 : 0.5)
+                .opacity(showCheck ? 1 : 0)
 
-            VStack(spacing: 8) {
-                Text("You're all set")
-                    .font(.title3.weight(.semibold))
-                Text("Your vault is ready.\nStart adding your secrets.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
+            OnboardingStepHeading(
+                title: "You're all set",
+                subtitle: wantsBackupRestore
+                    ? "Your vault is ready.\nNext, choose the .pstore backup to restore."
+                    : "Your vault is ready.\nStart adding your secrets."
+            )
+            .padding(.top, VaultSpacing.xxl)
 
-            Spacer()
-
-            Button("Open PassStore", action: onComplete)
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+            Button(wantsBackupRestore ? "Choose Backup…" : "Open PassStore", action: onComplete)
+                .buttonStyle(VaultButtonStyle(.primary))
+                .controlSize(.large)
+                .padding(.top, 38)
                 .accessibilityIdentifier("onboarding-open-app")
 
-            Spacer()
-                .frame(height: 16)
+            Spacer(minLength: VaultSpacing.xl)
         }
         .frame(maxWidth: .infinity)
         .onAppear {
@@ -569,7 +626,31 @@ private struct ReadyStepView: View {
     }
 }
 
-// MARK: - Navigation Footer
+// MARK: - Shared pieces
+
+/// Title and supporting copy, identical on every step so the eye stops in the same place.
+private struct OnboardingStepHeading: View {
+    let title: String
+    var subtitle: String?
+
+    var body: some View {
+        VStack(spacing: VaultSpacing.s) {
+            Text(title)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+
+            if let subtitle {
+                Text(subtitle)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
 
 private struct OnboardingNavigationFooter: View {
     let onBack: () -> Void
@@ -579,13 +660,13 @@ private struct OnboardingNavigationFooter: View {
     var body: some View {
         HStack {
             Button("Back", action: onBack)
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: false))
+                .buttonStyle(VaultButtonStyle(.secondary))
                 .accessibilityIdentifier("onboarding-back")
 
             Spacer()
 
             Button("Continue", action: onContinue)
-                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+                .buttonStyle(VaultButtonStyle(.primary))
                 .disabled(continueDisabled)
                 .accessibilityIdentifier("onboarding-continue")
         }

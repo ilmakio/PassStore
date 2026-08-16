@@ -12,20 +12,34 @@ final class WorkspaceRepository: WorkspaceRepositoryProtocol {
     func fetchAll(includeArchived: Bool = false) throws -> [WorkspaceEntity] {
         let all = store.workspaces.sorted {
             if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
-            return $0.updatedAt > $1.updatedAt
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.id.uuidString < $1.id.uuidString
         }
         return includeArchived ? all : all.filter { !$0.isArchived }
     }
 
     @discardableResult
     func saveWorkspace(_ draft: WorkspaceDraft) throws -> WorkspaceEntity {
+        try store.performTransaction {
+            try saveWorkspaceMutation(draft)
+        }
+    }
+
+    private func saveWorkspaceMutation(_ draft: WorkspaceDraft) throws -> WorkspaceEntity {
         try store.requireUnlocked()
         let workspace: WorkspaceEntity
         if let id = draft.id,
            let existing = store.workspaces.first(where: { $0.id == id }) {
             workspace = existing
         } else {
-            workspace = WorkspaceEntity(name: draft.name, icon: draft.icon, colorHex: draft.colorHex, notes: draft.notes, sortOrder: store.workspaces.count)
+            workspace = WorkspaceEntity(
+                id: draft.id ?? UUID(),
+                name: draft.name,
+                icon: draft.icon,
+                colorHex: draft.colorHex,
+                notes: draft.notes,
+                sortOrder: store.workspaces.count
+            )
             store.workspaces.append(workspace)
         }
         workspace.name = draft.name
@@ -38,6 +52,12 @@ final class WorkspaceRepository: WorkspaceRepositoryProtocol {
     }
 
     func reorderWorkspaces(_ ids: [UUID]) throws {
+        try store.performTransaction {
+            try reorderWorkspacesMutation(ids)
+        }
+    }
+
+    private func reorderWorkspacesMutation(_ ids: [UUID]) throws {
         try store.requireUnlocked()
         for (index, id) in ids.enumerated() {
             store.workspaces.first(where: { $0.id == id })?.sortOrder = index
@@ -46,6 +66,12 @@ final class WorkspaceRepository: WorkspaceRepositoryProtocol {
     }
 
     func deleteWorkspace(_ workspace: WorkspaceEntity) throws {
+        try store.performTransaction {
+            try deleteWorkspaceMutation(workspace)
+        }
+    }
+
+    private func deleteWorkspaceMutation(_ workspace: WorkspaceEntity) throws {
         try store.requireUnlocked()
         for item in store.items where item.workspace?.id == workspace.id {
             item.workspace = nil
@@ -71,10 +97,21 @@ final class TemplateRepository: TemplateRepositoryProtocol {
 
     @discardableResult
     func saveTemplate(_ draft: TemplateDraft, isBuiltIn: Bool = false) throws -> SecretFieldTemplateEntity {
+        try store.performTransaction {
+            try saveTemplateMutation(draft, isBuiltIn: isBuiltIn)
+        }
+    }
+
+    private func saveTemplateMutation(_ draft: TemplateDraft, isBuiltIn: Bool) throws -> SecretFieldTemplateEntity {
         try store.requireUnlocked()
         let existingCustom = draft.id.flatMap { id in store.customTemplates.first(where: { $0.id == id }) }
+        let requestedID = draft.id ?? UUID()
+        let templateID = existingCustom == nil
+            && store.allTemplates.contains(where: { $0.id == requestedID })
+            ? UUID()
+            : requestedID
         let template = existingCustom ?? SecretFieldTemplateEntity(
-            id: draft.id ?? UUID(),
+            id: templateID,
             itemType: draft.itemType,
             name: draft.name,
             isBuiltIn: false
@@ -89,10 +126,17 @@ final class TemplateRepository: TemplateRepositoryProtocol {
         template.updatedAt = .now
         template.isBuiltIn = false
 
-        let existingDefinitions = Dictionary(uniqueKeysWithValues: template.fieldDefinitions.map { ($0.id, $0) })
+        let existingDefinitions = Dictionary(
+            template.fieldDefinitions.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var seenDefinitionIDs: Set<UUID> = []
         template.fieldDefinitions = draft.fieldDefinitions.map { fieldDraft in
-            let definition = existingDefinitions[fieldDraft.id] ?? SecretFieldDefinitionEntity(
-                id: fieldDraft.id,
+            let definitionID = seenDefinitionIDs.insert(fieldDraft.id).inserted
+                ? fieldDraft.id
+                : UUID()
+            let definition = existingDefinitions[definitionID] ?? SecretFieldDefinitionEntity(
+                id: definitionID,
                 key: fieldDraft.key,
                 label: fieldDraft.label,
                 kind: fieldDraft.kind,
@@ -111,14 +155,25 @@ final class TemplateRepository: TemplateRepositoryProtocol {
             definition.sortOrder = fieldDraft.sortOrder
             definition.template = template
             return definition
-        }.sorted { $0.sortOrder < $1.sortOrder }
+        }.sorted {
+            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+            return $0.id.uuidString < $1.id.uuidString
+        }
 
         try store.persist()
         return template
     }
 
     func deleteTemplate(_ template: SecretFieldTemplateEntity) throws {
-        guard !template.isBuiltIn else { return }
+        // Resolve against the live custom collection. A stale/fabricated object carrying a
+        // built-in id must not detach items from that built-in template.
+        guard let storedTemplate = store.customTemplates.first(where: { $0.id == template.id }) else { return }
+        try store.performTransaction {
+            try deleteTemplateMutation(storedTemplate)
+        }
+    }
+
+    private func deleteTemplateMutation(_ template: SecretFieldTemplateEntity) throws {
         try store.requireUnlocked()
         for item in store.items where item.template?.id == template.id {
             item.template = nil
@@ -131,20 +186,27 @@ final class TemplateRepository: TemplateRepositoryProtocol {
         if lhs.isBuiltIn != rhs.isBuiltIn {
             return lhs.isBuiltIn && !rhs.isBuiltIn
         }
-        return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        let comparison = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+        if comparison != .orderedSame { return comparison == .orderedAscending }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 }
 
 @MainActor
 final class SecretItemRepository: SecretItemRepositoryProtocol {
     private let store: VaultMemoryStore
+    private let settings: AppSettingsStore?
 
-    init(store: VaultMemoryStore) {
+    init(store: VaultMemoryStore, settings: AppSettingsStore? = nil) {
         self.store = store
+        self.settings = settings
     }
 
     func fetchAll(includeArchived: Bool = false) throws -> [SecretItemEntity] {
-        let items = store.items.sorted { $0.updatedAt > $1.updatedAt }
+        let items = store.items.sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
         return includeArchived ? items : items.filter { !$0.isArchived }
     }
 
@@ -159,13 +221,71 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                 isSensitive: $0.isSensitive,
                 isCopyable: $0.isCopyable,
                 isMasked: $0.isMasked,
-                sortOrder: $0.sortOrder
+                sortOrder: $0.sortOrder,
+                previousValues: $0.previousValues.sorted { $0.replacedAt > $1.replacedAt }
             )
-        }.sorted { $0.sortOrder < $1.sortOrder }
+        }.sorted {
+            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    // MARK: - Value history
+
+    /// Whether previous values are kept when a field changes. Off means no new versions are
+    /// written; it does not retroactively purge what is already stored (`purgeValueHistory`
+    /// does that).
+    ///
+    /// Read straight from settings so the switch takes effect on the next save with no
+    /// separate copy of the flag to keep in sync.
+    var keepsValueHistory: Bool {
+        settings?.keepsSecretValueHistory ?? true
+    }
+
+    /// Bounded per field: an actively rotated credential should not grow the vault forever.
+    static let valueHistoryLimit = 10
+
+    /// Drops every stored previous value in the vault.
+    func purgeAllValueHistory() throws {
+        try store.performTransaction {
+            try purgeAllValueHistoryMutation()
+        }
+    }
+
+    private func purgeAllValueHistoryMutation() throws {
+        try store.requireUnlocked()
+        for item in store.items {
+            for field in item.fields where !field.previousValues.isEmpty {
+                Self.securelyClearValueHistory(on: field)
+            }
+        }
+        try store.persist()
+    }
+
+    /// Drops stored previous values for one item.
+    func purgeValueHistory(for item: SecretItemEntity) throws {
+        try store.performTransaction {
+            try purgeValueHistoryMutation(for: item)
+        }
+    }
+
+    private func purgeValueHistoryMutation(for item: SecretItemEntity) throws {
+        try store.requireUnlocked()
+        guard let storedItem = store.items.first(where: { $0.id == item.id }) else { return }
+        for field in storedItem.fields where !field.previousValues.isEmpty {
+            Self.securelyClearValueHistory(on: field)
+        }
+        try store.persist()
     }
 
     @discardableResult
     func saveItem(_ draft: SecretItemDraft) throws -> SecretItemEntity {
+        try store.performTransaction {
+            try saveItemMutation(draft)
+        }
+    }
+
+    private func saveItemMutation(_ draft: SecretItemDraft) throws -> SecretItemEntity {
         try store.requireUnlocked()
         let draft = Self.normalized(draft)
         let item: SecretItemEntity
@@ -175,7 +295,20 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             item = existing
             isNewItem = false
         } else {
-            item = SecretItemEntity(title: draft.title, type: draft.type, environment: draft.environment)
+            // Honour an explicit id when creating. It used to be discarded, so restoring an
+            // item from a backup produced a brand-new id — which meant importing the same
+            // backup twice duplicated everything, and nothing could be matched against what
+            // the vault already held.
+            item = SecretItemEntity(
+                id: draft.id ?? UUID(),
+                title: draft.title,
+                type: draft.type,
+                environment: draft.environment
+            )
+            // Creating something counts as using it. Without this a brand-new item — the
+            // `.env` you just imported, say — had no "last used" date at all and so did not
+            // appear in Recent, which is exactly where you would go looking for it.
+            item.lastAccessedAt = .now
             store.items.append(item)
             isNewItem = true
         }
@@ -190,15 +323,23 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         item.tags = draft.tags
         item.isFavorite = draft.isFavorite
         item.isArchived = draft.isArchived
-        item.updatedAt = .now
+        // Bumped only for changes the owner would call an edit. Starring an item or archiving
+        // it used to move `updatedAt`, which pushed it to the top of "Recent" and reset the
+        // staleness clock the health audit reads.
+        if Self.isContentChange(draft: draft, previous: previous) {
+            item.updatedAt = .now
+        }
         item.workspace = workspace(for: draft.workspaceID)
         item.template = template(for: draft.templateID)
+        item.linkedFile = draft.linkedFile
 
         // Field keys are the merge identity, so collisions must be resolved before mapping:
         // `Dictionary(uniqueKeysWithValues:)` traps on duplicates, and the editor lets two
         // fields end up with the same slug (e.g. renaming a field to match an existing one).
-        let existingFields = Dictionary(item.fields.map { ($0.fieldKey, $0) }, uniquingKeysWith: { first, _ in first })
-        item.fields = Self.withUniqueKeys(draft.fieldDrafts).map { fieldDraft in
+        let oldFields = item.fields
+        let existingFields = Dictionary(oldFields.map { ($0.fieldKey, $0) }, uniquingKeysWith: { first, _ in first })
+        let uniqueDrafts = Self.withUniqueKeys(draft.fieldDrafts)
+        let replacementFields = uniqueDrafts.map { fieldDraft in
             let field = existingFields[fieldDraft.key] ?? SecretFieldValueEntity(
                 id: fieldDraft.id,
                 fieldKey: fieldDraft.key,
@@ -211,6 +352,8 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                 plainValue: fieldDraft.value,
                 item: item
             )
+            let oldValue = field.plainValue
+            let oldWasSensitive = field.isSensitive
             field.fieldKey = fieldDraft.key
             field.labelSnapshot = fieldDraft.label
             field.kind = fieldDraft.kind
@@ -218,16 +361,112 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             field.isCopyable = fieldDraft.isCopyable
             field.isMasked = fieldDraft.isMasked
             field.sortOrder = fieldDraft.sortOrder
+            // Keep the outgoing value before overwriting it, so a rotated secret can be read
+            // back or restored later.
+            recordValueVersion(
+                on: field,
+                replacing: oldValue,
+                oldWasSensitive: oldWasSensitive,
+                with: fieldDraft.value,
+                newIsSensitive: fieldDraft.isSensitive
+            )
             field.plainValue = fieldDraft.value
             field.item = item
             return field
-        }.sorted { $0.sortOrder < $1.sortOrder }
+        }.sorted {
+            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        let retainedObjects = Set(replacementFields.map(ObjectIdentifier.init))
+        for removed in oldFields where !retainedObjects.contains(ObjectIdentifier(removed)) {
+            Self.securelyClear(field: removed)
+            removed.item = nil
+        }
+        item.fields = replacementFields
 
         recordHistory(for: item, previous: previous)
         pruneStaleIgnores(on: item)
         rebuildWorkspaceItems()
         try store.persist()
         return item
+    }
+
+    /// Pushes the outgoing value onto the field's history.
+    ///
+    /// Only real replacements are recorded: filling a blank field for the first time, or
+    /// saving without touching the value, adds nothing.
+    private func recordValueVersion(
+        on field: SecretFieldValueEntity,
+        replacing oldValue: String,
+        oldWasSensitive: Bool,
+        with newValue: String,
+        newIsSensitive: Bool
+    ) {
+        // History is exclusively for secrets. Turning sensitivity off must remove any old
+        // secret versions immediately; otherwise they remain recoverable through a field the
+        // UI now treats as ordinary text.
+        guard newIsSensitive else {
+            Self.securelyClearValueHistory(on: field)
+            return
+        }
+        guard keepsValueHistory else { return }
+        guard oldWasSensitive, oldValue != newValue, !oldValue.isEmpty else { return }
+        let version = SecretValueVersion(value: oldValue)
+        var versions = [version] + field.previousValues
+        if versions.count > Self.valueHistoryLimit {
+            for index in Self.valueHistoryLimit..<versions.count {
+                versions[index].securelyClear()
+            }
+            versions.removeSubrange(Self.valueHistoryLimit...)
+        }
+        field.previousValues = versions
+    }
+
+    private static func securelyClearValueHistory(on field: SecretFieldValueEntity) {
+        for index in field.previousValues.indices {
+            field.previousValues[index].securelyClear()
+        }
+        field.previousValues.removeAll(keepingCapacity: false)
+    }
+
+    private static func securelyClear(field: SecretFieldValueEntity) {
+        if !field.plainValue.isEmpty {
+            field.plainValue = String(repeating: "\0", count: field.plainValue.utf8.count)
+            field.plainValue.removeAll(keepingCapacity: false)
+        }
+        securelyClearValueHistory(on: field)
+    }
+
+    /// True when the draft changes something the owner would describe as editing the item.
+    ///
+    /// Favourite and archive flags are state, not content: they get their own audit entries
+    /// but must not touch `updatedAt`.
+    private static func isContentChange(draft: SecretItemDraft, previous: ItemStateSnapshot?) -> Bool {
+        guard let previous else { return true }
+        if previous.title != draft.title { return true }
+        if previous.notes != draft.notes { return true }
+        if previous.type != draft.type { return true }
+        if previous.environment != draft.environment { return true }
+        if previous.workspaceID != draft.workspaceID { return true }
+        if previous.templateID != draft.templateID { return true }
+        if previous.tags != draft.tags { return true }
+        if previous.linkedFile != draft.linkedFile { return true }
+
+        let incoming = Dictionary(
+            withUniqueKeys(draft.fieldDrafts).map { ($0.key, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        if Set(incoming.keys) != Set(previous.fields.keys) { return true }
+        return incoming.contains { key, fieldDraft in
+            guard let old = previous.fields[key] else { return true }
+            return old.value != fieldDraft.value
+                || old.label != fieldDraft.label
+                || old.kind != fieldDraft.kind
+                || old.isSensitive != fieldDraft.isSensitive
+                || old.isCopyable != fieldDraft.isCopyable
+                || old.isMasked != fieldDraft.isMasked
+                || old.sortOrder != fieldDraft.sortOrder
+        }
     }
 
     /// Drops dismissals that can no longer match anything.
@@ -262,8 +501,11 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         let title: String
         let notes: String
         let type: SecretItemType
-        let environmentTitle: String
+        let environment: EnvironmentValue
         let workspaceID: UUID?
+        let templateID: UUID?
+        let tags: [String]
+        let linkedFile: LinkedFileReference?
         let isFavorite: Bool
         let isArchived: Bool
         let fields: [String: FieldState]
@@ -271,19 +513,36 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         struct FieldState {
             let label: String
             let value: String
+            let kind: FieldKind
             let isSensitive: Bool
+            let isCopyable: Bool
+            let isMasked: Bool
+            let sortOrder: Int
         }
 
         init(item: SecretItemEntity) {
             title = item.title
             notes = item.notes
             type = item.type
-            environmentTitle = item.environmentValue.title
+            environment = item.environmentValue
             workspaceID = item.workspace?.id
+            templateID = item.template?.id
+            tags = item.tags
+            linkedFile = item.linkedFile
             isFavorite = item.isFavorite
             isArchived = item.isArchived
             fields = Dictionary(
-                item.fields.map { ($0.fieldKey, FieldState(label: $0.labelSnapshot, value: $0.plainValue, isSensitive: $0.isSensitive)) },
+                item.fields.map {
+                    ($0.fieldKey, FieldState(
+                        label: $0.labelSnapshot,
+                        value: $0.plainValue,
+                        kind: $0.kind,
+                        isSensitive: $0.isSensitive,
+                        isCopyable: $0.isCopyable,
+                        isMasked: $0.isMasked,
+                        sortOrder: $0.sortOrder
+                    ))
+                },
                 uniquingKeysWith: { first, _ in first }
             )
         }
@@ -306,13 +565,30 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         guard let previous else { return [SecretItemChangeEntry(kind: .created)] }
         var entries: [SecretItemChangeEntry] = []
 
-        if previous.title != item.title || previous.notes != item.notes {
+        // Keep the audit trail aligned with every item detail that can bump `updatedAt`.
+        // Values have their own redacted entries below; labels and behavioural field flags do
+        // not, so represent those as a generic details update without recording secret data.
+        let fieldMetadataChanged = item.fields.contains { field in
+            guard let old = previous.fields[field.fieldKey] else { return false }
+            return old.label != field.labelSnapshot
+                || old.kind != field.kind
+                || old.isSensitive != field.isSensitive
+                || old.isCopyable != field.isCopyable
+                || old.isMasked != field.isMasked
+                || old.sortOrder != field.sortOrder
+        }
+        if previous.title != item.title
+            || previous.notes != item.notes
+            || previous.templateID != item.template?.id
+            || previous.tags != item.tags
+            || previous.linkedFile != item.linkedFile
+            || fieldMetadataChanged {
             entries.append(SecretItemChangeEntry(kind: .detailsUpdated))
         }
         if previous.type != item.type {
             entries.append(SecretItemChangeEntry(kind: .typeChanged, detail: item.type.title))
         }
-        if previous.environmentTitle != item.environmentValue.title {
+        if previous.environment != item.environmentValue {
             entries.append(SecretItemChangeEntry(kind: .environmentChanged, detail: item.environmentValue.title))
         }
         if previous.workspaceID != item.workspace?.id {
@@ -397,11 +673,27 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         return trimmed.isEmpty ? .preset(.dev) : .custom(trimmed)
     }
 
+    /// Stamps "last used" and schedules a coalesced write.
+    ///
+    /// This runs on every row selection. Writing synchronously meant re-encrypting and
+    /// rewriting the entire vault once per click — and once per keypress when walking the
+    /// list with ⌥↓. The timestamp is worth keeping, but not at that price.
     func recordItemAccess(_ item: SecretItemEntity) throws {
         try store.requireUnlocked()
-        guard store.items.contains(where: { $0.id == item.id }) else { return }
-        item.lastAccessedAt = .now
-        try store.persist()
+        guard let storedItem = store.items.first(where: { $0.id == item.id }) else { return }
+        storedItem.lastAccessedAt = .now
+        store.persistSoon()
+    }
+
+    /// "X Copy", then "X Copy 2", "X Copy 3"… Duplicating twice used to produce two items
+    /// with byte-identical titles.
+    func uniqueDuplicateTitle(basedOn title: String) -> String {
+        let existing = Set(store.items.map(\.title))
+        let base = "\(title) Copy"
+        guard existing.contains(base) else { return base }
+        var suffix = 2
+        while existing.contains("\(base) \(suffix)") { suffix += 1 }
+        return "\(base) \(suffix)"
     }
 
     @discardableResult
@@ -409,7 +701,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         let resolved = try resolveFields(for: item)
         let duplicateDraft = SecretItemDraft(
             id: nil,
-            title: "\(item.title) Copy",
+            title: uniqueDuplicateTitle(basedOn: item.title),
             type: item.type,
             workspaceID: item.workspace?.id,
             environment: item.environmentValue,
@@ -434,8 +726,22 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
     }
 
     func deleteItem(_ item: SecretItemEntity) throws {
+        try store.performTransaction {
+            try deleteItemMutation(item)
+        }
+    }
+
+    private func deleteItemMutation(_ item: SecretItemEntity) throws {
         try store.requireUnlocked()
-        store.items.removeAll { $0.id == item.id }
+        guard let storedItem = store.items.first(where: { $0.id == item.id }) else { return }
+        for field in storedItem.fields {
+            Self.securelyClear(field: field)
+            field.item = nil
+        }
+        storedItem.fields = []
+        storedItem.workspace = nil
+        storedItem.template = nil
+        store.items.removeAll { $0 === storedItem }
         rebuildWorkspaceItems()
         try store.persist()
     }
@@ -444,7 +750,13 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
     /// instead of one silently overwriting the other.
     static func withUniqueKeys(_ drafts: [FieldDraft]) -> [FieldDraft] {
         var seen: Set<String> = []
+        var seenIDs: Set<UUID> = []
         return drafts.map { draft in
+            var normalized = draft
+            if !seenIDs.insert(normalized.id).inserted {
+                normalized.id = UUID()
+                seenIDs.insert(normalized.id)
+            }
             let base = draft.key.trimmingCharacters(in: .whitespacesAndNewlines)
             var candidate = base.isEmpty ? "field" : base
             if seen.contains(candidate) {
@@ -453,10 +765,8 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                 candidate = "\(candidate)_\(suffix)"
             }
             seen.insert(candidate)
-            guard candidate != draft.key else { return draft }
-            var renamed = draft
-            renamed.key = candidate
-            return renamed
+            normalized.key = candidate
+            return normalized
         }
     }
 
@@ -594,7 +904,10 @@ enum BuiltInTemplates {
                 sortOrder: $0.sortOrder,
                 template: template
             )
-        }.sorted { $0.sortOrder < $1.sortOrder }
+        }.sorted {
+            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+            return $0.id.uuidString < $1.id.uuidString
+        }
         return template
     }
 }

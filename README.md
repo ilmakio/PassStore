@@ -13,21 +13,25 @@ PassStore keeps your API keys, database credentials, S3 configs, SSH logins, .en
 ## Features
 
 - **Workspaces** to organize secrets by project
-- **Multiple secret types:** Generic, .env Group, Database, API Credential, MinIO/S3, Server/SSH, Website/Service, Custom Templates
+- **Multiple secret types:** Generic, .env Group, Database, API Credential, MinIO/S3, Server/SSH, Website/Service, Saved Command, Custom Templates
 - **Dynamic fields** with configurable types (text, secret, URL, number, multiline, JSON)
 - **Encrypted vault** with AES-256-GCM and Argon2id key derivation
 - **macOS Keychain** integration for secure key storage
-- **Touch ID** biometric unlock
-- **Command palette** with global keyboard shortcut (Cmd+Opt+P)
+- **Touch ID** biometric unlock, offered automatically on launch and on focus
+- **Linked `.env` files:** keep a reference to the file an item came from and update it in one click, in either direction
+- **Item history** with previous values, so a rotated secret can be looked up or restored
+- **Command palette** with global keyboard shortcut (Cmd+Opt+P) — no Accessibility permission required
 - **Menu bar** quick access panel
 - **Clipboard auto-clear** after copying secrets
-- **Auto-lock** with configurable inactivity timeout
-- **Encrypted backup** export/import (.pstore format)
+- **Auto-lock** on inactivity, and on sleep / screen lock
+- **Encrypted backup** export/import (.pstore format) with a merge-or-replace preview
 - **.env file import**
 - **Copy as** .env, JSON, or database connection string
 - **Search and filter** by title, tags, fields, environment
+- **Vault health** report for reused, weak and stale secrets
 - **Password generator**
 - **Custom templates** for reusable secret types
+- **Bulk edit** across a multi-selection
 
 ## Security
 

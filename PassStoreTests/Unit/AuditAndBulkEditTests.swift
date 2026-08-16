@@ -451,7 +451,7 @@ struct AuditAndBulkEditTests {
         #expect(container.sessionManager.masterPasswordLastChangedAt == nil)
     }
 
-    @Test func changingTheMasterPasswordIsRecordedAndSurvivesALockUnlockCycle() throws {
+    @Test func changingTheMasterPasswordIsRecordedAndSurvivesALockUnlockCycle() async throws {
         let defaults = UserDefaults(suiteName: "MasterPasswordHistory-\(UUID().uuidString)")!
         let container = AppContainer(
             inMemory: true,
@@ -459,9 +459,9 @@ struct AuditAndBulkEditTests {
             keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: false),
             encryptedVaultStore: InMemoryEncryptedVaultStore()
         )
-        container.sessionManager.createVault(password: "original-password")
+        container.sessionManager.createVaultSynchronously(password: "original-password")
 
-        try container.sessionManager.changeMasterPassword(current: "original-password", to: "replacement-password")
+        try await container.sessionManager.changeMasterPassword(current: "original-password", to: "replacement-password")
 
         #expect(container.sessionManager.masterPasswordLastChangedAt != nil)
         #expect(container.sessionManager.masterPasswordHistory.contains { $0.kind == .changed })
@@ -469,7 +469,7 @@ struct AuditAndBulkEditTests {
         // The trail lives in the encrypted payload, so it has to come back after a reload.
         container.sessionManager.lock()
         #expect(container.sessionManager.masterPasswordHistory.isEmpty)
-        #expect(container.sessionManager.unlockWithPassword("replacement-password"))
+        #expect(container.sessionManager.unlockWithPasswordSynchronously("replacement-password"))
         #expect(container.sessionManager.masterPasswordHistory.contains { $0.kind == .changed })
         #expect(container.sessionManager.masterPasswordHistory.contains { $0.kind == .vaultCreated })
     }

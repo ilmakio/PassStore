@@ -1,14 +1,19 @@
 import CryptoKit
+import Darwin
 import Foundation
 
-enum TransferError: LocalizedError {
+enum TransferError: LocalizedError, Equatable {
     case invalidDatabaseItem
     case missingPassword
+    case exportPasswordTooShort(Int)
     case exportPasswordMismatch
     case importFileMissing
     case invalidExportFile
     case wrongExportPassword
     case unsupportedExportVersion
+    case exportFileTooLarge
+    case importFileTooLarge
+    case importFileUnreadable
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +21,8 @@ enum TransferError: LocalizedError {
             "The selected item does not contain enough fields to build a connection string."
         case .missingPassword:
             "Provide an export password."
+        case let .exportPasswordTooShort(minimum):
+            "Backup password must be at least \(minimum) characters."
         case .exportPasswordMismatch:
             "The export passwords do not match."
         case .importFileMissing:
@@ -26,15 +33,113 @@ enum TransferError: LocalizedError {
             "The export password is incorrect or the file is corrupted."
         case .unsupportedExportVersion:
             "This export was created with a newer PassStore version."
+        case .exportFileTooLarge:
+            "This vault is too large to export as a backup that PassStore can safely import."
+        case .importFileTooLarge:
+            "This backup is too large to import safely."
+        case .importFileUnreadable:
+            "The selected backup could not be read."
         }
     }
 }
 
 struct CopyFormatter {
     static func envString(for item: SecretItemEntity, fields: [FieldResolvedValue]) -> String {
-        let header = "# \(item.title)"
-        let pairs = fields.sorted { $0.sortOrder < $1.sortOrder }.map { "\($0.key.uppercased())=\($0.value)" }
-        return ([header] + pairs).joined(separator: "\n")
+        // Titles are encrypted user/imported data too. Prefix every physical line so a title
+        // containing a newline cannot escape the comment and inject a sourced assignment.
+        let titleComment = item.title
+            .components(separatedBy: .newlines)
+            .map { "# \($0)" }
+            .joined(separator: "\n")
+        return titleComment + "\n" + envFileContents(fields: fields)
+    }
+
+    /// Serialises fields as `.env` text.
+    ///
+    /// Two long-standing round-trip bugs are fixed here. Keys were upper-cased, so importing
+    /// `Api_Key=…` and copying it back produced `API_KEY=…` — a different variable. And values
+    /// were never quoted, so anything containing a space, a newline, a quote or a `#` came
+    /// back out as an invalid or truncated line.
+    static func envFileContents(fields: [FieldResolvedValue]) -> String {
+        let ordered = fields.sorted {
+                if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+        var usedKeys: Set<String> = []
+        return ordered.map { field in
+            let base = safeEnvKey(field.key)
+            var key = base
+            var suffix = 2
+            while !usedKeys.insert(key).inserted {
+                key = "\(base)_\(suffix)"
+                suffix += 1
+            }
+            return "\(key)=\(envQuoted(field.value))"
+        }.joined(separator: "\n")
+    }
+
+    /// Rewrites `original` so every known key carries its stored value, leaving everything
+    /// else exactly as it was.
+    ///
+    /// Regenerating the file from the stored fields — which is what writing used to do —
+    /// silently destroyed comments, blank lines, key order and any variable the item does not
+    /// track. A `.env` is a file its owner maintains, not something PassStore owns, so an
+    /// update only ever replaces the value on an assignment it recognises.
+    ///
+    /// Keys the item has and the file lacks are appended. Keys the file has and the item lacks
+    /// are left alone: deleting somebody's line because a field was removed here would be the
+    /// same mistake in a smaller form.
+    static func envFileByUpdating(_ original: String, with fields: [FieldResolvedValue]) -> String {
+        let assignments = EnvImportService.assignments(in: original)
+        var pending = Dictionary(fields.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var lines = original.components(separatedBy: "\n")
+        // Rewrite back-to-front so earlier line indices stay valid as multi-line spans shrink.
+        for assignment in assignments.reversed() {
+            guard let field = pending.removeValue(forKey: assignment.key) else { continue }
+            let rebuilt = "\(assignment.prefix)\(assignment.key)=\(envQuoted(field.value))\(assignment.trailingComment)"
+            lines.replaceSubrange(assignment.lineRange, with: [rebuilt])
+        }
+
+        let additions = fields
+            .filter { pending[$0.key] != nil }
+            .map { "\(safeEnvKey($0.key))=\(envQuoted($0.value))" }
+        guard !additions.isEmpty else { return lines.joined(separator: "\n") }
+
+        if lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            lines.removeLast()
+        }
+        return (lines + additions).joined(separator: "\n") + "\n"
+    }
+
+    /// Always quoting makes the output safe both for dotenv readers and for developers who
+    /// load the file with `source`. Dollar signs and backticks must be escaped as well as
+    /// ordinary string escapes; otherwise a value restored from a backup could trigger shell
+    /// expansion or command substitution when the linked file is sourced.
+    static func envQuoted(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        return "\"\(escaped)\""
+    }
+
+    /// Field keys are user-editable and can arrive from an imported backup. Keep normal
+    /// dotenv identifiers unchanged, but replace line breaks, `=` and other syntax so a field
+    /// key can never inject an additional assignment or shell statement into a linked file.
+    private static func safeEnvKey(_ raw: String) -> String {
+        let scalars = raw.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "." {
+                return Character(String(scalar))
+            }
+            return "_"
+        }
+        let key = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return key.isEmpty ? "FIELD" : key
     }
 
     static func jsonString(for item: SecretItemEntity, fields: [FieldResolvedValue]) throws -> String {
@@ -173,62 +278,320 @@ struct CopyFormatter {
     }
 }
 
-struct EnvImportService {
+nonisolated struct EnvImportService: Sendable {
+    /// Parses `.env` text.
+    ///
+    /// The original parser split on `=` and trimmed, which meant `KEY="hello world"` was
+    /// stored *with* its quote characters, `export KEY=v` produced a key literally called
+    /// `export KEY`, and a value spanning several quoted lines was truncated at the first
+    /// newline. All three are common in real `.env` files.
     func parse(_ text: String) -> ParsedEnvDocument {
         var notes: [String] = []
         var entries: [ParsedEnvEntry] = []
-        for rawLine in text.split(whereSeparator: \.isNewline) {
+
+        var lines = text.components(separatedBy: .newlines)[...]
+        while let rawLine = lines.first {
+            lines = lines.dropFirst()
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
+
             if line.hasPrefix("#") {
                 notes.append(String(line.dropFirst()).trimmingCharacters(in: .whitespaces))
                 continue
             }
-            let pieces = line.split(separator: "=", maxSplits: 1).map(String.init)
-            guard pieces.count == 2 else { continue }
-            let key = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            let sensitive = key.lowercased().contains("secret")
-                || key.lowercased().contains("token")
-                || key.lowercased().contains("password")
-                || key.lowercased().contains("key")
-            entries.append(ParsedEnvEntry(key: key, value: value, isSensitive: sensitive))
+
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            var key = String(line[line.startIndex..<separator]).trimmingCharacters(in: .whitespaces)
+            // `export FOO=bar` is valid in a sourced .env and must not become a key called
+            // "export FOO".
+            if key.hasPrefix("export "), key.count > "export ".count {
+                key = String(key.dropFirst("export ".count)).trimmingCharacters(in: .whitespaces)
+            }
+            guard !key.isEmpty, key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "." }) else { continue }
+
+            var remainder = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+
+            // A quoted value may continue on following lines until the quote closes.
+            if let quote = remainder.first, quote == "\"" || quote == "'", !Self.isClosed(remainder, quote: quote) {
+                while let next = lines.first {
+                    lines = lines.dropFirst()
+                    remainder += "\n" + next
+                    if Self.isClosed(remainder, quote: quote) { break }
+                }
+            }
+
+            let value = Self.unquote(remainder)
+            entries.append(ParsedEnvEntry(key: key, value: value, isSensitive: Self.looksSensitive(key: key)))
         }
+
         return ParsedEnvDocument(notes: notes.joined(separator: "\n"), entries: entries)
+    }
+
+    /// Where each assignment lives in the original text, so a value can be replaced without
+    /// disturbing the lines around it.
+    struct Assignment {
+        /// Whitespace and any `export ` that preceded the key, reproduced verbatim.
+        let prefix: String
+        let key: String
+        /// A trailing `# comment` on a single-line unquoted value, kept so updating a value
+        /// does not throw away the note explaining it.
+        let trailingComment: String
+        /// The physical lines this assignment occupies — more than one for a quoted value
+        /// that wraps.
+        let lineRange: Range<Int>
+    }
+
+    /// Locates every assignment, using the same rules as `parse`.
+    static func assignments(in text: String) -> [Assignment] {
+        let lines = text.components(separatedBy: "\n")
+        var result: [Assignment] = []
+        var index = 0
+
+        while index < lines.count {
+            let start = index
+            let rawLine = lines[index]
+            index += 1
+
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#"), let separator = line.firstIndex(of: "=") else { continue }
+
+            let head = String(line[line.startIndex..<separator])
+            var key = head.trimmingCharacters(in: .whitespaces)
+            var prefix = String(rawLine.prefix(while: { $0 == " " || $0 == "\t" }))
+            if key.hasPrefix("export "), key.count > "export ".count {
+                key = String(key.dropFirst("export ".count)).trimmingCharacters(in: .whitespaces)
+                prefix += "export "
+            }
+            guard !key.isEmpty, key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "." }) else { continue }
+
+            var remainder = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+            var trailingComment = ""
+
+            if let quote = remainder.first, quote == "\"" || quote == "'" {
+                while !isClosed(remainder, quote: quote), index < lines.count {
+                    remainder += "\n" + lines[index]
+                    index += 1
+                }
+            } else if let hash = remainder.range(of: " #") {
+                trailingComment = String(remainder[hash.lowerBound...])
+            }
+
+            result.append(
+                Assignment(prefix: prefix, key: key, trailingComment: trailingComment, lineRange: start..<index)
+            )
+        }
+        return result
+    }
+
+    /// True once the opening quote has a matching unescaped closing quote.
+    private static func isClosed(_ text: String, quote: Character) -> Bool {
+        var isEscaped = false
+        for (index, character) in text.enumerated() {
+            if index == 0 { continue }
+            if isEscaped { isEscaped = false; continue }
+            if character == "\\", quote == "\"" { isEscaped = true; continue }
+            if character == quote { return true }
+        }
+        return false
+    }
+
+    /// Strips surrounding quotes, expands escapes inside double quotes, and drops a trailing
+    /// comment from an unquoted value.
+    static func unquote(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard let quote = trimmed.first, quote == "\"" || quote == "'" else {
+            // `FOO=bar # note` has a comment, while `COLOR=#fff` and URL fragments do not.
+            var previousWasWhitespace = false
+            for index in trimmed.indices {
+                let character = trimmed[index]
+                if character == "#", previousWasWhitespace {
+                    return String(trimmed[..<index]).trimmingCharacters(in: .whitespaces)
+                }
+                previousWasWhitespace = character.isWhitespace
+            }
+            return trimmed
+        }
+
+        var body = String(trimmed.dropFirst())
+        var isEscaped = false
+        var closing: String.Index?
+        for index in body.indices {
+            let character = body[index]
+            if isEscaped {
+                isEscaped = false
+                continue
+            }
+            if quote == "\"", character == "\\" {
+                isEscaped = true
+                continue
+            }
+            if character == quote {
+                closing = index
+                break
+            }
+        }
+        if let closing {
+            body = String(body[..<closing])
+        }
+        // Single quotes are literal in shell semantics; only double quotes take escapes.
+        guard quote == "\"" else { return body }
+        var result = ""
+        var isEscapePending = false
+        for character in body {
+            if isEscapePending {
+                switch character {
+                case "n": result.append("\n")
+                case "r": result.append("\r")
+                case "t": result.append("\t")
+                case "\\": result.append("\\")
+                case "\"": result.append("\"")
+                case "$": result.append("$")
+                case "`": result.append("`")
+                default:
+                    result.append("\\")
+                    result.append(character)
+                }
+                isEscapePending = false
+                continue
+            }
+            if character == "\\" { isEscapePending = true; continue }
+            result.append(character)
+        }
+        if isEscapePending { result.append("\\") }
+        return result
+    }
+
+    /// Heuristic for pre-marking a variable as sensitive on import.
+    ///
+    /// `key` alone used to match, so `MONKEY_COUNT` and `KEYBOARD_LAYOUT` were imported as
+    /// secrets. It now has to look like a credential rather than merely contain the letters.
+    static func looksSensitive(key: String) -> Bool {
+        let lower = key.lowercased()
+        let strongMarkers = ["secret", "password", "passwd", "token", "credential", "private", "apikey", "auth"]
+        if strongMarkers.contains(where: { lower.contains($0) }) { return true }
+        // "key" only counts as its own word: API_KEY and KEY yes, MONKEY_COUNT no.
+        let words = lower.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        return words.contains("key") || words.contains("keys") || words.contains("dsn") || words.contains("pwd")
     }
 }
 
-enum ImportedPayload {
+nonisolated enum ImportedPayload: Sendable {
     case legacyItems([ExportedItemPayload])
     case fullBackup(ExportedBackupPayload)
 }
 
-struct ExportService {
+nonisolated struct ExportKeyMaterial: Sendable {
+    fileprivate var vaultKey: Data
+    fileprivate let wrappedKey: WrappedVaultKey
+
+    mutating func securelyClear() {
+        Self.overwrite(&vaultKey)
+    }
+
+    fileprivate static func overwrite(_ data: inout Data) {
+        data.withUnsafeMutableBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            memset(base, 0, buffer.count)
+        }
+        data.removeAll(keepingCapacity: false)
+    }
+}
+
+nonisolated struct ExportService: Sendable {
+    static let maximumImportFileSize = 128 * 1_024 * 1_024
+
     private let cryptoService: VaultCryptoService
 
     init(cryptoService: VaultCryptoService) {
         self.cryptoService = cryptoService
     }
 
-    /// Exports a full vault backup (v3) including all vault data and app settings.
-    func exportFullBackup(backup: ExportedBackupPayload, password: String) throws -> Data {
+    static func readImportFile(at url: URL) throws -> Data {
+        let gotAccess = url.startAccessingSecurityScopedResource()
+        defer { if gotAccess { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: maximumImportFileSize + 1) ?? Data()
+            guard data.count <= maximumImportFileSize else {
+                throw TransferError.importFileTooLarge
+            }
+            return data
+        } catch let error as TransferError {
+            throw error
+        } catch {
+            throw TransferError.importFileUnreadable
+        }
+    }
+
+    /// Performs only the expensive password wrapping off-main. The caller intentionally does
+    /// not capture a plaintext vault snapshot until this finishes, so locking during Argon2id
+    /// cannot leave the whole vault retained by a background task.
+    func prepareFullBackup(password: String) async throws -> ExportKeyMaterial {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try makeKeyMaterialSynchronously(password: password)
+        }.value
+    }
+
+    func exportFullBackupSynchronously(backup: ExportedBackupPayload, password: String) throws -> Data {
+        var material = try makeKeyMaterialSynchronously(password: password)
+        defer { material.securelyClear() }
+        return try finishFullBackupSynchronously(backup: backup, material: material)
+    }
+
+    /// Returns the sole live owner of the generated export key. Keeping construction in a
+    /// helper avoids retaining a second copy while the outer synchronous path clears it.
+    private func makeKeyMaterialSynchronously(password: String) throws -> ExportKeyMaterial {
+        guard password.count >= VaultSessionManager.minimumPasswordLength else {
+            throw TransferError.exportPasswordTooShort(VaultSessionManager.minimumPasswordLength)
+        }
+        var vaultKey = cryptoService.generateVaultKey()
+        do {
+            let wrappedKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
+            return ExportKeyMaterial(vaultKey: vaultKey, wrappedKey: wrappedKey)
+        } catch {
+            ExportKeyMaterial.overwrite(&vaultKey)
+            throw error
+        }
+    }
+
+    /// Encodes and encrypts after the KDF has completed. This portion is intentionally
+    /// synchronous and contains no suspension point at which a lock could interleave.
+    func finishFullBackupSynchronously(backup: ExportedBackupPayload, material: ExportKeyMaterial) throws -> Data {
+        do {
+            try backup.vault.validateResourceLimits()
+        } catch VaultCryptoError.vaultContentsTooLarge {
+            throw TransferError.exportFileTooLarge
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let payload = try encoder.encode(backup)
-        let vaultKey = cryptoService.generateVaultKey()
-        let wrappedKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
-        let envelope = try encryptPayload(payload, using: vaultKey)
+        var payload = try encoder.encode(backup)
+        defer { ExportKeyMaterial.overwrite(&payload) }
+        let envelope = try encryptPayload(payload, using: material.vaultKey)
         let exportEnvelope = EncryptedExportEnvelope(
             version: 3,
-            kdf: wrappedKey,
+            kdf: material.wrappedKey,
             payload: envelope,
             createdAt: .now
         )
-        return try encoder.encode(exportEnvelope)
+        let result = try encoder.encode(exportEnvelope)
+        guard result.count <= Self.maximumImportFileSize else {
+            throw TransferError.exportFileTooLarge
+        }
+        return result
+    }
+
+    func importPayload(from fileData: Data, password: String) async throws -> ImportedPayload {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try importPayloadSynchronously(from: fileData, password: password)
+        }.value
     }
 
     /// Decrypts a `.pstore` file and returns either a full backup (v3) or legacy items (v1/v2).
-    func importPayload(from fileData: Data, password: String) throws -> ImportedPayload {
+    func importPayloadSynchronously(from fileData: Data, password: String) throws -> ImportedPayload {
+        guard fileData.count <= Self.maximumImportFileSize else {
+            throw TransferError.importFileTooLarge
+        }
         let decoder = JSONDecoder()
         let envelope: EncryptedExportEnvelope
         do {
@@ -236,30 +599,39 @@ struct ExportService {
         } catch {
             throw TransferError.invalidExportFile
         }
-        guard envelope.version <= 3 else { throw TransferError.unsupportedExportVersion }
-        let vaultKey: Data
+        guard (1...3).contains(envelope.version) else { throw TransferError.unsupportedExportVersion }
+        guard envelope.payload.version == 1 else { throw TransferError.unsupportedExportVersion }
+        var vaultKey: Data
         do {
             vaultKey = try cryptoService.unwrapVaultKey(envelope.kdf, password: password)
         } catch {
             throw TransferError.wrongExportPassword
         }
-        let plaintext: Data
+        defer { ExportKeyMaterial.overwrite(&vaultKey) }
+        var plaintext: Data
         do {
             plaintext = try cryptoService.decryptEnvelopePayload(envelope.payload, using: vaultKey)
         } catch {
             throw TransferError.wrongExportPassword
         }
+        defer { ExportKeyMaterial.overwrite(&plaintext) }
         if envelope.version >= 3 {
             do {
                 let backup = try decoder.decode(ExportedBackupPayload.self, from: plaintext)
+                try backup.vault.validateResourceLimits()
                 return .fullBackup(backup)
+            } catch VaultCryptoError.vaultContentsTooLarge {
+                throw TransferError.importFileTooLarge
             } catch {
                 throw TransferError.invalidExportFile
             }
         } else {
             do {
                 let items = try decoder.decode([ExportedItemPayload].self, from: plaintext)
+                try Self.validateLegacyItems(items)
                 return .legacyItems(items)
+            } catch VaultCryptoError.vaultContentsTooLarge {
+                throw TransferError.importFileTooLarge
             } catch {
                 throw TransferError.invalidExportFile
             }
@@ -267,6 +639,7 @@ struct ExportService {
     }
 
     private func encryptPayload(_ payload: Data, using vaultKey: Data) throws -> VaultEnvelope {
+        guard vaultKey.count == 32 else { throw VaultCryptoError.invalidEnvelope }
         let key = SymmetricKey(data: vaultKey)
         let sealed = try AES.GCM.seal(payload, using: key)
         return VaultEnvelope(
@@ -276,5 +649,17 @@ struct ExportService {
             tag: sealed.tag.base64EncodedString(),
             createdAt: .now
         )
+    }
+
+    private static func validateLegacyItems(_ items: [ExportedItemPayload]) throws {
+        guard items.count <= 100_000 else { throw VaultCryptoError.vaultContentsTooLarge }
+        var totalFields = 0
+        for item in items {
+            guard item.fields.count <= 2_000,
+                  item.fields.count <= 1_000_000 - totalFields else {
+                throw VaultCryptoError.vaultContentsTooLarge
+            }
+            totalFields += item.fields.count
+        }
     }
 }

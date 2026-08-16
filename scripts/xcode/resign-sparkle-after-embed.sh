@@ -6,6 +6,14 @@
 
 set -euo pipefail
 
+# An unsigned build must not attempt to discover or use a local signing identity. Apart from
+# making CI/debug builds fail, a display name such as "Apple Development" can be ambiguous
+# when more than one certificate is installed.
+if [[ "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
+  echo "note: code signing disabled, skipping resign-sparkle"
+  exit 0
+fi
+
 APP="${TARGET_BUILD_DIR:?}/${WRAPPER_NAME:?}"
 SPARKLE="${APP}/Contents/Frameworks/Sparkle.framework"
 
@@ -14,9 +22,9 @@ if [[ ! -d "$SPARKLE" ]]; then
   exit 0
 fi
 
-SIGN="${EXPANDED_CODE_SIGN_IDENTITY:-${CODE_SIGN_IDENTITY:-}}"
+SIGN="${EXPANDED_CODE_SIGN_IDENTITY:-}"
 if [[ -z "$SIGN" || "$SIGN" == "-" ]]; then
-  echo "note: no code signing identity, skipping resign-sparkle"
+  echo "note: no resolved code signing identity, skipping resign-sparkle"
   exit 0
 fi
 

@@ -69,6 +69,8 @@ final class SecretItemEntity: Identifiable, Hashable {
     /// Health findings the owner chose to dismiss. Keyed to the value that produced them,
     /// so rotating a secret brings its finding back instead of hiding it forever.
     var ignoredHealthIssues: [IgnoredHealthIssue]
+    /// The `.env` (or other text file) this item was imported from, if any.
+    var linkedFile: LinkedFileReference?
 
     init(
         id: UUID = UUID(),
@@ -86,7 +88,8 @@ final class SecretItemEntity: Identifiable, Hashable {
         template: SecretFieldTemplateEntity? = nil,
         fields: [SecretFieldValueEntity] = [],
         changeHistory: [SecretItemChangeEntry] = [],
-        ignoredHealthIssues: [IgnoredHealthIssue] = []
+        ignoredHealthIssues: [IgnoredHealthIssue] = [],
+        linkedFile: LinkedFileReference? = nil
     ) {
         self.id = id
         self.title = title
@@ -105,6 +108,7 @@ final class SecretItemEntity: Identifiable, Hashable {
         self.fields = fields
         self.changeHistory = changeHistory
         self.ignoredHealthIssues = ignoredHealthIssues
+        self.linkedFile = linkedFile
     }
 
     static func == (lhs: SecretItemEntity, rhs: SecretItemEntity) -> Bool {
@@ -128,6 +132,13 @@ final class SecretFieldValueEntity: Identifiable, Hashable {
     var sortOrder: Int
     var secretReference: String?
     var plainValue: String
+    /// Newest-first previous values of this field.
+    ///
+    /// Unlike the 1.1.1 audit trail — which records only *that* a secret changed — this keeps
+    /// the value itself, so a rotated password can be read back or restored. It rides inside
+    /// the same encrypted envelope as everything else and is capped by
+    /// `SecretItemRepository.valueHistoryLimit`; the owner can switch it off or purge it.
+    var previousValues: [SecretValueVersion]
     weak var item: SecretItemEntity?
 
     init(
@@ -141,6 +152,7 @@ final class SecretFieldValueEntity: Identifiable, Hashable {
         sortOrder: Int = 0,
         secretReference: String? = nil,
         plainValue: String = "",
+        previousValues: [SecretValueVersion] = [],
         item: SecretItemEntity? = nil
     ) {
         self.id = id
@@ -153,6 +165,7 @@ final class SecretFieldValueEntity: Identifiable, Hashable {
         self.sortOrder = sortOrder
         self.secretReference = secretReference
         self.plainValue = plainValue
+        self.previousValues = previousValues
         self.item = item
     }
 
@@ -311,6 +324,8 @@ struct SecretItemDraft: Identifiable {
     var isArchived: Bool = false
     var fieldDrafts: [FieldDraft]
     var templateID: UUID?
+    /// Carried through the editor so saving does not drop an existing file link.
+    var linkedFile: LinkedFileReference?
 
     static let empty = SecretItemDraft(
         title: "",
@@ -362,6 +377,32 @@ struct FieldResolvedValue: Identifiable, Hashable {
     let isCopyable: Bool
     let isMasked: Bool
     let sortOrder: Int
+    /// Newest-first previous values, empty when history is off or the field never changed.
+    let previousValues: [SecretValueVersion]
+
+    init(
+        id: UUID,
+        key: String,
+        label: String,
+        value: String,
+        kind: FieldKind,
+        isSensitive: Bool,
+        isCopyable: Bool,
+        isMasked: Bool,
+        sortOrder: Int,
+        previousValues: [SecretValueVersion] = []
+    ) {
+        self.id = id
+        self.key = key
+        self.label = label
+        self.value = value
+        self.kind = kind
+        self.isSensitive = isSensitive
+        self.isCopyable = isCopyable
+        self.isMasked = isMasked
+        self.sortOrder = sortOrder
+        self.previousValues = previousValues
+    }
 }
 
 /// Shared rules for reading meaning out of a field's key and label.
@@ -374,13 +415,181 @@ enum SecretFieldClassification {
     }
 }
 
+// MARK: - Secret value history
+
+/// A value a field used to hold, and when it stopped holding it.
+///
+/// This is the one structure in the vault that stores an *old* secret on purpose. That is a
+/// real trade-off — a rotated password stays recoverable until the history is trimmed — so
+/// it is capped, purgeable per item, and switchable off entirely in Settings.
+nonisolated struct SecretValueVersion: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    private(set) var value: String
+    /// When this value was replaced by a newer one.
+    let replacedAt: Date
+
+    init(id: UUID = UUID(), value: String, replacedAt: Date = .now) {
+        self.id = id
+        self.value = value
+        self.replacedAt = replacedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        value = try container.decodeIfPresent(String.self, forKey: .value) ?? ""
+        replacedAt = try container.decodeIfPresent(Date.self, forKey: .replacedAt) ?? .now
+    }
+
+    mutating func securelyClear() {
+        guard !value.isEmpty else { return }
+        value = String(repeating: "\0", count: value.utf8.count)
+        value.removeAll(keepingCapacity: false)
+    }
+}
+
+// MARK: - Linked files
+
+/// A file on disk this item mirrors — in practice the `.env` it was imported from.
+///
+/// The bookmark is what survives the sandbox across launches; `displayPath` exists so the UI
+/// can name the file even when the bookmark no longer resolves.
+nonisolated struct LinkedFileReference: Codable, Hashable, Sendable {
+    /// Security-scoped bookmark. Nil when the link was restored from a backup taken on
+    /// another Mac, in which case the file has to be re-picked.
+    var bookmark: Data?
+    var displayPath: String
+    /// Digest of the file contents at the last successful sync, in either direction.
+    var syncedDigest: String?
+    var syncedAt: Date?
+    /// Digest of what the vault held at the last sync, so local edits can be told apart
+    /// from on-disk edits instead of guessing.
+    var syncedVaultDigest: String?
+    /// Whether the file was stored parsed into one field per key, or as one blob.
+    var parsedIntoFields: Bool
+    /// A newly selected file whose contents did not match the vault when it was linked.
+    /// No side is considered authoritative until the owner explicitly pulls or pushes.
+    var requiresInitialSync: Bool
+
+    init(
+        bookmark: Data? = nil,
+        displayPath: String,
+        syncedDigest: String? = nil,
+        syncedAt: Date? = nil,
+        syncedVaultDigest: String? = nil,
+        parsedIntoFields: Bool = true,
+        requiresInitialSync: Bool = false
+    ) {
+        self.bookmark = bookmark
+        self.displayPath = displayPath
+        self.syncedDigest = syncedDigest
+        self.syncedAt = syncedAt
+        self.syncedVaultDigest = syncedVaultDigest
+        self.parsedIntoFields = parsedIntoFields
+        self.requiresInitialSync = requiresInitialSync
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        bookmark = try container.decodeIfPresent(Data.self, forKey: .bookmark)
+        displayPath = try container.decodeIfPresent(String.self, forKey: .displayPath) ?? ""
+        syncedDigest = try container.decodeIfPresent(String.self, forKey: .syncedDigest)
+        syncedAt = try container.decodeIfPresent(Date.self, forKey: .syncedAt)
+        syncedVaultDigest = try container.decodeIfPresent(String.self, forKey: .syncedVaultDigest)
+        parsedIntoFields = try container.decodeIfPresent(Bool.self, forKey: .parsedIntoFields) ?? true
+        requiresInitialSync = try container.decodeIfPresent(Bool.self, forKey: .requiresInitialSync) ?? false
+    }
+
+    var fileName: String {
+        (displayPath as NSString).lastPathComponent
+    }
+
+    /// Path with the home directory abbreviated, which is what the UI should show.
+    var abbreviatedPath: String {
+        (displayPath as NSString).abbreviatingWithTildeInPath
+    }
+}
+
+// MARK: - Backup import
+
+/// What a `.pstore` contains, shown before anything is written.
+///
+/// Restoring used to replace the entire vault the instant the password was accepted, with no
+/// preview and no way back. Now the contents are summarised first and the owner picks how to
+/// apply them.
+struct ImportPreview {
+    enum Mode: String, CaseIterable, Identifiable {
+        /// Discard the current vault and take the backup as-is.
+        case replace
+        /// Keep everything current and add what the backup has and the vault does not.
+        case merge
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .replace: "Replace"
+            case .merge: "Merge"
+            }
+        }
+
+        var explanation: String {
+            switch self {
+            case .replace:
+                "Everything currently in your vault is discarded and replaced by the backup."
+            case .merge:
+                "Your current items are kept. Anything the backup has and your vault does not is added; nothing is overwritten."
+            }
+        }
+    }
+
+    let itemCount: Int
+    let workspaceCount: Int
+    let templateCount: Int
+    let createdAt: Date?
+    let fileName: String
+    /// Items whose id already exists locally with different contents. Merge imports these
+    /// as separate copies rather than overwriting.
+    let conflictingItemCount: Int
+    /// Items the vault already has byte-for-byte; merge skips these entirely.
+    let identicalItemCount: Int
+    /// True for legacy v1/v2 exports, which carry items only — no settings, no workspaces.
+    let isLegacyFormat: Bool
+
+    var newItemCount: Int { max(0, itemCount - conflictingItemCount - identicalItemCount) }
+}
+
+/// Result of applying an import, for the confirmation message.
+struct ImportOutcome {
+    let mode: ImportPreview.Mode
+    let addedItems: Int
+    let addedWorkspaces: Int
+    let skippedIdentical: Int
+
+    var summary: String {
+        switch mode {
+        case .replace:
+            return "Vault replaced with \(addedItems) \(addedItems == 1 ? "item" : "items")."
+        case .merge:
+            var parts = ["\(addedItems) \(addedItems == 1 ? "item" : "items") added"]
+            if addedWorkspaces > 0 {
+                parts.append("\(addedWorkspaces) \(addedWorkspaces == 1 ? "workspace" : "workspaces") added")
+            }
+            if skippedIdentical > 0 {
+                parts.append("\(skippedIdentical) already present")
+            }
+            return parts.joined(separator: ", ") + "."
+        }
+    }
+}
+
 // MARK: - Audit history
 
 /// One recorded change to an item.
 ///
 /// `detail` carries a field *label* at most. Storing a value here — even a redacted one —
 /// would put plaintext secrets in a structure the UI renders unmasked, so it never happens.
-struct SecretItemChangeEntry: Identifiable, Codable, Hashable {
+nonisolated struct SecretItemChangeEntry: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
     let kindRawValue: String
     let changedAt: Date
@@ -413,7 +622,7 @@ struct SecretItemChangeEntry: Identifiable, Codable, Hashable {
 /// The identity includes a digest of the offending value, so an ignore silently stops
 /// applying the moment that value changes — dismissing a weak password hides today's
 /// warning, not tomorrow's.
-struct IgnoredHealthIssue: Identifiable, Codable, Hashable {
+nonisolated struct IgnoredHealthIssue: Identifiable, Codable, Hashable, Sendable {
     let kindRawValue: String
     let fieldKey: String
     let valueDigest: String
@@ -441,7 +650,7 @@ struct IgnoredHealthIssue: Identifiable, Codable, Hashable {
 ///
 /// Lives inside the encrypted vault payload, not in `vault.meta`: the metadata file is
 /// plaintext on disk, and when someone changes their master password is nobody's business.
-struct MasterPasswordChangeEntry: Identifiable, Codable, Hashable {
+nonisolated struct MasterPasswordChangeEntry: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
     let kindRawValue: String
     let changedAt: Date
@@ -512,7 +721,7 @@ struct BulkEditDraft {
     }
 }
 
-struct ExportedItemPayload: Codable {
+nonisolated struct ExportedItemPayload: Codable, Sendable {
     let id: UUID
     let workspaceName: String?
     let title: String
@@ -526,7 +735,7 @@ struct ExportedItemPayload: Codable {
     let fields: [ExportedFieldPayload]
 }
 
-struct ExportedFieldPayload: Codable {
+nonisolated struct ExportedFieldPayload: Codable, Sendable {
     let key: String
     let label: String
     let value: String
@@ -536,7 +745,7 @@ struct ExportedFieldPayload: Codable {
 
 // MARK: - Full Backup Payload (v3)
 
-struct ExportedSettingsPayload: Codable {
+nonisolated struct ExportedSettingsPayload: Codable, Sendable {
     let autoLockInterval: TimeInterval
     let clipboardClearInterval: TimeInterval
     let biometricsEnabled: Bool
@@ -549,14 +758,79 @@ struct ExportedSettingsPayload: Codable {
     let sidebarTypesOrder: [String]
     let sidebarTagsOrder: [String]
     let sidebarEnvironmentsOrder: [String]
+    /// Added in 1.2.0. Backups written earlier decode these to their defaults.
+    let unlocksWithBiometricsAutomatically: Bool
+    let locksOnSystemLock: Bool
+    let keepsSecretValueHistory: Bool
+    let checksLinkedFilesOnFocus: Bool
+    let itemSortOrderRawValue: String
+
+    init(
+        autoLockInterval: TimeInterval,
+        clipboardClearInterval: TimeInterval,
+        biometricsEnabled: Bool,
+        globalCommandPaletteHotkeyEnabled: Bool,
+        sidebarLibraryExpanded: Bool,
+        sidebarWorkspacesExpanded: Bool,
+        sidebarTypesExpanded: Bool,
+        sidebarTagsExpanded: Bool,
+        sidebarEnvironmentsExpanded: Bool,
+        sidebarTypesOrder: [String],
+        sidebarTagsOrder: [String],
+        sidebarEnvironmentsOrder: [String],
+        unlocksWithBiometricsAutomatically: Bool = true,
+        locksOnSystemLock: Bool = true,
+        keepsSecretValueHistory: Bool = true,
+        checksLinkedFilesOnFocus: Bool = true,
+        itemSortOrderRawValue: String = ItemSortOrder.title.rawValue
+    ) {
+        self.autoLockInterval = autoLockInterval
+        self.clipboardClearInterval = clipboardClearInterval
+        self.biometricsEnabled = biometricsEnabled
+        self.globalCommandPaletteHotkeyEnabled = globalCommandPaletteHotkeyEnabled
+        self.sidebarLibraryExpanded = sidebarLibraryExpanded
+        self.sidebarWorkspacesExpanded = sidebarWorkspacesExpanded
+        self.sidebarTypesExpanded = sidebarTypesExpanded
+        self.sidebarTagsExpanded = sidebarTagsExpanded
+        self.sidebarEnvironmentsExpanded = sidebarEnvironmentsExpanded
+        self.sidebarTypesOrder = sidebarTypesOrder
+        self.sidebarTagsOrder = sidebarTagsOrder
+        self.sidebarEnvironmentsOrder = sidebarEnvironmentsOrder
+        self.unlocksWithBiometricsAutomatically = unlocksWithBiometricsAutomatically
+        self.locksOnSystemLock = locksOnSystemLock
+        self.keepsSecretValueHistory = keepsSecretValueHistory
+        self.checksLinkedFilesOnFocus = checksLinkedFilesOnFocus
+        self.itemSortOrderRawValue = itemSortOrderRawValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        autoLockInterval = try container.decode(TimeInterval.self, forKey: .autoLockInterval)
+        clipboardClearInterval = try container.decode(TimeInterval.self, forKey: .clipboardClearInterval)
+        biometricsEnabled = try container.decode(Bool.self, forKey: .biometricsEnabled)
+        globalCommandPaletteHotkeyEnabled = try container.decode(Bool.self, forKey: .globalCommandPaletteHotkeyEnabled)
+        sidebarLibraryExpanded = try container.decode(Bool.self, forKey: .sidebarLibraryExpanded)
+        sidebarWorkspacesExpanded = try container.decode(Bool.self, forKey: .sidebarWorkspacesExpanded)
+        sidebarTypesExpanded = try container.decode(Bool.self, forKey: .sidebarTypesExpanded)
+        sidebarTagsExpanded = try container.decode(Bool.self, forKey: .sidebarTagsExpanded)
+        sidebarEnvironmentsExpanded = try container.decode(Bool.self, forKey: .sidebarEnvironmentsExpanded)
+        sidebarTypesOrder = try container.decode([String].self, forKey: .sidebarTypesOrder)
+        sidebarTagsOrder = try container.decode([String].self, forKey: .sidebarTagsOrder)
+        sidebarEnvironmentsOrder = try container.decode([String].self, forKey: .sidebarEnvironmentsOrder)
+        unlocksWithBiometricsAutomatically = try container.decodeIfPresent(Bool.self, forKey: .unlocksWithBiometricsAutomatically) ?? true
+        locksOnSystemLock = try container.decodeIfPresent(Bool.self, forKey: .locksOnSystemLock) ?? true
+        keepsSecretValueHistory = try container.decodeIfPresent(Bool.self, forKey: .keepsSecretValueHistory) ?? true
+        checksLinkedFilesOnFocus = try container.decodeIfPresent(Bool.self, forKey: .checksLinkedFilesOnFocus) ?? true
+        itemSortOrderRawValue = try container.decodeIfPresent(String.self, forKey: .itemSortOrderRawValue) ?? ItemSortOrder.title.rawValue
+    }
 }
 
-struct ExportedBackupPayload: Codable {
+nonisolated struct ExportedBackupPayload: Codable, Sendable {
     let vault: VaultSnapshot
     let settings: ExportedSettingsPayload
 }
 
-struct WrappedVaultKey: Codable {
+nonisolated struct WrappedVaultKey: Codable, Sendable {
     /// KDF algorithm. Nil or "pbkdf2-sha256" = legacy PBKDF2; "argon2id" = Argon2id.
     let kdfAlgorithm: String?
     let salt: String
@@ -569,14 +843,14 @@ struct WrappedVaultKey: Codable {
     let tag: String
 }
 
-struct VaultMetadata: Codable {
+nonisolated struct VaultMetadata: Codable, Sendable {
     let version: Int
     var wrappedVaultKey: WrappedVaultKey
     var biometricUnlockEnabled: Bool
     var updatedAt: Date
 }
 
-struct VaultEnvelope: Codable {
+nonisolated struct VaultEnvelope: Codable, Sendable {
     let version: Int
     let nonce: String
     let ciphertext: String
@@ -584,32 +858,48 @@ struct VaultEnvelope: Codable {
     let createdAt: Date
 }
 
-struct EncryptedExportEnvelope: Codable {
+nonisolated struct EncryptedExportEnvelope: Codable, Sendable {
     let version: Int
     let kdf: WrappedVaultKey
     let payload: VaultEnvelope
     let createdAt: Date
 }
 
-struct VaultSnapshot: Codable {
+nonisolated struct VaultSnapshot: Codable, Sendable {
     var workspaces: [WorkspaceSnapshot]
     var items: [SecretItemSnapshot]
     var customTemplates: [TemplateSnapshot]
     /// Newest-first. Added in 1.1.1; vaults written before that decode to an empty trail.
     var masterPasswordHistory: [MasterPasswordChangeEntry]
+    /// User-defined labels can disclose project or client names, so their presentation order
+    /// belongs in the encrypted snapshot rather than in plaintext UserDefaults. Optional lets
+    /// 1.2 migrate builds that wrote these values outside the vault.
+    var privateSidebarTagsOrder: [String]?
+    var privateSidebarEnvironmentsOrder: [String]?
 
-    static let empty = VaultSnapshot(workspaces: [], items: [], customTemplates: [], masterPasswordHistory: [])
+    static let empty = VaultSnapshot(
+        workspaces: [],
+        items: [],
+        customTemplates: [],
+        masterPasswordHistory: [],
+        privateSidebarTagsOrder: [],
+        privateSidebarEnvironmentsOrder: []
+    )
 
     init(
         workspaces: [WorkspaceSnapshot],
         items: [SecretItemSnapshot],
         customTemplates: [TemplateSnapshot],
-        masterPasswordHistory: [MasterPasswordChangeEntry] = []
+        masterPasswordHistory: [MasterPasswordChangeEntry] = [],
+        privateSidebarTagsOrder: [String]? = [],
+        privateSidebarEnvironmentsOrder: [String]? = []
     ) {
         self.workspaces = workspaces
         self.items = items
         self.customTemplates = customTemplates
         self.masterPasswordHistory = masterPasswordHistory
+        self.privateSidebarTagsOrder = privateSidebarTagsOrder
+        self.privateSidebarEnvironmentsOrder = privateSidebarEnvironmentsOrder
     }
 
     init(from decoder: Decoder) throws {
@@ -618,10 +908,12 @@ struct VaultSnapshot: Codable {
         items = try container.decode([SecretItemSnapshot].self, forKey: .items)
         customTemplates = try container.decode([TemplateSnapshot].self, forKey: .customTemplates)
         masterPasswordHistory = try container.decodeIfPresent([MasterPasswordChangeEntry].self, forKey: .masterPasswordHistory) ?? []
+        privateSidebarTagsOrder = try container.decodeIfPresent([String].self, forKey: .privateSidebarTagsOrder)
+        privateSidebarEnvironmentsOrder = try container.decodeIfPresent([String].self, forKey: .privateSidebarEnvironmentsOrder)
     }
 }
 
-struct WorkspaceSnapshot: Codable {
+nonisolated struct WorkspaceSnapshot: Codable, Sendable {
     let id: UUID
     let name: String
     let icon: String
@@ -658,7 +950,7 @@ struct WorkspaceSnapshot: Codable {
     }
 }
 
-struct SecretItemSnapshot: Codable {
+nonisolated struct SecretItemSnapshot: Codable, Sendable {
     let id: UUID
     let title: String
     let typeRawValue: String
@@ -677,6 +969,8 @@ struct SecretItemSnapshot: Codable {
     /// Added in 1.1.1. Absent in vaults written by 1.1.0 and earlier.
     let changeHistory: [SecretItemChangeEntry]
     let ignoredHealthIssues: [IgnoredHealthIssue]
+    /// Added in 1.2.0.
+    let linkedFile: LinkedFileReference?
 
     init(
         id: UUID,
@@ -695,7 +989,8 @@ struct SecretItemSnapshot: Codable {
         templateID: UUID?,
         fields: [FieldValueSnapshot],
         changeHistory: [SecretItemChangeEntry] = [],
-        ignoredHealthIssues: [IgnoredHealthIssue] = []
+        ignoredHealthIssues: [IgnoredHealthIssue] = [],
+        linkedFile: LinkedFileReference? = nil
     ) {
         self.id = id
         self.title = title
@@ -714,6 +1009,7 @@ struct SecretItemSnapshot: Codable {
         self.fields = fields
         self.changeHistory = changeHistory
         self.ignoredHealthIssues = ignoredHealthIssues
+        self.linkedFile = linkedFile
     }
 
     init(from decoder: Decoder) throws {
@@ -735,10 +1031,11 @@ struct SecretItemSnapshot: Codable {
         fields = try container.decode([FieldValueSnapshot].self, forKey: .fields)
         changeHistory = try container.decodeIfPresent([SecretItemChangeEntry].self, forKey: .changeHistory) ?? []
         ignoredHealthIssues = try container.decodeIfPresent([IgnoredHealthIssue].self, forKey: .ignoredHealthIssues) ?? []
+        linkedFile = try container.decodeIfPresent(LinkedFileReference.self, forKey: .linkedFile)
     }
 }
 
-struct FieldValueSnapshot: Codable {
+nonisolated struct FieldValueSnapshot: Codable, Sendable {
     let id: UUID
     let fieldKey: String
     let labelSnapshot: String
@@ -748,9 +1045,49 @@ struct FieldValueSnapshot: Codable {
     let isMasked: Bool
     let sortOrder: Int
     let plainValue: String
+    /// Added in 1.2.0. Absent in vaults written earlier.
+    let previousValues: [SecretValueVersion]
+
+    init(
+        id: UUID,
+        fieldKey: String,
+        labelSnapshot: String,
+        kindRawValue: String,
+        isSensitive: Bool,
+        isCopyable: Bool,
+        isMasked: Bool,
+        sortOrder: Int,
+        plainValue: String,
+        previousValues: [SecretValueVersion] = []
+    ) {
+        self.id = id
+        self.fieldKey = fieldKey
+        self.labelSnapshot = labelSnapshot
+        self.kindRawValue = kindRawValue
+        self.isSensitive = isSensitive
+        self.isCopyable = isCopyable
+        self.isMasked = isMasked
+        self.sortOrder = sortOrder
+        self.plainValue = plainValue
+        self.previousValues = previousValues
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        fieldKey = try container.decode(String.self, forKey: .fieldKey)
+        labelSnapshot = try container.decode(String.self, forKey: .labelSnapshot)
+        kindRawValue = try container.decode(String.self, forKey: .kindRawValue)
+        isSensitive = try container.decode(Bool.self, forKey: .isSensitive)
+        isCopyable = try container.decode(Bool.self, forKey: .isCopyable)
+        isMasked = try container.decode(Bool.self, forKey: .isMasked)
+        sortOrder = try container.decode(Int.self, forKey: .sortOrder)
+        plainValue = try container.decode(String.self, forKey: .plainValue)
+        previousValues = try container.decodeIfPresent([SecretValueVersion].self, forKey: .previousValues) ?? []
+    }
 }
 
-struct TemplateSnapshot: Codable {
+nonisolated struct TemplateSnapshot: Codable, Sendable {
     let id: UUID
     let itemTypeRawValue: String
     let name: String
@@ -759,7 +1096,7 @@ struct TemplateSnapshot: Codable {
     let fieldDefinitions: [TemplateFieldSnapshot]
 }
 
-struct TemplateFieldSnapshot: Codable {
+nonisolated struct TemplateFieldSnapshot: Codable, Sendable {
     let id: UUID
     let key: String
     let label: String

@@ -5,13 +5,30 @@ import UniformTypeIdentifiers
 struct AppView: View {
     @Bindable var viewModel: VaultViewModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.controlActiveState) private var controlActiveState
     @State private var showOnboarding = false
+
+    /// Bridges the split view's three-way column state onto the single "is the sidebar
+    /// showing?" flag the View menu also drives. `.doubleColumn` keeps the item list; only
+    /// the sidebar goes away.
+    private var sidebarVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { viewModel.isSidebarVisible ? .all : .doubleColumn },
+            set: { viewModel.isSidebarVisible = ($0 == .all) }
+        )
+    }
 
     var body: some View {
         ZStack {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: sidebarVisibility) {
+                // The system sidebar toggle is kept: it sits where every other Mac app puts
+                // it, at the head of the sidebar's own toolbar area. On a locked vault it is
+                // removed on its own rather than by hiding the toolbar — hiding the whole
+                // window toolbar collapses the title bar with it, and takes the close and
+                // minimise buttons away on the one screen you might well want them on.
                 SidebarView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 196, ideal: 220, max: 260)
+                    .modifier(HiddenSidebarToggle(isHidden: isVaultLocked || showOnboarding))
             } content: {
                 ItemListView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
@@ -78,11 +95,14 @@ struct AppView: View {
             switch sheet {
             case .newItemFlow:
                 ItemCreationFlowSheet(viewModel: viewModel)
-            case .editItem:
+            case let .editItem(itemID):
+                // The id in the case is what is edited. It used to be ignored in favour of
+                // whatever happened to be selected, which is the same thing right up until
+                // it isn't.
                 ItemEditorSheet(
                     viewModel: viewModel,
                     title: "Edit Secret Item",
-                    draft: viewModel.draftForSelectedItem(),
+                    draft: viewModel.draft(forItemID: itemID),
                     onSave: viewModel.saveItem
                 )
             case .newWorkspace:
@@ -96,21 +116,22 @@ struct AppView: View {
             case .importEncryptedExport:
                 ImportEncryptedExportSheet(viewModel: viewModel)
             case .export:
-                ExportSheet(onExport: viewModel.exportSelectedItems)
+                ExportSheet(viewModel: viewModel)
+            case .importPreview:
+                ImportPreviewSheet(viewModel: viewModel)
             case .passwordGenerator:
                 PasswordGeneratorSheet(viewModel: viewModel)
             case .vaultHealth:
                 VaultHealthSheet(viewModel: viewModel)
             case .bulkEdit:
                 BulkEditSheet(viewModel: viewModel)
+            case let .itemHistory(itemID):
+                ItemHistorySheet(viewModel: viewModel, itemID: itemID)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
             SettingsSheetView(settings: viewModel.container.settings, viewModel: viewModel)
         }
-        // Keep this modifier unconditional: toggling it with lock state caused AttributeGraph crashes
-        // (ApplyUpdatesToExternalTarget / value_set) on macOS when unlocking.
-        .toolbar(removing: .sidebarToggle)
         .onChange(of: viewModel.container.sessionManager.lockState) { _, newValue in
             switch newValue {
             case .unlocked:
@@ -119,8 +140,15 @@ struct AppView: View {
                     await Task.yield()
                     viewModel.reload()
                 }
-            case .locked, .setupRequired:
-                viewModel.resetUnlockedSelection()
+            case .locked:
+                // Sensitive view-model state is cleared synchronously by the session's lock
+                // callback, including when this window is closed.
+                break
+            case .setupRequired:
+                // Reached by erasing the vault. Setting up again is the same job a new arrival
+                // has, restoring a backup included, so it gets the same guided flow instead of
+                // a bare "create a password" box.
+                withAnimation(.easeOut(duration: 0.3)) { showOnboarding = true }
             }
         }
         .alert("PassStore", isPresented: Binding(
@@ -152,9 +180,14 @@ struct AppView: View {
             if viewModel.container.sessionManager.lockState == .setupRequired {
                 showOnboarding = true
             }
-            GlobalCommandPaletteHotkey.shared.setOpenMainWindowAction {
-                openWindow(id: "main")
-            }
+            MainWindowPresenter.setOpenAction { openWindow(id: PassStoreScene.mainWindowID) }
+            Task { await viewModel.refreshLinkedFileStatuses() }
+        }
+        // Coming back from an editor is exactly when a linked `.env` is likely to have
+        // changed, so that is when PassStore looks — no watcher, no background work.
+        .onChange(of: controlActiveState) { _, newValue in
+            guard newValue != .inactive else { return }
+            Task { await viewModel.refreshLinkedFileStatuses() }
         }
     }
 
@@ -211,11 +244,7 @@ private struct SidebarView: View {
                             viewModel.setSelectedType(nil)
                         }
                     )
-                    .frame(height: CGFloat(LibrarySection.allCases.count) * ReorderableRows.rowHeight + 40)
-                    .listRowInsets(EdgeInsets(top: -14, leading: -20, bottom: 0, trailing: -20))
-                    .transformEffect(CGAffineTransform(translationX: 0, y: -10))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+                    .sidebarSectionRows(count: LibrarySection.allCases.count)
                 }
 
                 if !viewModel.workspaces.isEmpty {
@@ -267,11 +296,7 @@ private struct SidebarView: View {
                                 ]
                             }
                         )
-                        .frame(height: CGFloat(viewModel.workspaces.count) * ReorderableRows.rowHeight + 40)
-                        .listRowInsets(EdgeInsets(top: -14, leading: -20, bottom: 0, trailing: -20))
-                        .transformEffect(CGAffineTransform(translationX: 0, y: -10))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                    .sidebarSectionRows(count: viewModel.workspaces.count)
                     }
                 }
 
@@ -297,11 +322,7 @@ private struct SidebarView: View {
                             viewModel.container.settings.sidebarTypesOrder = ids
                         }
                     )
-                    .frame(height: CGFloat(viewModel.orderedTypes.count) * ReorderableRows.rowHeight + 40)
-                    .listRowInsets(EdgeInsets(top: -14, leading: -20, bottom: 0, trailing: -20))
-                    .transformEffect(CGAffineTransform(translationX: 0, y: -10))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+                    .sidebarSectionRows(count: viewModel.orderedTypes.count)
                 }
 
                 if !viewModel.orderedTags.isEmpty {
@@ -329,14 +350,10 @@ private struct SidebarView: View {
                                 viewModel.setSelectedType(nil)
                             },
                             onReorder: { ids in
-                                viewModel.container.settings.sidebarTagsOrder = ids
+                                viewModel.reorderSidebarTags(ids)
                             }
                         )
-                        .frame(height: CGFloat(viewModel.orderedTags.count) * ReorderableRows.rowHeight + 40)
-                    .listRowInsets(EdgeInsets(top: -14, leading: -20, bottom: 0, trailing: -20))
-                    .transformEffect(CGAffineTransform(translationX: 0, y: -10))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                    .sidebarSectionRows(count: viewModel.orderedTags.count)
                     }
                 }
 
@@ -365,14 +382,10 @@ private struct SidebarView: View {
                                 viewModel.setSelectedType(nil)
                             },
                             onReorder: { ids in
-                                viewModel.container.settings.sidebarEnvironmentsOrder = ids
+                                viewModel.reorderSidebarEnvironments(ids)
                             }
                         )
-                        .frame(height: CGFloat(viewModel.orderedEnvironments.count) * ReorderableRows.rowHeight + 40)
-                    .listRowInsets(EdgeInsets(top: -14, leading: -20, bottom: 0, trailing: -20))
-                    .transformEffect(CGAffineTransform(translationX: 0, y: -10))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                    .sidebarSectionRows(count: viewModel.orderedEnvironments.count)
                     }
                 }
 
@@ -420,7 +433,8 @@ private struct SidebarView: View {
 
 private struct ItemListView: View {
     @Bindable var viewModel: VaultViewModel
-    @FocusState private var isSearchFocused: Bool
+    private enum FocusArea: Hashable { case search, list }
+    @FocusState private var focusedArea: FocusArea?
 
     private var isVaultLocked: Bool {
         viewModel.container.sessionManager.lockState != .unlocked
@@ -437,28 +451,60 @@ private struct ItemListView: View {
                     emptyListPlaceholder
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(viewModel.filteredItems, id: \.id) { item in
-                        ItemRow(viewModel: viewModel, item: item)
+                    // Deliberately no `selection:` binding. AppKit draws that highlight as a
+                    // solid fill of the accent colour and there is no public way to restyle
+                    // it — against a yellow accent it swamped the workspace chips, and it
+                    // painted straight over the row's own background. Selection is drawn and
+                    // handled here instead; ⌘-click, ⇧-click ranges and ⌥↑/⌥↓ all still work.
+                    List {
+                        ForEach(viewModel.filteredItems, id: \.id) { item in
+                            ItemRow(viewModel: viewModel, item: item) {
+                                focusedArea = .list
+                            }
+                                .listRowBackground(rowBackground(for: item))
+                        }
                     }
-                    .listStyle(.plain)
+                    .listStyle(.inset)
+                    .focusable()
+                    .focused($focusedArea, equals: .list)
+                    .accessibilityIdentifier("item-list")
                 }
 
                 if viewModel.isMultiSelecting {
                     MultiSelectionBar(viewModel: viewModel)
+                } else if let message = viewModel.lastActionMessage {
+                    StatusFooter(message: message, viewModel: viewModel)
                 }
             }
-            .onKeyPress(.escape) {
-                guard viewModel.isMultiSelecting else { return .ignored }
-                viewModel.clearMultiSelection()
-                return .handled
-            }
+            .itemListKeyboardShortcuts(
+                isEnabled: {
+                    viewModel.container.sessionManager.lockState == .unlocked
+                        && viewModel.activeSheet == nil
+                        && !viewModel.isSettingsPresented
+                        && !viewModel.isCommandPalettePresented
+                        // Anywhere but the search field: requiring the list to hold focus
+                        // meant the arrows did nothing until a row had been clicked, which is
+                        // exactly the state you are in right after unlocking.
+                        && focusedArea != .search
+                },
+                onMove: { viewModel.moveSelection(by: $0) },
+                onEscape: {
+                    guard viewModel.isMultiSelecting else { return false }
+                    viewModel.clearMultiSelection()
+                    return true
+                }
+            )
             .onChange(of: viewModel.searchFocusRequests) { _, _ in
-                isSearchFocused = true
+                focusedArea = .search
             }
+            // No subtitle: "Favorites" does not need "Pinned secrets you reach for often"
+            // under it, and the strap line only pushed the list down.
             .navigationTitle(isVaultLocked ? "" : viewModel.destinationTitle)
-            .navigationSubtitle(isVaultLocked ? "" : viewModel.destinationSubtitle)
             .toolbar {
                 if !isVaultLocked {
+                    ToolbarItem(placement: .automatic) {
+                        sortMenu
+                    }
                     ToolbarItem(placement: .automatic) {
                         Button {
                             viewModel.activeSheet = .newItemFlow
@@ -480,6 +526,30 @@ private struct ItemListView: View {
         }
     }
 
+    /// Sorting was hard-coded to A-Z everywhere except "Recent", so there was no way to ask
+    /// what you touched last from any other destination.
+    private var sortMenu: some View {
+        Menu {
+            if viewModel.isSortOrderFixedByDestination {
+                // Offering "Name" here would be a lie: Recent is defined by its order.
+                Text("Recent is always sorted by last used")
+            }
+            Picker("Sort by", selection: $viewModel.sortOrder) {
+                ForEach(ItemSortOrder.allCases) { order in
+                    Label(order.title, systemImage: order.systemImage).tag(order)
+                }
+            }
+            .pickerStyle(.inline)
+            .disabled(viewModel.isSortOrderFixedByDestination)
+        } label: {
+            Label("Sort", systemImage: "arrow.up.arrow.down")
+        }
+        .help(viewModel.isSortOrderFixedByDestination
+              ? "Recent is always sorted by last used"
+              : "Sort the list")
+        .accessibilityIdentifier("toolbar-sort")
+    }
+
     /// A brand-new vault has nothing to "adjust", so the empty state has to say something different
     /// from the one you get after filtering everything out.
     @ViewBuilder
@@ -490,11 +560,18 @@ private struct ItemListView: View {
             } description: {
                 Text("Add your first API key, database credential, or .env file to get started.")
             } actions: {
-                Button("New Secret Item…") {
-                    viewModel.activeSheet = .newItemFlow
+                VStack(spacing: VaultSpacing.s) {
+                    Button("New Secret Item…") {
+                        viewModel.activeSheet = .newItemFlow
+                    }
+                    .buttonStyle(VaultButtonStyle(.primary))
+                    .accessibilityIdentifier("empty-vault-new-item")
+
+                    Button("Import a .env File…") {
+                        viewModel.importEnvFileCreatingItem()
+                    }
+                    .accessibilityIdentifier("empty-vault-import-env")
                 }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("empty-vault-new-item")
             }
         } else if viewModel.hasActiveFilters {
             ContentUnavailableView {
@@ -516,48 +593,143 @@ private struct ItemListView: View {
                 Button("New Secret Item…") {
                     viewModel.activeSheet = .newItemFlow
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(VaultButtonStyle(.primary))
             }
         }
     }
 
     private var listHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
             searchField
 
-            Text("\(viewModel.filteredItems.count) item\(viewModel.filteredItems.count == 1 ? "" : "s")")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            if viewModel.hasActiveFilters {
+                activeFilters
+            }
+
+            HStack(spacing: VaultSpacing.xs) {
+                Text("\(viewModel.filteredItems.count) item\(viewModel.filteredItems.count == 1 ? "" : "s")")
+                    .font(.vaultBadge)
+                    // `.tertiary` on this size failed contrast; secondary is legible and still quiet.
+                    .foregroundStyle(.secondary)
+
+                // The order actually in effect, which is not always the one chosen: Recent
+                // sorts itself.
+                if viewModel.effectiveSortOrder != .title {
+                    Text("· \(viewModel.effectiveSortOrder.title.lowercased())")
+                        .font(.vaultBadge)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                if viewModel.outdatedLinkedFileCount > 0 {
+                    Label("\(viewModel.outdatedLinkedFileCount)", systemImage: "arrow.down.doc")
+                        .font(.vaultBadge)
+                        .foregroundStyle(.orange)
+                        .help("\(viewModel.outdatedLinkedFileCount) linked .env \(viewModel.outdatedLinkedFileCount == 1 ? "file needs" : "files need") attention")
+                        .accessibilityIdentifier("outdated-links-badge")
+                }
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        .padding(.horizontal, VaultSpacing.m)
+        .padding(.top, VaultSpacing.s)
+        .padding(.bottom, VaultSpacing.s)
+    }
+
+    /// A soft wash of the item's workspace colour, so a selected row still reads as belonging
+    /// to that workspace and anything drawn on top of it stays legible.
+    @ViewBuilder
+    private func rowBackground(for item: SecretItemEntity) -> some View {
+        let isSelected = viewModel.isSelected(item)
+        let tint = item.workspace.map { Color(hex: $0.colorHex) } ?? Color.accentColor
+
+        if isSelected {
+            RoundedRectangle(cornerRadius: VaultRadius.control - 1, style: .continuous)
+                .fill(tint.opacity(0.16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: VaultRadius.control - 1, style: .continuous)
+                        .strokeBorder(tint.opacity(0.35), lineWidth: 1)
+                )
+                .padding(.horizontal, 2)
+        } else {
+            Color.clear
+        }
+    }
+
+    /// Filters that are on but have no visible control of their own.
+    ///
+    /// A type picked in the sidebar stays on when you move to another workspace or section,
+    /// so the list could look mysteriously short — the header named the destination and said
+    /// nothing about the filter narrowing it.
+    private var activeFilters: some View {
+        HStack(spacing: VaultSpacing.xs) {
+            if let type = viewModel.selectedType {
+                filterChip(title: type.title, systemImage: type.systemImage) {
+                    viewModel.setSelectedType(nil)
+                }
+                .accessibilityIdentifier("active-filter-type")
+            }
+
+            Spacer(minLength: 0)
+
+            Button("Clear") { viewModel.clearFilters() }
+                .buttonStyle(.plain)
+                .font(.vaultBadge)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("active-filter-clear")
+        }
+    }
+
+    private func filterChip(title: String, systemImage: String, onRemove: @escaping () -> Void) -> some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Image(systemName: systemImage)
+                .font(.caption2)
+            Text(title)
+                .font(.vaultBadge)
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+        }
+        // Primary text on a tinted capsule: the brand yellow is far too light to be readable
+        // as text on a near-white background.
+        .foregroundStyle(.primary)
+        .padding(.horizontal, VaultSpacing.s)
+        .padding(.vertical, 3)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.accentColor.opacity(0.22))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Filter: \(title). Activate to remove.")
     }
 
     private var searchField: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: VaultSpacing.xs) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.tertiary)
-                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .font(.caption)
             TextField("Search", text: $viewModel.searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .focused($isSearchFocused)
+                .font(.callout)
+                .focused($focusedArea, equals: .search)
                 .accessibilityIdentifier("item-list-search")
             if !viewModel.searchText.isEmpty {
                 Button {
                     viewModel.searchText = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, VaultSpacing.s)
+        .padding(.vertical, VaultSpacing.xs + 1)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: VaultRadius.control, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
     }
@@ -568,78 +740,26 @@ private struct ItemListView: View {
 private struct ItemRow: View {
     @Bindable var viewModel: VaultViewModel
     let item: SecretItemEntity
+    let onActivateList: () -> Void
 
-    private var isSelected: Bool {
-        viewModel.selectedItemID == item.id || viewModel.multiSelectedIDs.contains(item.id)
-    }
-    private var isMultiSelected: Bool { viewModel.multiSelectedIDs.contains(item.id) }
-    private var selectionColor: Color {
-        if let workspace = item.workspace {
-            return Color(hex: workspace.colorHex)
-        }
-        return .accentColor
+    @State private var isHovering = false
+    @State private var didCopy = false
+
+    /// The field a quick-copy should reach for: the password, or failing that the first
+    /// sensitive value.
+    private var quickCopyField: FieldResolvedValue? {
+        viewModel.primaryCopyField(for: item)
     }
 
     var body: some View {
-        Button(action: handleSelection) {
-            HStack(spacing: 8) {
-                if viewModel.isMultiSelecting {
-                    Image(systemName: isMultiSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 14))
-                        .foregroundStyle(isMultiSelected ? selectionColor : .secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(alignment: .center, spacing: 4) {
-                        Text(item.title)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(isSelected ? selectionColor : .primary)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        if item.isFavorite {
-                            Image(systemName: "star.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.yellow)
-                        }
-                    }
-
-                    HStack(spacing: 6) {
-                        Label(item.type.title, systemImage: item.type.systemImage)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-
-                        if let workspace = item.workspace {
-                            HStack(spacing: 3) {
-                                Image(systemName: workspace.icon)
-                                    .font(.system(size: 9))
-                                Text(workspace.name)
-                                    .font(.system(size: 10))
-                            }
-                            .foregroundStyle(Color(hex: workspace.colorHex))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(Color(hex: workspace.colorHex).opacity(0.12))
-                            )
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+        Button(action: handleClick) {
+            rowContent
         }
         .buttonStyle(.plain)
-        .listRowBackground(
-            isSelected
-                ? RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(selectionColor.opacity(0.12))
-                : nil
-        )
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("item-row-\(uiIdentifierSlug(item.title))")
         .contextMenu {
-            if viewModel.isMultiSelecting {
+            if viewModel.multiSelectedIDs.count > 1 && viewModel.multiSelectedIDs.contains(item.id) {
                 multiSelectionContextMenu
             } else {
                 singleItemContextMenu
@@ -647,13 +767,87 @@ private struct ItemRow: View {
         }
     }
 
-    private func handleSelection() {
-        if NSEvent.modifierFlags.contains(.command) {
-            viewModel.toggleMultiSelect(item)
-        } else if viewModel.isMultiSelecting {
+    /// Plain click selects, ⌘ toggles, ⇧ extends — the modifiers a Mac list is expected to
+    /// honour, handled here because the row owns its own selection.
+    private func handleClick() {
+        onActivateList()
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.shift) {
+            viewModel.extendSelection(to: item)
+        } else if flags.contains(.command) {
             viewModel.toggleMultiSelect(item)
         } else {
             viewModel.select(item)
+        }
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: VaultSpacing.s) {
+            VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                HStack(alignment: .center, spacing: VaultSpacing.xs) {
+                    Text(item.title)
+                        .font(.vaultRowTitle)
+                        .lineLimit(1)
+
+                    if item.isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.yellow)
+                            .accessibilityLabel("Favourite")
+                    }
+
+                    if item.linkedFile != nil {
+                        Image(systemName: viewModel.itemsWithOutdatedLinks.contains(item.id)
+                              ? "arrow.down.doc.fill"
+                              : "link")
+                            .font(.system(size: 9))
+                            .foregroundStyle(viewModel.itemsWithOutdatedLinks.contains(item.id) ? .orange : .secondary)
+                            .accessibilityLabel(viewModel.itemsWithOutdatedLinks.contains(item.id)
+                                                ? "Linked file changed"
+                                                : "Linked to a file")
+                    }
+
+                    Spacer(minLength: VaultSpacing.xs)
+                }
+
+                HStack(spacing: VaultSpacing.xs) {
+                    Label(item.type.title, systemImage: item.type.systemImage)
+                        .font(.vaultRowSubtitle)
+                        .foregroundStyle(.secondary)
+                        .labelStyle(.titleAndIcon)
+
+                    if let workspace = item.workspace {
+                        VaultChip(title: workspace.name, systemImage: workspace.icon, color: Color(hex: workspace.colorHex))
+                    }
+                }
+            }
+
+            // Quick copy without leaving the list. Copying the password used to mean
+            // select → move to the detail pane → hover → click.
+            if let quickCopyField, isHovering || didCopy {
+                Button {
+                    viewModel.copyField(quickCopyField)
+                    flashCopied()
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(VaultIconButtonStyle(isActive: didCopy))
+                .help("Copy \(quickCopyField.label)")
+                .accessibilityLabel("Copy \(quickCopyField.label) of \(item.title)")
+                .accessibilityIdentifier("item-row-quickcopy-\(uiIdentifierSlug(item.title))")
+            }
+        }
+        .padding(.vertical, VaultSpacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+
+    private func flashCopied() {
+        didCopy = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.4))
+            didCopy = false
         }
     }
 
@@ -681,6 +875,10 @@ private struct ItemRow: View {
             }
         }
         Divider()
+        Button("View History…", systemImage: "clock.arrow.circlepath") {
+            viewModel.select(item)
+            viewModel.activeSheet = .itemHistory(item.id)
+        }
         Button("Duplicate", systemImage: "plus.square.on.square") {
             viewModel.duplicate(item)
         }
@@ -727,6 +925,128 @@ private struct ItemRow: View {
         Button("Delete \(count) Items…", systemImage: "trash", role: .destructive) {
             viewModel.requestDeletionOfMultiSelection()
         }
+    }
+}
+
+// MARK: - List keyboard handling
+
+/// Bare ↑ / ↓ / Escape for the item list.
+///
+/// SwiftUI's `onKeyPress` only fires for a focused view, and the list deliberately no longer
+/// owns an AppKit selection — that is what was painting a solid accent block over every
+/// selected row. A local monitor gives the keys back without that, and without the menu-level
+/// key equivalents that would steal arrows and Escape from every text field in the app.
+private struct ItemListKeyboardShortcuts: ViewModifier {
+    /// Read at event time rather than captured, so the monitor can be installed once and
+    /// still respect state that changes while it is running.
+    let isEnabled: () -> Bool
+    let onMove: (Int) -> Void
+    let onEscape: () -> Bool
+
+    @State private var monitor: Any?
+
+    private enum Key {
+        static let upArrow: UInt16 = 126
+        static let downArrow: UInt16 = 125
+        static let escape: UInt16 = 53
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { install() }
+            .onDisappear { remove() }
+    }
+
+    private func install() {
+        remove()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard isEnabled(), Self.isAddressedToTheList(event) else { return event }
+            switch event.keyCode {
+            case Key.upArrow:
+                onMove(-1)
+                return nil
+            case Key.downArrow:
+                onMove(1)
+                return nil
+            case Key.escape:
+                return onEscape() ? nil : event
+            default:
+                return event
+            }
+        }
+    }
+
+    private func remove() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    /// True only for a key press nothing else is entitled to.
+    private static func isAddressedToTheList(_ event: NSEvent) -> Bool {
+        // Only the chord modifiers disqualify an event. Testing the whole
+        // `deviceIndependentFlagsMask` looked equivalent but was not: macOS sets `.function`
+        // and `.numericPad` on every arrow key, so that check rejected all of them and the
+        // arrows never reached the list.
+        let chordModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        guard event.modifierFlags.intersection(chordModifiers).isEmpty else { return false }
+        guard let window = event.window, window.attachedSheet == nil else { return false }
+        // Typing anywhere keeps its own arrow and Escape behaviour. A focused `TextField`
+        // reports its field editor, which is an `NSTextView`.
+        if window.firstResponder is NSTextView { return false }
+        return true
+    }
+}
+
+private extension View {
+    func itemListKeyboardShortcuts(
+        isEnabled: @escaping () -> Bool,
+        onMove: @escaping (Int) -> Void,
+        onEscape: @escaping () -> Bool
+    ) -> some View {
+        modifier(ItemListKeyboardShortcuts(isEnabled: isEnabled, onMove: onMove, onEscape: onEscape))
+    }
+}
+
+// MARK: - Status footer
+
+/// Transient confirmation strip under the list.
+///
+/// Several actions move their result out of view — archiving from inside a workspace,
+/// restoring a backup, merging — and without this they looked like they had done nothing.
+private struct StatusFooter: View {
+    let message: String
+    @Bindable var viewModel: VaultViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: VaultSpacing.s) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .accessibilityHidden(true)
+
+                Text(message)
+                    .font(.vaultRowSubtitle)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
+                Spacer(minLength: VaultSpacing.s)
+
+                if let undoLabel = viewModel.undoActionLabel {
+                    Button("Undo") { viewModel.undoLastDestructiveAction() }
+                        .buttonStyle(.link)
+                        .font(.vaultRowSubtitle)
+                        .help("Undo \(undoLabel.lowercased()) (⌘Z)")
+                        .accessibilityIdentifier("status-undo")
+                }
+            }
+            .padding(.horizontal, VaultSpacing.m)
+            .padding(.vertical, VaultSpacing.s)
+            .background(.bar)
+        }
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -825,52 +1145,54 @@ private struct ItemDetailView: View {
         NavigationStack {
             Group {
                 if let item = viewModel.selectedItem {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 20) {
-                            GroupedSheetSection(title: "") {
-                                detailHero(for: item)
-                            }
+                    VStack(spacing: 0) {
+                        // Edge to edge and pinned above the scroll view, rather than a card
+                        // floating inside it: it is the identity of what you are looking at,
+                        // not the first row of its contents.
+                        ItemDetailHeader(viewModel: viewModel, item: item)
+
+                        ScrollView {
+                        VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                            LinkedFileSection(viewModel: viewModel, item: item)
 
                             if !viewModel.visibleSelectedFields.isEmpty {
-                                GroupedSheetSection(title: "Fields") {
-                                    fieldsSectionContent
+                                VaultSection("Fields", systemImage: "list.bullet") {
+                                    fieldsSectionContent(for: item)
                                 }
                             }
 
-                            GroupedSheetSection(title: "Details") {
+                            VaultSection("Details", systemImage: "info.circle") {
                                 metadataRows(for: item)
                             }
 
                             if !item.changeHistory.isEmpty {
-                                GroupedSheetSection(title: "History") {
+                                VaultSection("History", systemImage: "clock.arrow.circlepath") {
+                                    Button("Show full history…") {
+                                        viewModel.activeSheet = .itemHistory(item.id)
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(.vaultFootnote)
+                                    .accessibilityIdentifier("detail-show-history")
+                                } content: {
                                     historyRows(for: item)
                                 }
                             }
 
                             if let notes = viewModel.selectedNotes {
-                                GroupedSheetSection(title: "Notes") {
-                                    SheetLabeledField(title: "Notes") {
+                                VaultSection("Notes", systemImage: "note.text") {
+                                    VaultValueBox {
                                         Text(notes)
                                             .textSelection(.enabled)
                                             .font(.body)
-                                            .foregroundStyle(.primary)
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                             .multilineTextAlignment(.leading)
-                                            .padding(8)
-                                            .background(
-                                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                                    .overlay(
-                                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                            .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
-                                                    )
-                                            )
                                     }
                                 }
                             }
                         }
-                        .padding(20)
+                        .padding(VaultSpacing.xl)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .accessibilityIdentifier("detail-item-\(uiIdentifierSlug(item.title))")
@@ -913,6 +1235,14 @@ private struct ItemDetailView: View {
                         .accessibilityIdentifier("toolbar-detail-copy")
 
                         Menu {
+                            Button("View History…", systemImage: "clock.arrow.circlepath") {
+                                viewModel.activeSheet = .itemHistory(item.id)
+                            }
+                            .keyboardShortcut("y", modifiers: [.command])
+                            .accessibilityIdentifier("detail-action-history")
+
+                            Divider()
+
                             Button("Duplicate", systemImage: "plus.square.on.square") {
                                 viewModel.duplicateSelectedItem()
                             }
@@ -943,84 +1273,6 @@ private struct ItemDetailView: View {
         }
     }
 
-    // MARK: Hero
-
-    private func detailHero(for item: SecretItemEntity) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 14) {
-                let accent = item.workspace.map { Color(hex: $0.colorHex) } ?? Color.accentColor
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(accent.opacity(0.15))
-                    .frame(width: 46, height: 46)
-                    .overlay(
-                        Image(systemName: item.type.systemImage)
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(accent)
-                    )
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityIdentifier("detail-item-title")
-                    Text(item.type.title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Button {
-                    viewModel.toggleFavoriteForSelectedItem()
-                } label: {
-                    Image(systemName: item.isFavorite ? "star.fill" : "star")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(item.isFavorite ? .yellow : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
-                .accessibilityIdentifier("detail-favorite-toggle")
-            }
-            .padding(.vertical, 2)
-
-            heroPills(for: item)
-        }
-    }
-
-    private func heroPills(for item: SecretItemEntity) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                if let workspace = item.workspace {
-                    pillChip(workspace.name, systemImage: workspace.icon, color: Color(hex: workspace.colorHex))
-                }
-                pillChip(item.environmentValue.title, systemImage: "circle.hexagongrid")
-                ForEach(item.tags, id: \.self) { tag in
-                    pillChip("#\(tag)", systemImage: "tag")
-                }
-            }
-            .padding(.vertical, 1)
-        }
-    }
-
-    private func pillChip(_ title: String, systemImage: String, color: Color = .secondary) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.weight(.medium))
-            .labelStyle(.titleAndIcon)
-            .foregroundStyle(color)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(color.opacity(0.12))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(color.opacity(0.18), lineWidth: 0.5)
-            )
-    }
-
     // MARK: Metadata
 
     /// createdAt / updatedAt / lastAccessedAt were tracked from the start but never shown.
@@ -1029,10 +1281,11 @@ private struct ItemDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             metadataRow("Created", value: Self.absoluteFormatter.string(from: item.createdAt))
             metadataRow("Last modified", value: Self.relative(item.updatedAt))
-            metadataRow(
-                "Last used",
-                value: item.lastAccessedAt.map(Self.relative) ?? "Never"
-            )
+            if let lastAccessedAt = item.lastAccessedAt {
+                metadataRow("Last used", value: Self.relative(lastAccessedAt))
+            } else {
+                metadataRow("Last used", value: "Never")
+            }
             if item.isArchived {
                 metadataRow("Status", value: "Archived")
             }
@@ -1121,8 +1374,8 @@ private struct ItemDetailView: View {
 
     // MARK: Fields
 
-    private var fieldsSectionContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private func fieldsSectionContent(for item: SecretItemEntity) -> some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.l) {
             ForEach(viewModel.visibleSelectedFields) { field in
                 FieldRow(
                     field: field,
@@ -1132,7 +1385,8 @@ private struct ItemDetailView: View {
                         viewModel.copyField(field)
                         flashCopiedField(field.id)
                     },
-                    onOpenURL: { viewModel.openFieldURL(field) }
+                    onOpenURL: { viewModel.openFieldURL(field) },
+                    onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) }
                 )
 
                 if field.id != viewModel.visibleSelectedFields.last?.id {
@@ -1153,6 +1407,175 @@ private struct ItemDetailView: View {
     }
 }
 
+// MARK: - Linked file
+
+/// The `.env` an item mirrors, and the one-click sync in both directions.
+///
+/// The workflow this replaces was: open Finder, find the file, open it, select all, copy,
+/// come back, edit the item, paste, save — every time the file changed. Nothing polls and
+/// nothing writes on its own; the item just knows where it came from.
+private struct LinkedFileSection: View {
+    @Bindable var viewModel: VaultViewModel
+    let item: SecretItemEntity
+
+    @State private var status: LinkedFileStatus = .unlinked
+    @State private var isConfirmingWrite = false
+
+    private var supportsLinking: Bool {
+        item.type == .envGroup
+    }
+
+    var body: some View {
+        Group {
+            if let link = item.linkedFile {
+                linkedContent(link)
+            } else if supportsLinking {
+                unlinkedPrompt
+            }
+        }
+        .task(id: item.id) { await refresh() }
+        .onChange(of: viewModel.itemsWithOutdatedLinks) { _, _ in Task { await refresh() } }
+        .onChange(of: viewModel.linkedFileStatuses[item.id]) { _, newValue in
+            if let newValue { status = newValue }
+        }
+    }
+
+    // MARK: Linked
+
+    private func linkedContent(_ link: LinkedFileReference) -> some View {
+        VaultSection("Linked file", systemImage: "link", tint: tint) {
+            Menu {
+                Button("Choose a different file…") {
+                    viewModel.chooseLinkedFile(for: item, parsedIntoFields: link.parsedIntoFields)
+                }
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.selectFile(link.displayPath, inFileViewerRootedAtPath: "")
+                }
+                Divider()
+                Button("Remove link", role: .destructive) {
+                    viewModel.unlinkFile(from: item)
+                    Task { await refresh() }
+                }
+            } label: {
+                Label(link.abbreviatedPath, systemImage: "doc.text")
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+            .menuStyle(.borderlessButton)
+            .accessibilityIdentifier("linked-file-menu")
+
+            statusRow(link)
+
+            HStack(spacing: VaultSpacing.s) {
+                Button {
+                    Task {
+                        _ = await viewModel.updateItemFromLinkedFile(item)
+                        await refresh()
+                    }
+                } label: {
+                    Label("Update from file", systemImage: "arrow.down.doc")
+                }
+                .disabled(status == .unavailable || status == .upToDate)
+                .accessibilityIdentifier("linked-file-pull")
+
+                Button {
+                    if status == .diverged || status == .fileChanged || status == .needsInitialSync {
+                        isConfirmingWrite = true
+                    } else {
+                        write()
+                    }
+                } label: {
+                    Label("Write to file", systemImage: "arrow.up.doc")
+                }
+                .disabled(status == .unavailable || status == .upToDate)
+                .accessibilityIdentifier("linked-file-push")
+
+                Spacer(minLength: 0)
+            }
+        }
+        .confirmationDialog(
+            "Overwrite \(link.fileName)?",
+            isPresented: $isConfirmingWrite,
+            titleVisibility: .visible
+        ) {
+            Button("Overwrite File", role: .destructive) { write(allowingFileChanges: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("That file has changed since the last sync. Writing replaces its contents with what this item holds.")
+        }
+    }
+
+    @ViewBuilder
+    private func statusRow(_ link: LinkedFileReference) -> some View {
+        switch status {
+        case .unlinked:
+            EmptyView()
+        case .upToDate:
+            VaultNote(
+                text: link.syncedAt.map { "In sync as of \(Self.relative($0))." } ?? "In sync.",
+                tone: .success
+            )
+        case .needsInitialSync:
+            VaultNote(text: "The file and this item differ. Choose Update to keep the file, or Write to replace it.", tone: .warning)
+        case .fileChanged:
+            VaultNote(text: "The file on disk has changed. Update to pull the new contents in.", tone: .warning)
+        case .vaultChanged:
+            VaultNote(text: "This item has changed since the last sync. Write to push it back to the file.", tone: .warning)
+        case .diverged:
+            VaultNote(text: "Both the file and this item changed since the last sync. Choose which side wins.", tone: .warning)
+        case .unavailable:
+            VaultNote(
+                text: "The file can't be reached — it may have been moved, renamed or deleted. Choose it again from the menu above.",
+                tone: .danger
+            )
+        }
+    }
+
+    private var tint: Color {
+        switch status {
+        case .upToDate: .green
+        case .unavailable: .red
+        case .needsInitialSync, .fileChanged, .vaultChanged, .diverged: .orange
+        // Sits next to green / orange / red as a status glyph, so it needs the readable
+        // shade rather than the bright fill yellow.
+        case .unlinked: .vaultAccentStrong
+        }
+    }
+
+    // MARK: Unlinked
+
+    private var unlinkedPrompt: some View {
+        VaultSection("Linked file", systemImage: "link") {
+            VaultNote(text: "Link this item to the .env it mirrors, and you can pull in changes with one click instead of copying and pasting.")
+            Button {
+                viewModel.chooseLinkedFile(for: item, parsedIntoFields: true)
+            } label: {
+                Label("Link a .env file…", systemImage: "link.badge.plus")
+            }
+            .accessibilityIdentifier("linked-file-attach")
+        }
+    }
+
+    // MARK: Helpers
+
+    private func write(allowingFileChanges: Bool = false) {
+        Task {
+            _ = await viewModel.writeLinkedFile(from: item, allowingFileChanges: allowingFileChanges)
+            await refresh()
+        }
+    }
+
+    private func refresh() async {
+        status = await viewModel.linkedFileStatus(for: item)
+    }
+
+    private static func relative(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
 // MARK: - Field Row
 
 private struct FieldRow: View {
@@ -1161,114 +1584,173 @@ private struct FieldRow: View {
     let isCopied: Bool
     let onCopy: () -> Void
     let onOpenURL: () -> Void
+    var onShowHistory: (() -> Void)?
 
-    @State private var isHoveringSecret = false
+    /// Pinned reveal: stays shown after the pointer leaves.
+    ///
+    /// Hovering reveals on its own — that is the quick, mouse-driven way and it is what the
+    /// app has always done. The button exists because hover was the *only* way, which left
+    /// keyboard and VoiceOver users unable to read a stored secret at all.
+    @State private var isRevealPinned = false
+    @State private var isHoveringValue = false
+    @State private var didPushCursor = false
+
+    /// `isSensitive` governs history/search policy; `isMasked` is the explicit presentation
+    /// preference. Treat either as concealed so a malformed or legacy record cannot expose a
+    /// secret merely because those two flags drifted apart.
+    private var isConcealed: Bool { field.isSensitive || field.isMasked }
 
     private var isOpenableURL: Bool {
-        field.kind == .url && !field.isSensitive && FieldURLSupport.url(from: field.value) != nil
+        field.kind == .url && !isConcealed && FieldURLSupport.url(from: field.value) != nil
+    }
+
+    private var showsPlaintext: Bool {
+        guard isConcealed else { return true }
+        guard canRevealSecrets else { return false }
+        return isRevealPinned || isHoveringValue
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SheetLabeledField(title: field.label, titleAccessibilityIdentifier: "field-label-\(field.key)") {
-                Group {
-                    if field.isCopyable {
-                        Button(action: onCopy) {
-                            valueStack(showPlaintext: showsPlaintext)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("detail-field-value-\(field.key)")
-                        .accessibilityLabel(field.label)
-                        .accessibilityHint(accessibilityCopyHint)
-                    } else {
-                        valueStack(showPlaintext: showsPlaintext)
-                            .textSelection(.enabled)
-                    }
-                }
-                .onHover { hovering in
-                    if field.isSensitive, canRevealSecrets {
-                        isHoveringSecret = hovering
-                    }
-                    if field.isCopyable {
-                        if hovering {
-                            NSCursor.pointingHand.push()
-                        } else {
-                            NSCursor.pop()
-                        }
-                    }
-                }
-                .help(helpText)
-            }
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            header
+
+            valueBox
 
             if isOpenableURL {
                 Button(action: onOpenURL) {
                     Label("Open in browser", systemImage: "arrow.up.right.square")
-                        .font(.caption)
+                        .font(.vaultFootnote)
                 }
                 .buttonStyle(.link)
                 .accessibilityIdentifier("detail-field-open-\(field.key)")
             }
         }
         .accessibilityIdentifier("detail-field-\(field.key)")
-    }
-
-    private var showsPlaintext: Bool {
-        if !field.isSensitive { return true }
-        guard canRevealSecrets else { return false }
-        return isHoveringSecret
+        // A pinned reveal must not carry over to a value the owner has not asked to see.
+        .onChange(of: field.value) { _, _ in isRevealPinned = false }
+        .onChange(of: field.id) { _, _ in
+            isRevealPinned = false
+            isHoveringValue = false
+        }
+        .onDisappear {
+            // Scrolling a hovered row out of view would otherwise leave the pushed cursor
+            // behind, and the pointing hand would stick for the whole app.
+            if didPushCursor {
+                NSCursor.pop()
+                didPushCursor = false
+            }
+        }
     }
 
     private var helpText: String {
-        if field.isCopyable, field.isSensitive, canRevealSecrets {
-            return "Hover to show, click to copy"
+        switch (field.isCopyable, isConcealed && canRevealSecrets) {
+        case (true, true): "Hover to show, click to copy"
+        case (true, false): "Click to copy"
+        case (false, true): "Hover to show"
+        case (false, false): ""
         }
-        if field.isCopyable {
-            return "Click to copy"
-        }
-        if field.isSensitive, canRevealSecrets {
-            return "Hover to show"
-        }
-        return ""
     }
 
-    private var accessibilityCopyHint: String {
-        if field.isSensitive, canRevealSecrets {
-            return "Hover to show the value, then activate to copy to the clipboard"
-        }
-        return "Activate to copy to the clipboard"
-    }
+    private var header: some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Text(field.label)
+                .font(.vaultFieldLabel)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("field-label-\(field.key)")
 
-    @ViewBuilder
-    private func valueStack(showPlaintext: Bool) -> some View {
-        Text(displayText(showPlaintext: showPlaintext))
-            .font(.system(.body, design: .monospaced))
-            .foregroundStyle(.primary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .multilineTextAlignment(.leading)
-            .lineLimit(valueLineLimit)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(valueBorderColor, lineWidth: isCopied ? 2 : 0.5)
-                    )
-            )
-            .overlay {
-                if isCopied {
-                    copiedFeedbackBadge
-                        .allowsHitTesting(false)
-                        .transition(.scale(scale: 0.92).combined(with: .opacity))
-                }
+            if isConcealed {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityLabel("Sensitive")
             }
-            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: isCopied)
+
+            Spacer(minLength: VaultSpacing.s)
+
+            if isConcealed, canRevealSecrets {
+                Button {
+                    isRevealPinned.toggle()
+                } label: {
+                    Image(systemName: isRevealPinned ? "eye.slash" : "eye")
+                }
+                .buttonStyle(VaultIconButtonStyle(isActive: isRevealPinned))
+                .help(isRevealPinned ? "Hide value" : "Keep value shown")
+                .accessibilityLabel(isRevealPinned ? "Hide \(field.label)" : "Show \(field.label)")
+                .accessibilityIdentifier("detail-field-reveal-\(field.key)")
+            }
+
+            if let onShowHistory, !field.previousValues.isEmpty {
+                Button(action: onShowHistory) {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(VaultIconButtonStyle())
+                .help("\(field.previousValues.count) previous \(field.previousValues.count == 1 ? "value" : "values")")
+                .accessibilityLabel("Previous values for \(field.label)")
+                .accessibilityIdentifier("detail-field-history-\(field.key)")
+            }
+
+            if field.isCopyable {
+                Button(action: onCopy) {
+                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(VaultIconButtonStyle(isActive: isCopied))
+                .help("Copy \(field.label)")
+                .accessibilityLabel("Copy \(field.label)")
+                .accessibilityIdentifier("detail-field-copy-\(field.key)")
+            }
+        }
+    }
+
+    /// The value, as a button when it can be copied.
+    ///
+    /// It has to be a real `Button`, not a tap gesture on the box: a tap gesture layered over
+    /// selectable `Text` never fires, because the text view claims the click for selection.
+    /// That is exactly what broke click-to-copy — and selection is not wanted here anyway,
+    /// since clicking already copies.
+    @ViewBuilder
+    private var valueBox: some View {
+        if field.isCopyable {
+            Button(action: onCopy) {
+                valueSurface
+            }
+            .buttonStyle(.plain)
+            .onHover(perform: handleHover)
+            .help(helpText)
+            .accessibilityIdentifier("detail-field-value-\(field.key)")
+            .accessibilityLabel(field.label)
+            .accessibilityHint(accessibilityCopyHint)
+        } else {
+            valueSurface
+                .textSelection(.enabled)
+                .onHover(perform: handleHover)
+                .help(helpText)
+                .accessibilityIdentifier("detail-field-value-\(field.key)")
+        }
+    }
+
+    private var valueSurface: some View {
+        VaultValueBox(isHighlighted: isCopied) {
+            Text(displayText)
+                .font(.vaultValue)
+                .foregroundStyle(showsPlaintext ? .primary : .secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+                .lineLimit(valueLineLimit)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .contentShape(Rectangle())
+        .overlay {
+            if isCopied {
+                copiedFeedbackBadge
+                    .allowsHitTesting(false)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: isCopied)
     }
 
     private var copiedFeedbackBadge: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: VaultSpacing.xs) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.body.weight(.semibold))
                 .symbolRenderingMode(.hierarchical)
@@ -1276,20 +1758,37 @@ private struct FieldRow: View {
                 .font(.subheadline.weight(.semibold))
         }
         .foregroundStyle(.primary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.horizontal, VaultSpacing.m)
+        .padding(.vertical, VaultSpacing.s - 1)
         .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
                 .fill(.thickMaterial)
                 .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
         }
+        .accessibilityHidden(true)
     }
 
-    private var valueBorderColor: Color {
-        if isCopied {
-            return Color.accentColor.opacity(0.9)
+    /// Reveals on hover, and shows the pointing hand only while the value is actually
+    /// copyable. The pushed cursor is tracked so an unbalanced `pop` cannot leave the whole
+    /// app stuck with a pointing hand.
+    private func handleHover(_ hovering: Bool) {
+        if isConcealed, canRevealSecrets {
+            isHoveringValue = hovering
         }
-        return Color.primary.opacity(0.06)
+        guard field.isCopyable else { return }
+        if hovering, !didPushCursor {
+            NSCursor.pointingHand.push()
+            didPushCursor = true
+        } else if !hovering, didPushCursor {
+            NSCursor.pop()
+            didPushCursor = false
+        }
+    }
+
+    private var accessibilityCopyHint: String {
+        isConcealed && canRevealSecrets
+            ? "Hover to show the value, then activate to copy it"
+            : "Activate to copy to the clipboard"
     }
 
     private var valueLineLimit: Int {
@@ -1299,27 +1798,287 @@ private struct FieldRow: View {
         }
     }
 
-    /// Inserts zero-width spaces so long secrets / API keys wrap instead of overflowing when there are no real spaces.
-    private var needsSoftCharacterWrap: Bool {
-        field.kind == .secret || field.isSensitive
-    }
-
-    private func displayText(showPlaintext: Bool) -> String {
-        let raw = displayValue(showPlaintext: showPlaintext)
-        guard needsSoftCharacterWrap else { return raw }
+    private var displayText: String {
+        guard showsPlaintext else { return SecretMasking.mask }
+        let raw = TemplatePickerFieldDisplay.presentationValue(fieldKey: field.key, stored: field.value)
+        guard needsSoftWrap(raw) else { return raw }
         return Self.insertSoftBreakOpportunities(raw)
     }
 
-    private func displayValue(showPlaintext: Bool) -> String {
-        guard field.isSensitive, !showPlaintext else {
-            return TemplatePickerFieldDisplay.presentationValue(fieldKey: field.key, stored: field.value)
-        }
-        return String(repeating: "•", count: max(field.value.count, 8))
+    /// Only long unbroken runs need help wrapping.
+    ///
+    /// The previous version inserted a zero-width space between *every* character of *every*
+    /// sensitive value on every render — quadratic-ish work on long private keys, and VoiceOver
+    /// read the result one letter at a time.
+    private func needsSoftWrap(_ value: String) -> Bool {
+        guard value.count > 40 else { return false }
+        return !value.contains(where: { $0 == " " || $0.isNewline })
     }
 
+    /// Breaks every 24 characters rather than every 1.
     private static func insertSoftBreakOpportunities(_ string: String) -> String {
-        guard !string.isEmpty else { return string }
-        return string.map { String($0) }.joined(separator: "\u{200B}")
+        var result = ""
+        result.reserveCapacity(string.count + string.count / 24)
+        for (index, character) in string.enumerated() {
+            if index > 0, index % 24 == 0 { result.append("\u{200B}") }
+            result.append(character)
+        }
+        return result
+    }
+}
+
+// MARK: - Item detail header
+
+/// The banner at the top of the detail pane: where this item lives, what it is, and how to get
+/// back to everything like it.
+///
+/// Takes its colour from the workspace, so moving between items reads as moving between
+/// projects rather than between identical grey cards. The pixel grid is the same one the
+/// welcome and lock screens use, turned right down — enough to give the band a texture, not
+/// enough to compete with the title sitting on it.
+private struct ItemDetailHeader: View {
+    @Bindable var viewModel: VaultViewModel
+    let item: SecretItemEntity
+
+    private var accent: Color {
+        item.workspace.map { Color(hex: $0.colorHex) } ?? .vaultAccent
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: VaultSpacing.l) {
+                icon
+
+                VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                    breadcrumb
+
+                    Text(item.title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("detail-item-title")
+
+                    if !item.tags.isEmpty {
+                        tags
+                            .padding(.top, VaultSpacing.hair)
+                    }
+                }
+
+                favouriteButton
+            }
+            .padding(.horizontal, VaultSpacing.xl)
+            .padding(.vertical, VaultSpacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(banner)
+
+            Rectangle()
+                .fill(VaultChrome.hairline)
+                .frame(height: 1)
+        }
+    }
+
+    // MARK: Bands
+
+    private var banner: some View {
+        ZStack {
+            LinearGradient(
+                colors: [accent.opacity(0.20), accent.opacity(0.04)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VaultPixelGrid(
+                tint: accent,
+                spacing: 11,
+                dot: 1.5,
+                maxAlpha: 0.30,
+                baseAlpha: 0.03,
+                focus: UnitPoint(x: 0.12, y: 0.35),
+                framesPerSecond: 8
+            )
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Solid workspace colour with a lit top edge, not a 20% wash of it.
+    ///
+    /// The washed version read as a disabled control on a tinted band — the one element that
+    /// should carry the workspace's colour was the palest thing on screen. The glyph picks
+    /// black or white from the colour's own luminance so it stays legible whichever colour the
+    /// workspace was given.
+    private var icon: some View {
+        let shape = RoundedRectangle(cornerRadius: VaultRadius.hero, style: .continuous)
+
+        return shape
+            .fill(accent)
+            .overlay(
+                LinearGradient(
+                    colors: [.white.opacity(0.32), .white.opacity(0.04), .black.opacity(0.14)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(shape)
+            )
+            .overlay(shape.strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+            .frame(width: 50, height: 50)
+            .shadow(color: accent.opacity(0.40), radius: 9, y: 4)
+            .overlay(
+                Image(systemName: item.type.systemImage)
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(accent.vaultContrastingGlyph)
+                    .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
+            )
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Rows
+
+    /// Where the item sits, above its name — workspace, then type, then environment.
+    ///
+    /// Every part is a link back to the list it came from, so the header doubles as a way of
+    /// asking "what else is in here?". Wraps rather than scrolls: a long workspace name used
+    /// to leave the next chip sliced in half at the edge of the pane.
+    private var breadcrumb: some View {
+        VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.xs) {
+            if let workspace = item.workspace {
+                DetailHeaderLink(
+                    title: workspace.name,
+                    systemImage: workspace.icon,
+                    color: Color(hex: workspace.colorHex),
+                    hint: "Show everything in \(workspace.name)"
+                ) {
+                    viewModel.selectDestination(.workspace(workspace.id))
+                    viewModel.setSelectedType(nil)
+                }
+            }
+
+            DetailHeaderLink(
+                title: item.type.title,
+                systemImage: item.type.systemImage,
+                hint: "Show every \(item.type.title)"
+            ) {
+                viewModel.selectDestination(.library(.allItems))
+                viewModel.setSelectedType(item.type)
+            }
+
+            DetailHeaderLink(
+                title: item.environmentValue.title,
+                systemImage: "circle.hexagongrid",
+                hint: "Show everything in \(item.environmentValue.title)"
+            ) {
+                viewModel.selectDestination(.environment(item.environmentValue.title))
+                viewModel.setSelectedType(nil)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Plain `#tag` text under the name, not chips: they are the least important line here and
+    /// a row of capsules gave them the same weight as the workspace.
+    private var tags: some View {
+        VaultFlowLayout(spacing: VaultSpacing.m, lineSpacing: VaultSpacing.xs) {
+            ForEach(item.tags, id: \.self) { tag in
+                DetailHeaderTagLink(tag: tag) {
+                    viewModel.selectDestination(.tag(tag))
+                    viewModel.setSelectedType(nil)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var favouriteButton: some View {
+        Button { viewModel.toggleFavoriteForSelectedItem() } label: {
+            Image(systemName: item.isFavorite ? "star.fill" : "star")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(item.isFavorite ? AnyShapeStyle(Color.vaultAccentStrong) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(.plain)
+        .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
+        .accessibilityIdentifier("detail-favorite-toggle")
+    }
+}
+
+/// One clickable part of the breadcrumb.
+private struct DetailHeaderLink: View {
+    let title: String
+    let systemImage: String
+    var color: Color = .secondary
+    let hint: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: VaultSpacing.xs) {
+                Image(systemName: systemImage)
+                    .font(.caption2)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.caption.weight(.medium))
+            }
+            .foregroundStyle(color == .secondary ? Color.secondary : color)
+            .opacity(isHovering ? 1 : 0.85)
+            .underline(isHovering)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(hint)
+        .accessibilityLabel("\(title). \(hint)")
+    }
+}
+
+private struct DetailHeaderTagLink: View {
+    let tag: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("#\(tag)")
+                .font(.caption)
+                .foregroundStyle(isHovering ? AnyShapeStyle(Color.primary) : AnyShapeStyle(.tertiary))
+                .underline(isHovering)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help("Show everything tagged #\(tag)")
+        .accessibilityLabel("Tag \(tag). Show everything tagged \(tag)")
+    }
+}
+
+// MARK: - Toolbar
+
+/// Takes the split view's automatic sidebar toggle out of the toolbar while the vault is
+/// locked, leaving the title bar — and so the window buttons — in place.
+///
+/// A toolbar with nothing in it collapses to a short title bar, which moves the traffic lights
+/// up and in by about ten points; the empty item holds the toolbar at its normal height so the
+/// buttons stay exactly where they are in the rest of the app.
+private struct HiddenSidebarToggle: ViewModifier {
+    let isHidden: Bool
+
+    private static let toolbarControlHeight: CGFloat = 28
+
+    func body(content: Content) -> some View {
+        if isHidden {
+            content
+                .toolbar(removing: .sidebarToggle)
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        Color.clear
+                            .frame(width: 1, height: Self.toolbarControlHeight)
+                            .accessibilityHidden(true)
+                    }
+                }
+        } else {
+            content
+        }
     }
 }
 
@@ -1330,131 +2089,233 @@ private struct LockedVaultOverlay: View {
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
+            // Opaque, not a blur: a locked vault should not show a frosted outline of the
+            // items behind it, and it is the screen the app is most often looked at on.
+            VaultHeroBackground()
                 .ignoresSafeArea()
 
             LockedVaultView(
                 sessionManager: viewModel.container.sessionManager,
-                biometricsEnabled: viewModel.container.settings.biometricsEnabled
+                settings: viewModel.container.settings
             )
-                .frame(maxWidth: 380)
-                .padding(32)
+            .vaultHeroContent()
         }
     }
 }
 
 private struct LockedVaultView: View {
     @Bindable var sessionManager: VaultSessionManager
-    var biometricsEnabled: Bool
+    @Bindable var settings: AppSettingsStore
+
     @State private var password = ""
+    @State private var isConfirmingReset = false
+    /// Set once per locked session so the automatic prompt does not re-fire in a loop when
+    /// the Touch ID sheet itself hands focus back to the window.
+    @State private var didAttemptAutomaticUnlock = false
+    @FocusState private var isPasswordFocused: Bool
+
+    @Environment(\.controlActiveState) private var controlActiveState
+
+    private var isSetup: Bool { sessionManager.lockState == .setupRequired }
 
     private var showTouchIDBadge: Bool {
         sessionManager.lockState == .locked
             && sessionManager.isBiometricAvailable
-            && biometricsEnabled
+            && settings.biometricsEnabled
     }
 
     var body: some View {
-        VStack(spacing: 20) {
-            appLockHeaderImage
-                .frame(width: 100, height: 100)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-                .overlay(alignment: .bottomTrailing) {
-                    if showTouchIDBadge {
-                        Image("touch_id")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 30, height: 30)
-                            .padding(5)
-                            .background(
-                                Circle()
-                                    .fill(Color.white)
-                            )
-                            .overlay(
-                                Circle()
-                                    .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
-                            )
-                            .offset(x: 4, y: 4)
-                    }
-                }
+        VStack(spacing: 0) {
+            Spacer(minLength: VaultSpacing.xxl)
 
-            VStack(spacing: 6) {
-                Text(sessionManager.lockState == .setupRequired ? "Create Your Password" : "PassStore is Locked")
-                    .font(.title3.weight(.semibold))
-                Text(sessionManager.lockState == .setupRequired
-                     ? "Set a master password to protect your secrets."
-                     : "Enter your master password to unlock.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            VStack(spacing: VaultSpacing.xl) {
+                icon
+
+                VaultHeroWordmark(
+                    tagline: isSetup
+                        ? "Set a master password to protect your secrets."
+                        : "Unlock with Touch ID, or enter your master password."
+                )
+
+                VStack(spacing: VaultSpacing.m) {
+                    SecureField(
+                        "",
+                        text: $password,
+                        prompt: Text(isSetup ? "New master password" : "Master password")
+                    )
+                    .vaultHeroField(isFocused: isPasswordFocused)
+                    .frame(width: 300)
+                    .focused($isPasswordFocused)
+                    .disabled(sessionManager.isBusy)
+                    .onSubmit { submit() }
+                    .accessibilityLabel(isSetup ? "New master password" : "Master password")
+                    .accessibilityIdentifier("lock-password-field")
+
+                    actions
+
+                    // Fixed height so the spinner, an error and the strength bar all occupy
+                    // the same space. Swapping between them used to shove the buttons up and
+                    // down the screen mid-unlock.
+                    statusLine
+                        .frame(width: 300, height: Self.statusLineHeight, alignment: .top)
+                }
             }
+            .frame(maxWidth: 400)
 
-            VStack(spacing: 10) {
-                SecureField("Master Password", text: $password)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 280)
-                    .onSubmit(submit)
+            Spacer(minLength: VaultSpacing.xxl)
 
-                if let message = sessionManager.lastErrorMessage {
-                    Text(message)
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                }
-
-                HStack(spacing: 10) {
-                    if sessionManager.lockState == .setupRequired {
-                        Button("Create Password", action: submit)
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .keyboardShortcut(.defaultAction)
-                            .disabled(password.isEmpty)
-                    } else {
-                        Button("Unlock", action: submit)
-                            .buttonStyle(.bordered)
-                            .tint(.secondary)
-                            .controlSize(.large)
-                            .keyboardShortcut(.defaultAction)
-                            .disabled(password.isEmpty)
-                    }
-
-                    if sessionManager.lockState == .locked, sessionManager.isBiometricAvailable {
-                        Button("Use Biometrics") {
-                            Task { _ = await sessionManager.unlockWithBiometrics() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                    }
-                }
+            // Pinned to the bottom of the window, not tucked under the buttons: it is the
+            // escape hatch for a lost password, not a step in unlocking.
+            if !isSetup {
+                Button("Forgot your master password?") { isConfirmingReset = true }
+                    .buttonStyle(.plain)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.35))
+                    .padding(.bottom, VaultSpacing.l)
+                    .accessibilityIdentifier("lock-forgot-password")
             }
         }
-        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, VaultSpacing.xxl)
+        .onAppear {
+            focusOrAuthenticate()
+        }
+        // Coming back to PassStore from another app should raise the prompt again, which is
+        // the whole point of not having to reach for the mouse. Leaving is what re-arms it
+        // after a manual lock.
+        .onChange(of: controlActiveState) { _, newValue in
+            guard newValue != .inactive else {
+                sessionManager.allowAutomaticUnlockOnNextActivation()
+                didAttemptAutomaticUnlock = false
+                return
+            }
+            focusOrAuthenticate()
+        }
+        // Locking deliberately does *not* authenticate: it just puts the caret where the
+        // owner would type if they change their mind.
+        .onChange(of: sessionManager.lockState) { _, newValue in
+            guard newValue != .unlocked else { return }
+            isPasswordFocused = true
+        }
+        .sheet(isPresented: $isConfirmingReset) {
+            EraseVaultSheet(sessionManager: sessionManager) {
+                try sessionManager.resetVaultDestroyingAllData()
+                password = ""
+            }
+        }
+    }
+
+    // MARK: Pieces
+
+    private var icon: some View {
+        VaultHeroLogo(size: 96, badge: showTouchIDBadge ? AnyView(touchIDBadge) : nil)
+    }
+
+    private var touchIDBadge: some View {
+        Image("touch_id")
+            .resizable()
+            .scaledToFit()
+            .frame(width: 28, height: 28)
+            .padding(5)
+            .background(Circle().fill(Color.white))
+            .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
+            .offset(x: 4, y: 4)
+            .accessibilityHidden(true)
+    }
+
+    /// Reserved space under the buttons, tall enough for the tallest of the three states.
+    private static let statusLineHeight: CGFloat = 34
+
+    @ViewBuilder
+    private var statusLine: some View {
+        if sessionManager.isBusy {
+            HStack(spacing: VaultSpacing.s) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(isSetup ? "Creating your vault…" : "Unlocking…")
+                    .font(.vaultFootnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityIdentifier("lock-busy")
+        } else if let message = sessionManager.lastErrorMessage, !message.isEmpty {
+            Text(message)
+                .foregroundStyle(.red)
+                .font(.vaultFootnote)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("lock-error")
+        } else if isSetup {
+            PasswordStrengthBar(password: password)
+        } else {
+            Color.clear
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: VaultSpacing.m) {
+            // The default action and the visually prominent button are the same button now.
+            // They used to be different ones, so Return did not do what the UI implied.
+            Button(isSetup ? "Create Password" : "Unlock") { submit() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+                .disabled(password.isEmpty || sessionManager.isBusy)
+                .accessibilityIdentifier("lock-submit")
+
+            if sessionManager.lockState == .locked, sessionManager.isBiometricAvailable {
+                Button("Use Touch ID") {
+                    Task { await sessionManager.unlockWithBiometrics() }
+                }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .disabled(sessionManager.isBusy)
+                .accessibilityIdentifier("lock-biometrics")
+            }
+        }
+    }
+
+    // MARK: Behaviour
+
+    /// Raises Touch ID by itself when it can succeed, and otherwise puts the caret where the
+    /// owner is about to type. Previously the field never took focus, so every single unlock
+    /// started with a mouse click.
+    ///
+    /// `shouldOfferAutomaticUnlock` is false right after a lock the owner asked for, so
+    /// locking does not immediately offer to unlock again.
+    private func focusOrAuthenticate() {
+        guard sessionManager.lockState != .unlocked else { return }
+
+        if settings.unlocksWithBiometricsAutomatically,
+           !didAttemptAutomaticUnlock,
+           sessionManager.shouldOfferAutomaticUnlock {
+            didAttemptAutomaticUnlock = true
+            Task {
+                let unlocked = await sessionManager.unlockWithBiometrics()
+                if !unlocked { isPasswordFocused = true }
+            }
+            return
+        }
+
+        isPasswordFocused = true
     }
 
     private func submit() {
-        guard !password.isEmpty else { return }
-        if sessionManager.lockState == .setupRequired {
-            sessionManager.createVault(password: password)
-        } else {
-            _ = sessionManager.unlockWithPassword(password)
-        }
+        guard !password.isEmpty, !sessionManager.isBusy else { return }
+        let entered = password
         password = ""
+        Task {
+            if sessionManager.lockState == .setupRequired {
+                await sessionManager.createVault(password: entered)
+            } else {
+                await sessionManager.unlockWithPassword(entered)
+            }
+            if sessionManager.lockState != .unlocked {
+                isPasswordFocused = true
+            }
+        }
     }
 
-    @ViewBuilder
-    private var appLockHeaderImage: some View {
-        if let appIcon = NSImage(named: NSImage.applicationIconName) {
-            Image(nsImage: appIcon)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-        } else {
-            Image("icon")
-                .resizable()
-                .scaledToFit()
-        }
-    }
 }
 
 // MARK: - Preview
@@ -1464,6 +2325,20 @@ private struct LockedVaultView: View {
 }
 
 // MARK: - Utilities
+
+private extension View {
+    /// Layout for an AppKit-backed reorderable table hosted inside a SwiftUI sidebar `List`.
+    ///
+    /// This stack of insets and offsets used to be copy-pasted into all five sidebar
+    /// sections, drifting slightly in each. One place now owns the geometry.
+    func sidebarSectionRows(count: Int) -> some View {
+        frame(height: CGFloat(count) * ReorderableRows.rowHeight + 40)
+            .listRowInsets(EdgeInsets(top: -14, leading: -20, bottom: 0, trailing: -20))
+            .transformEffect(CGAffineTransform(translationX: 0, y: -10))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+    }
+}
 
 private func uiIdentifierSlug(_ value: String) -> String {
     value

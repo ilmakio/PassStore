@@ -47,7 +47,9 @@ struct SidebarRowAction {
 /// An AppKit-backed list with native drag-to-reorder (works from anywhere on the row, like Finder).
 struct ReorderableRows: NSViewRepresentable {
 
-    static let rowHeight: CGFloat = 21
+    /// Roughly a standard macOS sidebar row. Was 21pt, which crammed the rows together at a
+    /// density no other Mac app uses.
+    static let rowHeight: CGFloat = 26
     private static let pasteType = NSPasteboard.PasteboardType("app.passstore.sidebar-reorder")
 
     let items: [SidebarReorderItem]
@@ -302,13 +304,13 @@ private final class SidebarCell: NSView {
         addSubview(imageView)
 
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 13)
+        label.font = .preferredFont(forTextStyle: .body)
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)
 
         badgeLabel.translatesAutoresizingMaskIntoConstraints = false
-        badgeLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        badgeLabel.textColor = .tertiaryLabelColor
+        badgeLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        badgeLabel.textColor = .secondaryLabelColor
         badgeLabel.alignment = .right
         badgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         addSubview(badgeLabel)
@@ -319,12 +321,12 @@ private final class SidebarCell: NSView {
             bg.topAnchor.constraint(equalTo: topAnchor, constant: 1),
             bg.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
 
-            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
             imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: 15),
-            imageView.heightAnchor.constraint(equalToConstant: 15),
+            imageView.widthAnchor.constraint(equalToConstant: 17),
+            imageView.heightAnchor.constraint(equalToConstant: 17),
 
-            label.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 6),
+            label.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             badgeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6),
@@ -338,15 +340,18 @@ private final class SidebarCell: NSView {
     func configure(with item: SidebarReorderItem, isSelected: Bool, onPress: @escaping () -> Void) {
         self.onPress = onPress
         label.stringValue = item.title
-        label.textColor = isSelected ? item.tintColor : .secondaryLabelColor
-        label.font = .systemFont(ofSize: 11)
-        imageView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular, scale: .small)
+        // Matches a real macOS sidebar: full label colour at the standard sidebar size.
+        // 11pt in `secondaryLabelColor` made every row look disabled next to Finder or Mail,
+        // and it ignored the system text-size setting entirely.
+        label.textColor = isSelected ? item.tintColor : .labelColor
+        label.font = .preferredFont(forTextStyle: .body)
+        imageView.symbolConfiguration = NSImage.SymbolConfiguration(textStyle: .body, scale: .medium)
         imageView.image = NSImage(systemSymbolName: item.systemImage, accessibilityDescription: item.title)
-        imageView.contentTintColor = isSelected ? item.tintColor : .tertiaryLabelColor
+        imageView.contentTintColor = isSelected ? item.tintColor : .secondaryLabelColor
         badgeLabel.stringValue = item.badge ?? ""
         badgeLabel.isHidden = item.badge == nil
         bg.layer?.backgroundColor = isSelected
-            ? item.tintColor.withAlphaComponent(0.15).cgColor
+            ? item.tintColor.withAlphaComponent(0.18).cgColor
             : .clear
         setAccessibilityElement(true)
         setAccessibilityRole(.button)

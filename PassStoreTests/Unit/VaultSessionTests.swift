@@ -19,18 +19,18 @@ struct VaultSessionTests {
 
         #expect(session.lockState == .setupRequired)
 
-        session.createVault(password: "test-secret")
+        session.createVaultSynchronously(password: "test-secret")
 
         #expect(session.lockState == .unlocked)
         #expect(memoryStore.isUnlocked)
 
         session.lock()
         #expect(session.lockState == .locked)
-        #expect(session.unlockWithPassword("test-secret"))
+        #expect(session.unlockWithPasswordSynchronously("test-secret"))
         #expect(session.lockState == .unlocked)
     }
 
-    @Test func changingMasterPasswordRewrapsTheVaultAndKeepsDataReadable() throws {
+    @Test func changingMasterPasswordRewrapsTheVaultAndKeepsDataReadable() async throws {
         let defaults = UserDefaults(suiteName: "VaultPasswordChange-\(UUID().uuidString)")!
         let memoryStore = VaultMemoryStore()
         let vaultStore = InMemoryEncryptedVaultStore()
@@ -43,7 +43,7 @@ struct VaultSessionTests {
             memoryStore: memoryStore
         )
 
-        session.createVault(password: "original-password")
+        session.createVaultSynchronously(password: "original-password")
         let repository = SecretItemRepository(store: memoryStore)
         _ = try repository.saveItem(SecretItemDraft(
             title: "Survives Rotation",
@@ -59,13 +59,13 @@ struct VaultSessionTests {
             templateID: nil
         ))
 
-        try session.changeMasterPassword(current: "original-password", to: "a-brand-new-password")
+        try await session.changeMasterPassword(current: "original-password", to: "a-brand-new-password")
 
         session.lock()
         #expect(session.lockState == .locked)
 
         // New password unlocks the same data.
-        #expect(session.unlockWithPassword("a-brand-new-password"))
+        #expect(session.unlockWithPasswordSynchronously("a-brand-new-password"))
         let survived = memoryStore.items.contains { $0.title == "Survives Rotation" }
         #expect(survived)
         let restored = try repository.resolveFields(for: #require(memoryStore.items.first))
@@ -74,11 +74,11 @@ struct VaultSessionTests {
         // Old password is rejected. Asserted last on purpose: a failed attempt arms the
         // progressive brute-force delay, which would reject the next unlock for a second.
         session.lock()
-        #expect(!session.unlockWithPassword("original-password"))
+        #expect(!session.unlockWithPasswordSynchronously("original-password"))
         #expect(session.lockState == .locked)
     }
 
-    @Test func changingMasterPasswordRejectsWrongCurrentAndShortNewPassword() throws {
+    @Test func changingMasterPasswordRejectsWrongCurrentShortAndUnchangedPasswords() async throws {
         let defaults = UserDefaults(suiteName: "VaultPasswordChangeGuards-\(UUID().uuidString)")!
         let session = VaultSessionManager(
             defaults: defaults,
@@ -88,18 +88,24 @@ struct VaultSessionTests {
             keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: true),
             memoryStore: VaultMemoryStore()
         )
-        session.createVault(password: "original-password")
+        session.createVaultSynchronously(password: "original-password")
 
-        #expect(throws: VaultCryptoError.self) {
-            try session.changeMasterPassword(current: "wrong-password", to: "a-brand-new-password")
+        await #expect(throws: VaultCryptoError.self) {
+            try await session.changeMasterPassword(current: "wrong-password", to: "a-brand-new-password")
         }
-        #expect(throws: VaultCryptoError.self) {
-            try session.changeMasterPassword(current: "original-password", to: "short")
+        await #expect(throws: VaultCryptoError.self) {
+            try await session.changeMasterPassword(current: "original-password", to: "short")
+        }
+        await #expect(throws: VaultCryptoError.newPasswordMustDiffer) {
+            try await session.changeMasterPassword(
+                current: "original-password",
+                to: "original-password"
+            )
         }
 
         // Both rejections must leave the original password working.
         session.lock()
-        #expect(session.unlockWithPassword("original-password"))
+        #expect(session.unlockWithPasswordSynchronously("original-password"))
     }
 
     @Test func biometricUnlockUsesStoredVaultKey() async throws {
@@ -114,7 +120,7 @@ struct VaultSessionTests {
             memoryStore: memoryStore
         )
 
-        session.createVault(password: "test-secret")
+        session.createVaultSynchronously(password: "test-secret")
         session.lock()
 
         let unlocked = await session.unlockWithBiometrics()
@@ -134,7 +140,7 @@ struct VaultSessionTests {
             memoryStore: memoryStore
         )
 
-        session.createVault(password: "test-secret")
+        session.createVaultSynchronously(password: "test-secret")
 
         #expect(session.lockState == .unlocked)
         #expect(memoryStore.isUnlocked)
@@ -143,13 +149,13 @@ struct VaultSessionTests {
 
         session.lock()
 
-        #expect(session.unlockWithPassword("test-secret"))
+        #expect(session.unlockWithPasswordSynchronously("test-secret"))
         #expect(session.lockState == .unlocked)
         #expect(session.lastErrorMessage == nil)
     }
 }
 
-private final class FailingVaultKeyStore: VaultKeyStore {
+nonisolated private final class FailingVaultKeyStore: VaultKeyStore, @unchecked Sendable {
     var isBiometricHardwareAvailable = true
 
     func saveVaultKey(_ key: Data, requireBiometrics: Bool) throws {
