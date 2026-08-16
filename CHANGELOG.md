@@ -6,143 +6,114 @@ All notable changes to PassStore are documented here.
 
 ### Added
 
-- **Linked `.env` files.** An item now remembers the file it was imported from, automatically:
-  choosing or dropping a `.env` while creating an item links the two, with no second trip
-  through a file picker. When that file changes on disk, the item shows **Update from file** —
-  one click instead of find, open, copy, paste, save. **Write to file** pushes the other way.
-  PassStore checks linked files when its window comes to the front; nothing runs in the
-  background and nothing is written without you asking. If both sides changed, it says so and
-  lets you pick. Untick "Keep a link to this file" if you only want a one-off copy.
-- **File → Import .env File… (⇧⌘O)** creates the item and links it in a single step, skipping
-  the template picker for what is the commonest job in the app. Also in the command palette
-  and on the empty-vault screen.
-- **Previous values.** Rotating a secret now keeps the value it replaced, so you can look up
-  or restore the password an item had before. Up to 10 versions per field, inside the same
-  encrypted vault, revealed only on request. This is a real trade-off — an old secret stays
-  recoverable until you delete it — so it can be purged per item, purged across the whole
-  vault, or switched off entirely in Settings → Data.
-- **Automatic Touch ID.** The unlock prompt now appears by itself when PassStore launches and
-  when you switch back to it, so unlocking takes no clicks at all. Locking on purpose never
-  triggers it — that would undo the thing you just asked for — so the prompt only returns
-  once you have left the app and come back. Turn it off in Settings → General.
-- **Restore from a backup during setup.** The welcome screen now has an "I already have a
-  backup" path, instead of leaving a new arrival to find the import command in a menu.
-- **A way out of a forgotten master password.** The lock screen now offers to erase the vault
-  and start over. There is still no recovery — that is the design — but being permanently
-  stuck at a lock screen with no option but deleting files by hand was not a design.
-- **Undo (⌘Z)** for destructive vault actions: restoring a backup, purging history, restoring
-  an old value.
+- **Linked `.env` files.** When you import a `.env`, PassStore remembers where it came from.
+  If that file later changes on disk, the item offers **Update from file**; **Write to file**
+  sends your changes back out. Linked files are checked when you switch back to PassStore —
+  nothing runs in the background, and nothing is written unless you ask. If the file and the
+  item have both changed, PassStore says so and lets you choose which one wins. Untick
+  "Keep a link to this file" during import if you only want a one-off copy.
+- **File → Import .env File… (⇧⌘O)** creates the item, fills in its keys and links the file in
+  a single step. Also available from the command palette and the empty-vault screen.
+- **Previous values.** When you change a secret, the value it replaced is kept, so you can look
+  up or restore the password an item had before. Up to 10 versions per field, held in your
+  encrypted vault and shown only when you ask for them. Old secrets stay recoverable until you
+  remove them, so you can clear them for one item, clear them across the whole vault, or turn
+  the feature off in Settings → Data.
+- **Item history (⌘Y).** A window with the complete change log for an item and every previous
+  value, each of which can be copied or put back.
+- **Automatic Touch ID.** The unlock prompt now appears on its own when you open PassStore and
+  when you switch back to it. Locking on purpose never triggers it; it returns once you have
+  left the app and come back. Turn it off in Settings → General.
+- **Restore a backup during setup.** The welcome screen offers "I already have a backup".
+- **Start over after a forgotten master password.** The lock screen can erase the vault and set
+  up a new one. There is still no way to recover a forgotten password — without it nothing can
+  decrypt your secrets — but you are no longer stuck at a lock screen with no way forward.
+- **Undo (⌘Z)** for restoring a backup, clearing previous values and restoring an old value.
 - **Sort the item list** by name, last used, last modified or date created.
-- **Full item history** in its own window, with the complete change log and every stored
-  previous value.
-- **Duplicate a built-in template.** Built-ins are read-only, and there was previously no way
-  to start from one — adding a field to "Database" meant rebuilding it from scratch.
-- **Reorder template fields.** The item editor got this in 1.1.0; the template editor did not.
-- Quick copy straight from the item list on hover, and from the command palette.
-- Unlock and lock from the menu bar.
+- **Copy without opening an item:** a copy button appears on hover in the list, ⇧⌘C copies the
+  selected item's password, and the command palette can copy directly.
+- **Lock and unlock from the menu bar.**
+- **Duplicate a built-in template** to use it as a starting point, and reorder the fields of
+  custom templates.
+- **A Vault menu** gathering Lock, the password generator, Vault Health, item history and
+  Update from linked file.
+
+### Changed
+
+- **⌘N creates a new secret item.** It used to open a second window. New Workspace moves to
+  ⇧⌘N.
+- **⌘⌥P, "Open Main Window" and the Dock icon reuse the existing window** instead of opening
+  another one each time, restoring it if it was minimised.
+- **The menus were reorganised:** creating and importing under File, copying and Find under
+  Edit, navigation and sorting under View, and everything vault-specific under Vault.
+- **New shortcuts:** ⇧⌘C copy password, ⌘Y item history, ⌘R update from linked file.
+- **"Recent" now lists the items you have actually opened.** It previously showed the same
+  items as "All Items", in a different order.
+- **Every screen shares one layout**, so Settings, the editors, import, export, Vault Health
+  and bulk edit look and behave consistently. Settings gains a **Data** tab for previous
+  values, linked files and recovery.
+- **PassStore follows your system text size**, and the sidebar now matches other Mac apps in
+  row size and contrast.
+- **The command palette ranks its results**, so typing part of a name brings that item to the
+  top rather than burying it among tag matches.
+- **Vault Health is harder to fool.** Common words, character sequences, keyboard patterns and
+  repeated blocks now count as weak whatever their length — `password1234` used to pass.
+- **Hidden secrets are masked at a fixed width**, so the mask no longer shows how long the
+  secret is.
 
 ### Fixed
 
-- **⌘N creates a new secret item.** It used to open a second, empty copy of the app window:
-  PassStore was built as a multi-window app, so SwiftUI claimed ⌘N for "New Window" and the
-  new-item command was pushed onto ⌘⇧N. There is one vault, so there is now one window.
-- **The global shortcut reuses the window instead of stacking up new ones.** ⌘⌥P, "Open Main
-  Window" in the menu bar, and clicking the Dock icon now all bring the existing window
-  forward — un-minimising it if needed — and only open one when none exists. Pressing ⌘⌥P
-  three times used to leave three windows behind.
-- **The menus were reorganised** to match where a Mac user looks: making and importing under
-  File, copying and Find under Edit, navigation and sorting under View, and everything
-  vault-specific in a new **Vault** menu. The password generator and the health report used to
-  live under View, and Lock sat in the app menu next to Settings.
-- **New shortcuts:** ⌘⇧C copies the selected item's password — the commonest action in the app
-  had none — ⌘Y opens its history, and ⌘R pulls in changes from its linked file.
-- **Commands that need an unlocked vault are now disabled while it is locked.** ⌘N and the
-  import commands would previously open a sheet on top of the lock screen.
-- Quitting immediately after opening an item no longer drops its "last used" timestamp.
 - **Restoring a backup no longer replaces your vault without asking.** A `.pstore` used to be
-  applied the instant the password was accepted: every workspace, item, template and
-  preference gone, with no summary, no confirmation and no way back. PassStore now shows what
-  the backup contains and asks how to apply it — **Merge** (the default; adds what is missing
-  and overwrites nothing) or **Replace**. Either way it copies your current vault aside first,
-  so the restore is reversible with ⌘Z and still recoverable after quitting, from
-  Settings → Data.
-- **Restoring a backup no longer duplicates everything on a second import.** Item ids were
-  discarded on restore, so re-importing the same file made a second copy of every secret.
-- **Secret values can be revealed from the keyboard.** Hovering a secret still shows it and
-  clicking still copies it, exactly as before — but that was the *only* way, so keyboard and
-  VoiceOver users could not read a stored secret at all. Every sensitive field now also has a
-  reveal button, which keeps the value shown after the pointer moves away.
-- **The item list is a real list.** Arrow keys, ⇧-click ranges and ⌘-click toggling all work,
-  and the list takes focus properly.
-- **Selecting an item no longer re-encrypts and rewrites the entire vault.** The "last used"
-  stamp triggered a full synchronous save on every single click — and on every keypress when
-  walking the list. Writes are now coalesced.
-- **Unlocking, changing your master password and exporting no longer freeze the window.** Key
-  derivation ran on the main thread, and because it was synchronous the progress indicator
-  never got a chance to appear. All three now run off the main thread and show real progress.
-- **The password field on the lock screen takes focus.** Every unlock used to start with a
-  mouse click. The default button and the prominent button are also the same button now;
-  pressing Return previously did something other than what the UI implied.
-- **Starring or archiving an item no longer counts as editing it.** Both bumped the modified
-  date, which pushed the item to the top of "Recent" and reset the staleness clock the health
-  audit reads — so un-starring and re-starring silently cleared a warning.
-- **Archiving no longer throws you out of the workspace you were in.** The sidebar stayed put
-  and the confirmation appears under the list instead.
-- **The type filter stays inside the workspace you are looking at.** It used to widen to the
-  whole vault while the header still named the workspace.
-- **"Recent" means recently opened.** It used to show exactly the same items as "All Items",
-  with the same badge count, only sorted differently.
-- **`.env` round-trips no longer corrupt values.** Keys were upper-cased on the way out, so
-  `Api_Key` came back as `API_KEY` — a different variable. Values containing spaces, `#`,
-  quotes or newlines were written unquoted and came back wrong or truncated.
-- **The `.env` parser now handles real files:** quoted values keep their content and lose
-  their quotes, `export KEY=value` is understood, values may span several quoted lines, and a
-  trailing comment is not part of the value.
-- **Ordinary variables are no longer imported as secrets.** Any name containing the letters
-  "key" was treated as sensitive, so `MONKEY_COUNT` and `KEYBOARD_LAYOUT` were stored masked.
-- **Vault Health is harder to fool.** `password1234` scored "Fair" and was never reported.
-  Common base words, character runs, keyboard patterns and repeated blocks are now weak
-  whatever their length.
-- **Duplicating an item twice produces distinct titles** instead of two items called
-  "X Copy".
-- Copying from the menu bar now shows the first-time clipboard warning and records the item as
-  used, so the menu bar's own most-recently-used ordering actually moves.
-- Editing an item from the detail pane edits that item, rather than whatever happened to be
-  selected at the time.
-- Hidden secrets are masked at a fixed width; the mask used to publish the exact length of
-  every secret on screen.
+  applied the moment the password was accepted, discarding every workspace, item, template and
+  preference with no summary and no way back. PassStore now shows what the backup contains and
+  asks how to apply it: **Merge**, which adds what is missing and overwrites nothing, or
+  **Replace**. Either way your current vault is copied aside first, so a restore can be undone
+  with ⌘Z, or recovered later from Settings → Data even after quitting.
+- **Restoring the same backup twice no longer duplicates every secret.**
+- **Secret values can be revealed from the keyboard.** Hovering still reveals and clicking
+  still copies; sensitive fields now also have a reveal button, which keeps the value visible
+  after the pointer moves away.
+- **The item list behaves like a list:** arrow keys move through it, ⇧-click selects a range
+  and ⌘-click toggles individual items.
+- **Unlocking, changing your master password and exporting no longer freeze the window.** All
+  three now show real progress.
+- **The password field is focused as soon as the lock screen appears**, and Return activates
+  Unlock.
+- **Browsing a large vault is much faster.** Selecting an item no longer rewrites the entire
+  vault to disk.
+- **Starring or archiving an item no longer counts as editing it**, so it does not jump to the
+  top of Recent or reset how old Vault Health considers it.
+- **Archiving keeps you where you were** instead of switching the sidebar to Archived.
+- **Filtering by type stays inside the workspace you are viewing.**
+- **`.env` files survive a round trip.** Key capitalisation is preserved, and values containing
+  spaces, `#`, quotes or line breaks are quoted correctly instead of coming back wrong.
+- **The `.env` parser handles real files:** quoted values, `export KEY=value`, values spanning
+  several lines, and trailing comments.
+- **Ordinary variables are no longer imported as secrets.** `MONKEY_COUNT` and
+  `KEYBOARD_LAYOUT` used to be stored masked.
+- **Duplicating an item twice gives each copy a distinct name.**
+- Copying from the menu bar now shows the clipboard warning and updates the item's last-used
+  time.
+- Editing from the detail pane always edits the item you are looking at.
+- Commands that need an unlocked vault are disabled while it is locked, instead of opening a
+  window over the lock screen.
+- Quitting immediately after opening an item keeps its last-used time.
 
 ### Security
 
-- **The global ⌘⌥P shortcut no longer needs Accessibility permission.** PassStore used to
-  install a global keyboard monitor, which meant it received every keystroke typed in every
-  application — a keylogger-shaped permission for a password manager. It now registers that
-  one chord with the system and sees nothing else.
+- **The global ⌘⌥P shortcut no longer needs Accessibility permission.** PassStore previously
+  had to be allowed to observe your keyboard system-wide; it now registers only that one
+  shortcut. You can remove PassStore from System Settings → Privacy & Security → Accessibility.
 - **The vault locks when your Mac sleeps, the screen locks or the screensaver starts.** Closing
-  the lid previously left the vault unlocked in memory until the inactivity timer happened to
-  fire.
-- **The failed-attempt delay survives a relaunch.** It was held in memory, so quitting the app
-  reset it.
-- Restoring a backup that says "biometrics enabled" now re-checks this Mac's Keychain instead
-  of trusting the setting.
+  the lid used to leave it unlocked until the inactivity timer ran out.
+- **The delay after failed password attempts survives quitting the app.**
+- Restoring a backup re-checks Touch ID against this Mac rather than trusting the setting
+  saved in the file.
 
-### Improved
+### Compatibility
 
-- **Every screen is built from one set of components.** Settings, the template editor, item
-  creation and editing, export, import, vault health and bulk edit each rolled their own
-  header, footer, spacing and card chrome — which is why some clipped their buttons and no two
-  looked quite alike. Settings gains a **Data** tab for history, linked files and recovery.
-- **The app follows your system text size.** Font sizes were hard-coded in points throughout,
-  including in the sidebar.
-- **The sidebar looks like a macOS sidebar** — standard row height, full label colour, proper
-  icon size. It previously rendered at 11pt in a secondary grey, which made every row look
-  disabled.
-- **The command palette ranks results.** An item matching on an obscure tag used to rank
-  exactly as high as one whose name you had typed in full. It also stops rebuilding the entire
-  entry list on every keystroke.
-- Long secrets get soft line breaks every 24 characters rather than between every single
-  character, which was slow on long keys and made VoiceOver read them letter by letter.
-- Small text no longer uses the tertiary colour, which failed contrast at that size.
+- Vaults and `.pstore` backups written by 1.1.x open unchanged, and a vault written by 1.2.0
+  stays readable by earlier versions.
 
 ## [1.1.1] - 2026-08-16
 
