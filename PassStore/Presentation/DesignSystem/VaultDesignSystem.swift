@@ -319,6 +319,48 @@ struct VaultValueBox<Content: View>: View {
     }
 }
 
+// MARK: - Text editor
+
+/// Multi-line text box with a placeholder.
+///
+/// `TextEditor` has no prompt, so every screen that needed one overlaid a `Text` at
+/// hand-tuned coordinates — which drifted between screens and broke when the font changed.
+struct VaultTextEditor: View {
+    @Binding var text: String
+    let placeholder: String
+    var minHeight: CGFloat = 90
+    var isMonospaced = false
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: $text)
+                .scrollContentBackground(.hidden)
+                .font(isMonospaced ? .vaultValue : .body)
+                .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
+                .multilineTextAlignment(.leading)
+                .padding(VaultSpacing.xs)
+
+            if text.isEmpty {
+                Text(placeholder)
+                    .font(isMonospaced ? .vaultValue : .body)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, VaultSpacing.s)
+                    .padding(.vertical, VaultSpacing.s + 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .padding(VaultSpacing.xs)
+        .background(
+            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor).opacity(0.6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                        .strokeBorder(VaultChrome.hairline, lineWidth: 0.5)
+                )
+        )
+    }
+}
+
 // MARK: - Chips
 
 /// Small labelled capsule used for workspace / environment / tag metadata.

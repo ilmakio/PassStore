@@ -342,45 +342,6 @@ private struct TemplateCard: View {
     }
 }
 
-// MARK: - Legacy chrome shims
-//
-// These forward to the design system in `VaultDesignSystem.swift`. They exist so the
-// migration could land screen by screen instead of as one unreviewable rewrite.
-
-struct SheetLabeledField<Content: View>: View {
-    let title: String
-    var titleAccessibilityIdentifier: String?
-    @ViewBuilder let content: () -> Content
-
-    init(title: String, titleAccessibilityIdentifier: String? = nil, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title
-        self.titleAccessibilityIdentifier = titleAccessibilityIdentifier
-        self.content = content
-    }
-
-    var body: some View {
-        VaultField(title, titleAccessibilityIdentifier: titleAccessibilityIdentifier, content: content)
-    }
-}
-
-struct GroupedSheetCardBackground: View {
-    var cornerRadius: CGFloat = VaultRadius.card
-
-    var body: some View {
-        VaultCardBackground(cornerRadius: cornerRadius)
-    }
-}
-
-struct GroupedSheetSection<Content: View>: View {
-    let title: String
-    var systemImage: String?
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VaultSection(title, systemImage: systemImage, content: content)
-    }
-}
-
 // MARK: - .env import (new-item staging only)
 
 private enum EnvStagingTab: String, CaseIterable, Identifiable {
@@ -550,7 +511,7 @@ private struct EnvGroupImportSection: View {
     }
 
     private var pastePanel: some View {
-        SheetLabeledField(title: ".env contents") {
+        VaultField(".env contents") {
             TextEditor(text: $pasteBuffer)
                 .scrollContentBackground(.hidden)
                 .font(.system(.body, design: .monospaced))
@@ -646,68 +607,23 @@ private struct ItemEditorContent: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VaultSection("Basics", systemImage: "textformat") {
-                    SheetLabeledField(title: "Name") {
+                    VaultField("Name") {
                         TextField("", text: $draft.title, prompt: Text("Required"))
                             .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.leading)
                             .accessibilityIdentifier("editor-title-field")
                     }
 
-                    HStack(alignment: .top, spacing: 12) {
-                        SheetLabeledField(title: "Workspace") {
-                            Picker("", selection: $draft.workspaceID) {
-                                Text("None").tag(Optional<UUID>.none)
-                                ForEach(availableWorkspaces, id: \.id) { workspace in
-                                    Label(workspace.name, systemImage: workspace.icon)
-                                        .tag(Optional.some(workspace.id))
-                                }
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                        }
-                        Button("New Workspace…") {
-                            showWorkspaceSheet = true
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .padding(.top, 18)
+                    // Workspace and type sit side by side rather than stacked with a stray
+                    // button hanging off the first one.
+                    HStack(alignment: .top, spacing: VaultSpacing.m) {
+                        VaultField("Workspace") { workspaceMenu }
+                        VaultField("Type") { typeMenu }
                     }
 
-                    SheetLabeledField(title: "Favorite") {
-                        Button {
-                            draft.isFavorite.toggle()
-                        } label: {
-                            Image(systemName: draft.isFavorite ? "star.fill" : "star")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundStyle(draft.isFavorite ? .yellow : .secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .help(draft.isFavorite ? "Remove from Favorites" : "Add to Favorites")
-                        .accessibilityIdentifier("editor-favorite-toggle")
-                    }
+                    Divider()
 
-                    SheetLabeledField(title: "Item type") {
-                        Picker(
-                            "",
-                            selection: Binding(
-                                get: { draft.type },
-                                set: { viewModel.applyItemTypeChange(to: &draft, newType: $0) }
-                            )
-                        ) {
-                            ForEach(SecretItemType.allCases) { type in
-                                Label(type.title, systemImage: type.systemImage)
-                                    .tag(type)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .accessibilityIdentifier("editor-item-type-picker")
-                    }
-                }
-
-                VaultSection("Environment", systemImage: "circle.hexagongrid") {
-                    SheetLabeledField(title: "Preset") {
+                    VaultField("Environment") {
                         Picker("", selection: Binding(
                             get: { draft.environment.kind },
                             set: { newKind in
@@ -725,7 +641,7 @@ private struct ItemEditorContent: View {
                     }
 
                     if draft.environment.kind == .custom {
-                        SheetLabeledField(title: "Custom environment name") {
+                        VaultField("Custom environment name") {
                             TextField("", text: Binding(
                                 get: { draft.environment.customName ?? "" },
                                 set: { draft.environment = .custom($0) }
@@ -734,6 +650,17 @@ private struct ItemEditorContent: View {
                             .multilineTextAlignment(.leading)
                         }
                     }
+
+                    Divider()
+
+                    // A labelled checkbox rather than a bare star under a "Favorite" caption,
+                    // which read as a stray icon with no obvious state.
+                    Toggle(isOn: $draft.isFavorite) {
+                        Label("Add to favourites", systemImage: draft.isFavorite ? "star.fill" : "star")
+                            .foregroundStyle(draft.isFavorite ? Color.yellow : Color.primary)
+                    }
+                    .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("editor-favorite-toggle")
                 }
 
                 if draft.type == .envGroup, showEnvImportStaging {
@@ -747,61 +674,49 @@ private struct ItemEditorContent: View {
                     )
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .center) {
-                        Text("Fields")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        Toggle("Advanced", isOn: $showAdvancedFields)
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
+                VaultSection("Fields", systemImage: "list.bullet") {
+                    // The Advanced switch belongs in the section header, not floating above
+                    // the card in a hand-rolled row of its own.
+                    Toggle("Advanced", isOn: $showAdvancedFields)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .accessibilityIdentifier("editor-advanced-toggle")
+                } content: {
+                    if draft.fieldDrafts.isEmpty {
+                        VaultNote(text: showAdvancedFields
+                                  ? "No fields yet. Add one below."
+                                  : "This item has no fields. Turn on Advanced to add one.")
                     }
-                    VStack(alignment: .leading, spacing: 16) {
-                        if draft.fieldDrafts.isEmpty {
-                            Text(showAdvancedFields
-                                 ? "No fields yet. Add one below."
-                                 : "This item has no fields. Turn on Advanced to add one.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
 
-                        ForEach(Array($draft.fieldDrafts.enumerated()), id: \.element.id) { index, $field in
-                            SimpleFieldEditor(
-                                field: $field,
-                                itemType: draft.type,
-                                showAdvanced: showAdvancedFields,
-                                onRemove: { removeField(id: field.id) },
-                                canMoveUp: index > 0,
-                                canMoveDown: index < draft.fieldDrafts.count - 1,
-                                onMoveUp: { moveField(from: index, to: index - 1) },
-                                onMoveDown: { moveField(from: index, to: index + 1) },
-                                onCopyGenerated: { viewModel.copyGeneratedPassword($0) }
-                            )
-                            if field.id != draft.fieldDrafts.last?.id {
-                                Divider()
-                            }
-                        }
-
-                        if showAdvancedFields {
-                            Button(action: addField) {
-                                Label("Add Field", systemImage: "plus.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityIdentifier("editor-add-field")
+                    ForEach(Array($draft.fieldDrafts.enumerated()), id: \.element.id) { index, $field in
+                        SimpleFieldEditor(
+                            field: $field,
+                            itemType: draft.type,
+                            showAdvanced: showAdvancedFields,
+                            onRemove: { removeField(id: field.id) },
+                            canMoveUp: index > 0,
+                            canMoveDown: index < draft.fieldDrafts.count - 1,
+                            onMoveUp: { moveField(from: index, to: index - 1) },
+                            onMoveDown: { moveField(from: index, to: index + 1) },
+                            onCopyGenerated: { viewModel.copyGeneratedPassword($0) }
+                        )
+                        if field.id != draft.fieldDrafts.last?.id {
+                            Divider()
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background {
-                        GroupedSheetCardBackground()
+
+                    if showAdvancedFields {
+                        Button(action: addField) {
+                            Label("Add Field", systemImage: "plus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("editor-add-field")
                     }
                 }
 
                 VaultSection("Tags", systemImage: "tag") {
-                    SheetLabeledField(title: "Add tags") {
-                        HStack(alignment: .center, spacing: 8) {
+                    VaultField("Add tags") {
+                        HStack(alignment: .center, spacing: VaultSpacing.s) {
                             TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
                                 .textFieldStyle(.roundedBorder)
                                 .multilineTextAlignment(.leading)
@@ -821,37 +736,79 @@ private struct ItemEditorContent: View {
                 }
 
                 VaultSection("Notes", systemImage: "note.text") {
-                    SheetLabeledField(title: "Notes") {
-                        ZStack(alignment: .topLeading) {
-                            TextEditor(text: $draft.notes)
-                                .scrollContentBackground(.hidden)
-                                .frame(maxWidth: .infinity, minHeight: 90, alignment: .topLeading)
-                                .multilineTextAlignment(.leading)
-                                .padding(8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(Color(nsColor: .controlBackgroundColor))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
-                                        )
-                                )
-                            if draft.notes.isEmpty {
-                                Text("Optional notes for this item")
-                                    .foregroundStyle(.tertiary)
-                                    .multilineTextAlignment(.leading)
-                                    .padding(.top, 16)
-                                    .padding(.leading, 12)
-                                    .allowsHitTesting(false)
-                            }
-                        }
-                    }
+                    VaultTextEditor(text: $draft.notes, placeholder: "Optional notes for this item")
                 }
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: - Basics controls
+
+    private var selectedWorkspace: WorkspaceEntity? {
+        availableWorkspaces.first { $0.id == draft.workspaceID }
+    }
+
+    /// Workspace chooser that shows the workspace's own icon and colour, and offers to make a
+    /// new one from inside the same menu.
+    ///
+    /// This used to be a plain popup with a separate "New Workspace…" button nudged into
+    /// alignment with a hard-coded top padding.
+    private var workspaceMenu: some View {
+        Menu {
+            Button {
+                draft.workspaceID = nil
+            } label: {
+                Label("No workspace", systemImage: "tray")
+            }
+
+            if !availableWorkspaces.isEmpty {
+                Divider()
+                ForEach(availableWorkspaces, id: \.id) { workspace in
+                    Button {
+                        draft.workspaceID = workspace.id
+                    } label: {
+                        Label(workspace.name, systemImage: workspace.icon)
+                    }
+                }
+            }
+
+            Divider()
+            Button {
+                showWorkspaceSheet = true
+            } label: {
+                Label("New Workspace…", systemImage: "folder.badge.plus")
+            }
+        } label: {
+            HStack(spacing: VaultSpacing.s) {
+                Image(systemName: selectedWorkspace?.icon ?? "tray")
+                    .foregroundStyle(selectedWorkspace.map { Color(hex: $0.colorHex) } ?? .secondary)
+                Text(selectedWorkspace?.name ?? "No workspace")
+                    .foregroundStyle(selectedWorkspace == nil ? .secondary : .primary)
+                    .lineLimit(1)
+            }
+        }
+        .accessibilityIdentifier("editor-workspace-picker")
+    }
+
+    private var typeMenu: some View {
+        Picker(
+            "",
+            selection: Binding(
+                get: { draft.type },
+                set: { viewModel.applyItemTypeChange(to: &draft, newType: $0) }
+            )
+        ) {
+            ForEach(SecretItemType.allCases) { type in
+                Label(type.title, systemImage: type.systemImage)
+                    .tag(type)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .accessibilityIdentifier("editor-item-type-picker")
     }
 
     private func addTag() {
@@ -972,37 +929,19 @@ struct WorkspaceEditorSheet: View {
                     }
 
                     VaultSection("Basics", systemImage: "textformat") {
-                        SheetLabeledField(title: "Name") {
+                        VaultField("Name") {
                             TextField("", text: $draft.name, prompt: Text("e.g. Production API"))
                                 .textFieldStyle(.roundedBorder)
                                 .multilineTextAlignment(.leading)
                                 .accessibilityIdentifier("workspace-name-field")
                         }
 
-                        SheetLabeledField(title: "Notes") {
-                            ZStack(alignment: .topLeading) {
-                                TextEditor(text: $draft.notes)
-                                    .scrollContentBackground(.hidden)
-                                    .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
-                                    .multilineTextAlignment(.leading)
-                                    .padding(8)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(Color(nsColor: .controlBackgroundColor))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
-                                            )
-                                    )
-                                if draft.notes.isEmpty {
-                                    Text("Optional context for this workspace")
-                                        .foregroundStyle(.tertiary)
-                                        .multilineTextAlignment(.leading)
-                                        .padding(.top, 16)
-                                        .padding(.leading, 12)
-                                        .allowsHitTesting(false)
-                                }
-                            }
+                        VaultField("Notes") {
+                            VaultTextEditor(
+                                text: $draft.notes,
+                                placeholder: "Optional context for this workspace",
+                                minHeight: 60
+                            )
                         }
                     }
 
@@ -1443,7 +1382,7 @@ struct VaultHealthSheet: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 14)
-        .background { GroupedSheetCardBackground(cornerRadius: 10) }
+        .background { VaultCardBackground(cornerRadius: VaultRadius.value) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(count) \(label)")
     }
@@ -1634,7 +1573,7 @@ struct BulkEditSheet: View {
 
     private var tagsSection: some View {
         VaultSection("Tags", systemImage: "tag") {
-            SheetLabeledField(title: "Add to every item") {
+            VaultField("Add to every item") {
                 HStack(alignment: .center, spacing: 8) {
                     TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
                         .textFieldStyle(.roundedBorder)
@@ -1656,7 +1595,7 @@ struct BulkEditSheet: View {
 
             if !removableTags.isEmpty {
                 Divider()
-                SheetLabeledField(title: "Remove from every item") {
+                VaultField("Remove from every item") {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(removableTags, id: \.self) { tag in
                             Toggle(isOn: removalBinding(for: tag)) {
@@ -1674,7 +1613,7 @@ struct BulkEditSheet: View {
 
     private var organizeSection: some View {
         VaultSection("Organize", systemImage: "folder") {
-            SheetLabeledField(title: "Workspace") {
+            VaultField("Workspace") {
                 Picker("", selection: workspaceBinding) {
                     Text("Keep current").tag(BulkEditWorkspaceAction.keep)
                     Text("No workspace").tag(BulkEditWorkspaceAction.clear)
@@ -1686,7 +1625,7 @@ struct BulkEditSheet: View {
                 .accessibilityIdentifier("bulk-edit-workspace")
             }
 
-            SheetLabeledField(title: "Environment") {
+            VaultField("Environment") {
                 Picker("", selection: environmentBinding) {
                     Text("Keep current").tag(BulkEditEnvironmentAction.keep)
                     ForEach(EnvironmentKind.allCases.filter { $0 != .custom }) { kind in
@@ -1701,7 +1640,7 @@ struct BulkEditSheet: View {
 
     private var flagsSection: some View {
         VaultSection("Status", systemImage: "flag") {
-            SheetLabeledField(title: "Favorite") {
+            VaultField("Favorite") {
                 Picker("", selection: $draft.favoriteAction) {
                     Text("Keep").tag(BulkEditBooleanAction.keep)
                     Text("Add").tag(BulkEditBooleanAction.enable)
@@ -1712,7 +1651,7 @@ struct BulkEditSheet: View {
                 .accessibilityIdentifier("bulk-edit-favorite")
             }
 
-            SheetLabeledField(title: "Archive") {
+            VaultField("Archive") {
                 Picker("", selection: $draft.archiveAction) {
                     Text("Keep").tag(BulkEditBooleanAction.keep)
                     Text("Archive").tag(BulkEditBooleanAction.enable)
@@ -2026,19 +1965,19 @@ private struct MasterPasswordSection: View {
 
     private var expandedForm: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SheetLabeledField(title: "Current password") {
+            VaultField("Current password") {
                 SecureField("", text: $currentPassword, prompt: Text("Your current master password"))
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("master-password-current")
             }
 
-            SheetLabeledField(title: "New password") {
+            VaultField("New password") {
                 SecureField("", text: $newPassword, prompt: Text("At least \(VaultSessionManager.minimumPasswordLength) characters"))
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("master-password-new")
             }
 
-            SheetLabeledField(title: "Confirm new password") {
+            VaultField("Confirm new password") {
                 SecureField("", text: $confirmPassword, prompt: Text("Re-enter the new password"))
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { if canSubmit { submit() } }
@@ -2308,14 +2247,14 @@ private struct TemplateSettingsPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VaultSection("Definition", systemImage: "square.on.square") {
-                    SheetLabeledField(title: "Template name") {
+                    VaultField("Template name") {
                         TextField("", text: $draft.name, prompt: Text("e.g. My API template"))
                             .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.leading)
                             .disabled(isBuiltInSelected)
                     }
 
-                    SheetLabeledField(title: "Item type") {
+                    VaultField("Item type") {
                         Picker("", selection: $draft.itemType) {
                             ForEach(SecretItemType.allCases) { type in
                                 Text(type.title).tag(type)
@@ -2506,14 +2445,14 @@ private struct TemplateSettingsPane: View {
                 }
             }
 
-            SheetLabeledField(title: "Field label") {
+            VaultField("Field label") {
                 TextField("", text: field.label, prompt: Text("Shown in the editor"))
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.leading)
                     .disabled(readOnly)
             }
 
-            SheetLabeledField(title: "Storage key") {
+            VaultField("Storage key") {
                 TextField("", text: field.key, prompt: Text("e.g. api_key"))
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
@@ -2521,7 +2460,7 @@ private struct TemplateSettingsPane: View {
                     .disabled(readOnly)
             }
 
-            SheetLabeledField(title: "Field kind") {
+            VaultField("Field kind") {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("", selection: field.kind) {
                         ForEach(FieldKind.allCases) { kind in
@@ -3029,7 +2968,7 @@ private struct SimpleFieldEditor: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            SheetLabeledField(title: "Field label") {
+            VaultField("Field label") {
                 TextField("", text: $field.label, prompt: Text("e.g. Password"))
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.leading)
@@ -3040,14 +2979,14 @@ private struct SimpleFieldEditor: View {
                     }
             }
 
-            SheetLabeledField(title: "Storage key") {
+            VaultField("Storage key") {
                 TextField("", text: $field.key, prompt: Text("Machine-readable id"))
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.leading)
             }
 
-            SheetLabeledField(title: "Value kind") {
+            VaultField("Value kind") {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("", selection: $field.kind) {
                         ForEach(FieldKind.allCases) { kind in

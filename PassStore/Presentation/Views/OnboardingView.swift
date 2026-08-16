@@ -448,7 +448,7 @@ private struct WorkspaceStepView: View {
                         Spacer()
                     }
                     .padding(12)
-                    .background { GroupedSheetCardBackground(cornerRadius: 10) }
+                    .background { VaultCardBackground(cornerRadius: VaultRadius.value) }
 
                     // Name
                     VStack(alignment: .leading, spacing: 4) {
