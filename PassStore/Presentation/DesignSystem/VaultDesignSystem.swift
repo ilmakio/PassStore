@@ -24,15 +24,18 @@ enum VaultRadius {
 }
 
 extension Color {
-    /// The brand yellow, used for tints, selection and accents.
-    static let vaultAccent = Color.accentColor
-
-    /// A deeper shade of the same hue, used wherever a filled control carries white text.
+    /// The brand yellow: fills, selection, tints, anything the accent paints *behind* content.
     ///
-    /// The brand yellow is too light to sit under white — around 1.7:1, which is why SwiftUI's
-    /// own prominent button style silently switched some labels to black and left the app
-    /// looking like it had two kinds of yellow button. Filled buttons use this instead, so
-    /// every one of them reads the same way, while the rest of the app keeps the bright yellow.
+    /// Read from the asset rather than `Color.accentColor` so it survives views that clear
+    /// their tint to suppress a system highlight.
+    static let vaultAccent = Color("AccentColor")
+
+    /// The same hue shifted to whatever reads on the window background, for the rare places
+    /// where the accent is the *text* rather than what sits under it.
+    ///
+    /// Bright yellow type on white is around 1.5:1 and effectively invisible, so the light
+    /// appearance uses a dark gold; on a dark background the bright yellow is already fine and
+    /// is kept. Fills never use this — they use `vaultAccent` with black content on top.
     static let vaultAccentStrong = Color("AccentStrong")
 }
 
@@ -53,6 +56,13 @@ enum VaultChrome {
 /// Everything here resolves to a system text style, so the app follows the user's text-size
 /// setting. Fixed `.system(size:)` values do not, which is why they are gone.
 extension Font {
+    /// The wordmark on the welcome and lock screens.
+    ///
+    /// The one deliberate fixed size in the app: this is the brand set at display size, and it
+    /// is drawn inside a hero panel sized by the window rather than by the text around it.
+    static let vaultHeroTitle = Font.system(size: 46, weight: .bold)
+    /// Supporting line under the wordmark.
+    static let vaultHeroTagline = Font.system(size: 15, weight: .regular)
     /// Screen or sheet title.
     static let vaultTitle = Font.title3.weight(.semibold)
     /// Section header inside a sheet or pane.
@@ -400,9 +410,10 @@ struct VaultChip: View {
 
 /// Primary / secondary sheet actions.
 ///
-/// Always white on `vaultAccentStrong`. SwiftUI's `.borderedProminent` picks its label colour
-/// from the fill's luminance, which against a yellow accent meant some buttons came out with
-/// black text and others white.
+/// Every yellow button in the app is the brand yellow with **black** type, in every view and
+/// in both appearances. SwiftUI's own `.borderedProminent` picks its label colour from the
+/// fill's luminance, which against a yellow accent meant some buttons came out black and
+/// others white — which is what made the app look like it had two kinds of yellow button.
 struct VaultButtonStyle: ButtonStyle {
     enum Role {
         case primary
@@ -412,44 +423,53 @@ struct VaultButtonStyle: ButtonStyle {
 
     let role: Role
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
 
     init(_ role: Role = .secondary) {
         self.role = role
     }
 
+    private var isLarge: Bool { controlSize == .large || controlSize == .extraLarge }
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
-            .padding(.vertical, VaultSpacing.s)
-            .padding(.horizontal, VaultSpacing.xl)
+            .font(isLarge ? .body.weight(.semibold) : .callout.weight(.semibold))
+            .padding(.vertical, isLarge ? VaultSpacing.m : VaultSpacing.s)
+            .padding(.horizontal, isLarge ? 32 : VaultSpacing.xl)
             .background(
                 Capsule(style: .continuous)
                     .fill(fill)
             )
+            // Secondary is a translucent wash, which on a busy or very dark surface can lose
+            // its edge entirely. The hairline keeps it a button.
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.primary.opacity(role == .secondary ? 0.13 : 0), lineWidth: 1)
+            )
             .foregroundStyle(foreground)
-            .opacity(opacity(isPressed: configuration.isPressed))
+            .opacity(configuration.isPressed ? 0.75 : 1)
             .contentShape(Capsule(style: .continuous))
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 
+    /// Disabled is a neutral wash for every role rather than a faded version of the role's own
+    /// colour: yellow at 40% over a dark panel comes out as murky olive with black type on it.
     private var fill: Color {
+        guard isEnabled else { return Color.primary.opacity(0.10) }
         switch role {
-        case .primary: Color.vaultAccentStrong
-        case .secondary: Color.primary.opacity(0.08)
-        case .destructive: Color.red
+        case .primary: return Color.vaultAccent
+        case .secondary: return Color.primary.opacity(0.08)
+        case .destructive: return Color.red
         }
     }
 
     private var foreground: Color {
+        guard isEnabled else { return Color.secondary }
         switch role {
-        case .primary, .destructive: .white
-        case .secondary: .primary
+        case .primary: return .black
+        case .destructive: return .white
+        case .secondary: return .primary
         }
-    }
-
-    private func opacity(isPressed: Bool) -> Double {
-        if !isEnabled { return 0.4 }
-        return isPressed ? 0.75 : 1
     }
 }
 

@@ -33,6 +33,8 @@ struct OnboardingView: View {
     /// instead of leaving a new arrival to find it in a menu.
     @State private var wantsBackupRestore = false
 
+    @Environment(\.colorScheme) private var colorScheme
+
     private var steps: [OnboardingStep] {
         var s: [OnboardingStep] = [.welcome, .masterPassword]
         if hasBiometricHardware { s.append(.touchID) }
@@ -53,11 +55,21 @@ struct OnboardingView: View {
         currentStep.rawValue >= previousStep.rawValue
     }
 
+    /// The first screen is the brand; the rest of setup is a plain form and stays native.
+    private var isHeroStep: Bool { currentStep == .welcome }
+
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .ignoresSafeArea()
+            if isHeroStep {
+                VaultHeroBackground()
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            } else {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            }
 
             VStack(spacing: 0) {
                 if currentStep != .welcome && currentStep != .ready {
@@ -119,6 +131,9 @@ struct OnboardingView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(32)
+            // The hero is dark in both appearances, so its content resolves against a dark
+            // scheme rather than inheriting the window's and disappearing in light mode.
+            .environment(\.colorScheme, isHeroStep ? .dark : colorScheme)
         }
         .onAppear {
             let context = LAContext()
@@ -236,53 +251,33 @@ private struct WelcomeStepView: View {
     let onRestore: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        // One centred block — logo, wordmark, choice — rather than three groups pushed apart
+        // by spacers, which left a hole in the middle of the screen.
+        VStack(spacing: 0) {
+            Spacer(minLength: VaultSpacing.xl)
 
-            appIcon
-                .frame(width: 80, height: 80)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+            VaultHeroLogo(size: 108)
 
-            VStack(spacing: 8) {
-                Text("PassStore")
-                    .font(.title2.weight(.semibold))
-                Text("Your secrets, locked down.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
+            VaultHeroWordmark(tagline: "Developer secrets that never leave your Mac.")
+                .padding(.top, VaultSpacing.xxl)
 
             VStack(spacing: VaultSpacing.m) {
                 Button("Get Started", action: onContinue)
                     .buttonStyle(VaultButtonStyle(.primary))
+                    .controlSize(.large)
                     .accessibilityIdentifier("onboarding-get-started")
 
+                // A real button, not a link: restoring a backup is the other half of the
+                // decision on this screen, not a footnote to it.
                 Button("I already have a backup", action: onRestore)
-                    .buttonStyle(.link)
-                    .font(.vaultFootnote)
+                    .buttonStyle(VaultButtonStyle(.secondary))
                     .accessibilityIdentifier("onboarding-restore-backup")
             }
+            .padding(.top, 38)
 
-            Spacer()
-                .frame(height: 16)
+            Spacer(minLength: VaultSpacing.xl)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private var appIcon: some View {
-        if let nsImage = NSImage(named: NSImage.applicationIconName) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-        } else {
-            Image("icon")
-                .resizable()
-                .scaledToFit()
-        }
     }
 }
 

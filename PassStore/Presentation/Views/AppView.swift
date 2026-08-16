@@ -22,11 +22,13 @@ struct AppView: View {
         ZStack {
             NavigationSplitView(columnVisibility: sidebarVisibility) {
                 // The system sidebar toggle is kept: it sits where every other Mac app puts
-                // it, at the head of the sidebar's own toolbar area. It used to be removed
-                // outright because it was the one control still showing on the lock screen —
-                // the whole toolbar is hidden there now instead.
+                // it, at the head of the sidebar's own toolbar area. On a locked vault it is
+                // removed on its own rather than by hiding the toolbar — hiding the whole
+                // window toolbar collapses the title bar with it, and takes the close and
+                // minimise buttons away on the one screen you might well want them on.
                 SidebarView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 196, ideal: 220, max: 260)
+                    .modifier(HiddenSidebarToggle(isHidden: isVaultLocked || showOnboarding))
             } content: {
                 ItemListView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
@@ -34,9 +36,6 @@ struct AppView: View {
                 ItemDetailView(viewModel: viewModel)
             }
             .navigationSplitViewStyle(.balanced)
-            // Nothing in the toolbar belongs on a locked vault, including the sidebar toggle
-            // the split view contributes by itself.
-            .toolbar(isVaultLocked ? .hidden : .visible, for: .windowToolbar)
             .disabled(isVaultLocked || showOnboarding)
             // Attached here rather than on the enclosing ZStack: that already owns a
             // confirmationDialog for workspace deletion and two on one view conflict.
@@ -1899,6 +1898,22 @@ private struct FieldRow: View {
     }
 }
 
+// MARK: - Toolbar
+
+/// Takes the split view's automatic sidebar toggle out of the toolbar while the vault is
+/// locked, leaving the title bar — and so the window buttons — in place.
+private struct HiddenSidebarToggle: ViewModifier {
+    let isHidden: Bool
+
+    func body(content: Content) -> some View {
+        if isHidden {
+            content.toolbar(removing: .sidebarToggle)
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - Locked Vault
 
 private struct LockedVaultOverlay: View {
@@ -1906,8 +1921,9 @@ private struct LockedVaultOverlay: View {
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
+            // Opaque, not a blur: a locked vault should not show a frosted outline of the
+            // items behind it, and it is the screen the app is most often looked at on.
+            VaultHeroBackground()
                 .ignoresSafeArea()
 
             LockedVaultView(
@@ -1915,6 +1931,7 @@ private struct LockedVaultOverlay: View {
                 settings: viewModel.container.settings
             )
         }
+        .environment(\.colorScheme, .dark)
     }
 }
 
@@ -1946,27 +1963,25 @@ private struct LockedVaultView: View {
             VStack(spacing: VaultSpacing.xl) {
                 icon
 
-                VStack(spacing: VaultSpacing.xs) {
-                    Text(isSetup ? "Create Your Password" : "PassStore is Locked")
-                        .font(.title2.weight(.semibold))
-                    Text(isSetup
-                         ? "Set a master password to protect your secrets."
-                         : "Unlock with Touch ID, or enter your master password.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                VaultHeroWordmark(
+                    tagline: isSetup
+                        ? "Set a master password to protect your secrets."
+                        : "Unlock with Touch ID, or enter your master password."
+                )
 
                 VStack(spacing: VaultSpacing.m) {
-                    SecureField(isSetup ? "New master password" : "Master password", text: $password)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.large)
-                        .frame(width: 300)
-                        .focused($isPasswordFocused)
-                        .disabled(sessionManager.isBusy)
-                        .onSubmit { submit() }
-                        .accessibilityIdentifier("lock-password-field")
+                    SecureField(
+                        "",
+                        text: $password,
+                        prompt: Text(isSetup ? "New master password" : "Master password")
+                    )
+                    .vaultHeroField(isFocused: isPasswordFocused)
+                    .frame(width: 300)
+                    .focused($isPasswordFocused)
+                    .disabled(sessionManager.isBusy)
+                    .onSubmit { submit() }
+                    .accessibilityLabel(isSetup ? "New master password" : "Master password")
+                    .accessibilityIdentifier("lock-password-field")
 
                     actions
 
@@ -1987,7 +2002,7 @@ private struct LockedVaultView: View {
                 Button("Forgot your master password?") { isConfirmingReset = true }
                     .buttonStyle(.plain)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.white.opacity(0.35))
                     .padding(.bottom, VaultSpacing.l)
                     .accessibilityIdentifier("lock-forgot-password")
             }
@@ -2025,23 +2040,20 @@ private struct LockedVaultView: View {
     // MARK: Pieces
 
     private var icon: some View {
-        appLockHeaderImage
-            .frame(width: 96, height: 96)
-            .clipShape(RoundedRectangle(cornerRadius: VaultRadius.hero, style: .continuous))
-            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            .overlay(alignment: .bottomTrailing) {
-                if showTouchIDBadge {
-                    Image("touch_id")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 28, height: 28)
-                        .padding(5)
-                        .background(Circle().fill(Color.white))
-                        .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
-                        .offset(x: 4, y: 4)
-                        .accessibilityHidden(true)
-                }
-            }
+        VaultHeroLogo(size: 96, badge: showTouchIDBadge ? AnyView(touchIDBadge) : nil)
+    }
+
+    private var touchIDBadge: some View {
+        Image("touch_id")
+            .resizable()
+            .scaledToFit()
+            .frame(width: 28, height: 28)
+            .padding(5)
+            .background(Circle().fill(Color.white))
+            .overlay(Circle().strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
+            .offset(x: 4, y: 4)
+            .accessibilityHidden(true)
     }
 
     /// Reserved space under the buttons, tall enough for the tallest of the three states.
@@ -2136,19 +2148,6 @@ private struct LockedVaultView: View {
         }
     }
 
-    @ViewBuilder
-    private var appLockHeaderImage: some View {
-        if let appIcon = NSImage(named: NSImage.applicationIconName) {
-            Image(nsImage: appIcon)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-        } else {
-            Image("icon")
-                .resizable()
-                .scaledToFit()
-        }
-    }
 }
 
 // MARK: - Preview
