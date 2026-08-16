@@ -23,7 +23,10 @@ struct AppView: View {
                             ToolbarItem(placement: .navigation) {
                                 Button {
                                     withAnimation(.easeOut(duration: 0.18)) {
-                                        columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                                        // `.doubleColumn` hides the sidebar and keeps the item
+                                        // list. `.detailOnly` hid the list too, which is why
+                                        // the button appeared to do nothing useful.
+                                        columnVisibility = columnVisibility == .all ? .doubleColumn : .all
                                     }
                                 } label: {
                                     Label("Toggle Sidebar", systemImage: "sidebar.left")
@@ -648,12 +651,14 @@ private struct ItemListView: View {
             }
             .buttonStyle(.plain)
         }
-        .foregroundStyle(Color.accentColor)
+        // Primary text on a tinted capsule: the brand yellow is far too light to be readable
+        // as text on a near-white background.
+        .foregroundStyle(.primary)
         .padding(.horizontal, VaultSpacing.s)
         .padding(.vertical, 3)
         .background(
             Capsule(style: .continuous)
-                .fill(Color.accentColor.opacity(0.12))
+                .fill(Color.accentColor.opacity(0.22))
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Filter: \(title). Activate to remove.")

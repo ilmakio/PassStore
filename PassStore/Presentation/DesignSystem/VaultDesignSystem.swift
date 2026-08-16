@@ -23,6 +23,19 @@ enum VaultRadius {
     static let hero: CGFloat = 14
 }
 
+extension Color {
+    /// The brand yellow, used for tints, selection and accents.
+    static let vaultAccent = Color.accentColor
+
+    /// A deeper shade of the same hue, used wherever a filled control carries white text.
+    ///
+    /// The brand yellow is too light to sit under white — around 1.7:1, which is why SwiftUI's
+    /// own prominent button style silently switched some labels to black and left the app
+    /// looking like it had two kinds of yellow button. Filled buttons use this instead, so
+    /// every one of them reads the same way, while the rest of the app keeps the bright yellow.
+    static let vaultAccentStrong = Color("AccentStrong")
+}
+
 enum VaultChrome {
     static let mutedFill = Color.primary.opacity(0.06)
     static let hairline = Color.primary.opacity(0.09)
@@ -345,8 +358,9 @@ struct VaultChip: View {
 
 /// Primary / secondary sheet actions.
 ///
-/// White on the accent colour rather than black: most macOS accent presets are dark enough
-/// that black text failed contrast on the default blue.
+/// Always white on `vaultAccentStrong`. SwiftUI's `.borderedProminent` picks its label colour
+/// from the fill's luminance, which against a yellow accent meant some buttons came out with
+/// black text and others white.
 struct VaultButtonStyle: ButtonStyle {
     enum Role {
         case primary
@@ -378,7 +392,7 @@ struct VaultButtonStyle: ButtonStyle {
 
     private var fill: Color {
         switch role {
-        case .primary: Color.accentColor
+        case .primary: Color.vaultAccentStrong
         case .secondary: Color.primary.opacity(0.08)
         case .destructive: Color.red
         }
