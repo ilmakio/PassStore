@@ -21,8 +21,17 @@ struct PassStoreCommands: Commands {
 
     // MARK: - App menu
 
+    /// Replaces the stock About item so the panel can carry authorship and project links.
     private var appInfoCommands: some Commands {
-        CommandGroup(after: .appInfo) {
+        CommandGroup(replacing: .appInfo) {
+            Button {
+                AboutPassStore.show()
+            } label: {
+                Label("About PassStore", systemImage: "info.circle")
+            }
+
+            Divider()
+
 #if !PASSSTORE_APP_STORE
             Button {
                 PassStoreSparkleCoordinator.checkForUpdates()
@@ -31,9 +40,7 @@ struct PassStoreCommands: Commands {
             }
 #endif
             Button {
-                if let url = URL(string: "https://ko-fi.com/ilmakio") {
-                    NSWorkspace.shared.open(url)
-                }
+                PassStoreLinks.open(PassStoreLinks.donate)
             } label: {
                 Label("Donate / Buy me a coffee", systemImage: "cup.and.saucer.fill")
             }
@@ -272,27 +279,55 @@ struct PassStoreCommands: Commands {
     private var helpCommands: some Commands {
         CommandGroup(replacing: .help) {
             Button {
-                if let url = URL(string: "https://passstore.makio.app/security") {
-                    NSWorkspace.shared.open(url)
-                }
+                PassStoreLinks.open(PassStoreLinks.security)
             } label: {
-                Label("About encryption", systemImage: "lock.shield")
+                Label("About Encryption", systemImage: "lock.shield")
             }
 
             Button {
-                if let url = URL(string: "https://passstore.makio.app/changelog") {
-                    NSWorkspace.shared.open(url)
-                }
+                PassStoreLinks.open(PassStoreLinks.changelog)
             } label: {
                 Label("Changelog", systemImage: "list.bullet")
             }
 
+            Divider()
+
             Button {
-                if let url = URL(string: "mailto:feedback@makio.app") {
-                    NSWorkspace.shared.open(url)
-                }
+                PassStoreLinks.open(PassStoreLinks.repository)
+            } label: {
+                Label("PassStore on GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+            }
+
+            Button {
+                PassStoreLinks.open(PassStoreLinks.contributing)
+            } label: {
+                Label("Contribute…", systemImage: "hammer")
+            }
+
+            Button {
+                PassStoreLinks.open(PassStoreLinks.issues)
+            } label: {
+                Label("Report an Issue…", systemImage: "exclamationmark.bubble")
+            }
+
+            Button {
+                PassStoreLinks.open(PassStoreLinks.feedback)
             } label: {
                 Label("Send Feedback…", systemImage: "envelope")
+            }
+
+            Divider()
+
+            Button {
+                PassStoreLinks.open(PassStoreLinks.website)
+            } label: {
+                Label("PassStore Website", systemImage: "globe")
+            }
+
+            Button {
+                PassStoreLinks.open(PassStoreLinks.author)
+            } label: {
+                Label("makio.app", systemImage: "person.crop.circle")
             }
         }
     }

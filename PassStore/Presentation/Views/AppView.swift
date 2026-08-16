@@ -1721,14 +1721,20 @@ private struct LockedVaultView: View {
                 actions
             }
 
+        }
+        .padding(VaultSpacing.xxl)
+        // Kept quiet and out of the way at the very bottom: it is the escape hatch for a lost
+        // password, not something anyone should reach for while trying to remember one.
+        .overlay(alignment: .bottom) {
             if !isSetup {
                 Button("Forgot your master password?") { isConfirmingReset = true }
-                    .buttonStyle(.link)
-                    .font(.vaultFootnote)
+                    .buttonStyle(.plain)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, VaultSpacing.xs)
                     .accessibilityIdentifier("lock-forgot-password")
             }
         }
-        .padding(VaultSpacing.xxl)
         .onAppear {
             focusOrAuthenticate()
         }
@@ -1749,19 +1755,11 @@ private struct LockedVaultView: View {
             guard newValue != .unlocked else { return }
             isPasswordFocused = true
         }
-        .confirmationDialog(
-            "Erase this vault and start over?",
-            isPresented: $isConfirmingReset,
-            titleVisibility: .visible
-        ) {
-            Button("Erase Vault", role: .destructive) {
+        .sheet(isPresented: $isConfirmingReset) {
+            EraseVaultSheet {
                 sessionManager.resetVaultDestroyingAllData()
                 password = ""
             }
-            .accessibilityIdentifier("lock-confirm-reset")
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("There is no way to recover a forgotten master password — your secrets are encrypted with it. Erasing deletes every stored item on this Mac and lets you set up a new vault. If you have a .pstore backup you can restore it afterwards.")
         }
     }
 

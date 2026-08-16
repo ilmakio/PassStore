@@ -25,9 +25,14 @@ All notable changes to PassStore are documented here.
   when you switch back to it. Locking on purpose never triggers it; it returns once you have
   left the app and come back. Turn it off in Settings → General.
 - **Restore a backup during setup.** The welcome screen offers "I already have a backup".
-- **Start over after a forgotten master password.** The lock screen can erase the vault and set
-  up a new one. There is still no way to recover a forgotten password — without it nothing can
-  decrypt your secrets — but you are no longer stuck at a lock screen with no way forward.
+- **Start over after a forgotten master password.** A small link at the foot of the lock screen
+  opens a page that lists exactly what will be deleted and what will be left alone, and asks
+  you to type ERASE before it will do anything. There is still no way to recover a forgotten
+  password — without it nothing can decrypt your secrets — but you are no longer stuck at a
+  lock screen with no way forward.
+- **About PassStore** now credits the author, states that the app is open source under the MIT
+  licence, and links to the repository, the contributing guide and makio.app. The Help menu
+  gained GitHub, Contribute, Report an Issue and website links.
 - **Undo (⌘Z)** for restoring a backup, clearing previous values and restoring an old value.
 - **Sort the item list** by name, last used, last modified or date created.
 - **Copy without opening an item:** a copy button appears on hover in the list, ⇧⌘C copies the
