@@ -75,6 +75,15 @@ All notable changes to PassStore are documented here.
   **Replace**. Either way your current vault is copied aside first, so a restore can be undone
   with ⌘Z, or recovered later from Settings → Data even after quitting.
 - **Restoring the same backup twice no longer duplicates every secret.**
+- **Opening an item from the command palette shows it.** Picking an item that lived in another
+  workspace closed the palette and left the detail pane empty.
+- **The toolbar is empty while the vault is locked.** A stray sidebar toggle was left behind on
+  the lock screen.
+- **Active filters are shown above the list.** A type picked in the sidebar stayed on when you
+  moved to another workspace or section, so the list could look mysteriously short with nothing
+  explaining why. Filters now appear as a chip you can remove, with a Clear button.
+- **The sort control tells the truth in Recent.** Recent is always ordered by last used, but
+  the menu still offered — and appeared to apply — the other orders.
 - **Secret values can be revealed from the keyboard.** Hovering still reveals and clicking
   still copies; sensitive fields now also have a reveal button, which keeps the value visible
   after the pointer moves away.

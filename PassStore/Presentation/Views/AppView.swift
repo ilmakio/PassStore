@@ -13,6 +13,10 @@ struct AppView: View {
             NavigationSplitView {
                 SidebarView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 196, ideal: 220, max: 260)
+                    // Has to sit on the sidebar column itself. Applied further out it was
+                    // ignored, which left the split-view toggle as the only thing in the
+                    // toolbar while the vault was locked.
+                    .toolbar(removing: .sidebarToggle)
             } content: {
                 ItemListView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
@@ -116,9 +120,6 @@ struct AppView: View {
         .sheet(isPresented: $viewModel.isSettingsPresented) {
             SettingsSheetView(settings: viewModel.container.settings, viewModel: viewModel)
         }
-        // Keep this modifier unconditional: toggling it with lock state caused AttributeGraph crashes
-        // (ApplyUpdatesToExternalTarget / value_set) on macOS when unlocking.
-        .toolbar(removing: .sidebarToggle)
         .onChange(of: viewModel.container.sessionManager.lockState) { _, newValue in
             switch newValue {
             case .unlocked:
@@ -487,16 +488,23 @@ private struct ItemListView: View {
     /// what you touched last from any other destination.
     private var sortMenu: some View {
         Menu {
+            if viewModel.isSortOrderFixedByDestination {
+                // Offering "Name" here would be a lie: Recent is defined by its order.
+                Text("Recent is always sorted by last used")
+            }
             Picker("Sort by", selection: $viewModel.sortOrder) {
                 ForEach(ItemSortOrder.allCases) { order in
                     Label(order.title, systemImage: order.systemImage).tag(order)
                 }
             }
             .pickerStyle(.inline)
+            .disabled(viewModel.isSortOrderFixedByDestination)
         } label: {
             Label("Sort", systemImage: "arrow.up.arrow.down")
         }
-        .help("Sort the list")
+        .help(viewModel.isSortOrderFixedByDestination
+              ? "Recent is always sorted by last used"
+              : "Sort the list")
         .accessibilityIdentifier("toolbar-sort")
     }
 
@@ -552,14 +560,20 @@ private struct ItemListView: View {
         VStack(alignment: .leading, spacing: VaultSpacing.s) {
             searchField
 
+            if viewModel.hasActiveFilters {
+                activeFilters
+            }
+
             HStack(spacing: VaultSpacing.xs) {
                 Text("\(viewModel.filteredItems.count) item\(viewModel.filteredItems.count == 1 ? "" : "s")")
                     .font(.vaultBadge)
                     // `.tertiary` on this size failed contrast; secondary is legible and still quiet.
                     .foregroundStyle(.secondary)
 
-                if viewModel.sortOrder != .title {
-                    Text("· \(viewModel.sortOrder.title.lowercased())")
+                // The order actually in effect, which is not always the one chosen: Recent
+                // sorts itself.
+                if viewModel.effectiveSortOrder != .title {
+                    Text("· \(viewModel.effectiveSortOrder.title.lowercased())")
                         .font(.vaultBadge)
                         .foregroundStyle(.secondary)
                 }
@@ -578,6 +592,53 @@ private struct ItemListView: View {
         .padding(.horizontal, VaultSpacing.m)
         .padding(.top, VaultSpacing.s)
         .padding(.bottom, VaultSpacing.s)
+    }
+
+    /// Filters that are on but have no visible control of their own.
+    ///
+    /// A type picked in the sidebar stays on when you move to another workspace or section,
+    /// so the list could look mysteriously short — the header named the destination and said
+    /// nothing about the filter narrowing it.
+    private var activeFilters: some View {
+        HStack(spacing: VaultSpacing.xs) {
+            if let type = viewModel.selectedType {
+                filterChip(title: type.title, systemImage: type.systemImage) {
+                    viewModel.setSelectedType(nil)
+                }
+                .accessibilityIdentifier("active-filter-type")
+            }
+
+            Spacer(minLength: 0)
+
+            Button("Clear") { viewModel.clearFilters() }
+                .buttonStyle(.plain)
+                .font(.vaultBadge)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("active-filter-clear")
+        }
+    }
+
+    private func filterChip(title: String, systemImage: String, onRemove: @escaping () -> Void) -> some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Image(systemName: systemImage)
+                .font(.caption2)
+            Text(title)
+                .font(.vaultBadge)
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+        }
+        .foregroundStyle(Color.accentColor)
+        .padding(.horizontal, VaultSpacing.s)
+        .padding(.vertical, 3)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.accentColor.opacity(0.12))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Filter: \(title). Activate to remove.")
     }
 
     private var searchField: some View {

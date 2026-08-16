@@ -216,7 +216,9 @@ struct PassStoreCommands: Commands {
                     Label(order.title, systemImage: order.systemImage).tag(order)
                 }
             }
-            .disabled(isLocked)
+            // Recent defines its own order, so the control would otherwise claim a setting
+            // that is not being applied.
+            .disabled(isLocked || viewModel.isSortOrderFixedByDestination)
         }
     }
 

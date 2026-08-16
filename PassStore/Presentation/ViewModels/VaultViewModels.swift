@@ -398,6 +398,20 @@ final class VaultViewModel {
         }
         set {
             guard newValue != listSelection else { return }
+
+            if newValue.isEmpty {
+                // SwiftUI writes an empty selection back while the list reconciles against a
+                // new set of rows — which is exactly what happens when the command palette
+                // jumps to another destination. Taking that literally wiped the selection the
+                // palette had just made, so the detail pane came up empty.
+                if let selectedItemID, filteredItems.contains(where: { $0.id == selectedItemID }) {
+                    return
+                }
+                multiSelectedIDs = []
+                selectedItemID = nil
+                return
+            }
+
             if newValue.count > 1 {
                 multiSelectedIDs = newValue
                 if let current = selectedItemID, newValue.contains(current) { return }
@@ -2217,9 +2231,16 @@ final class VaultViewModel {
     /// "Recent" is the one destination that defines its own order — it exists to answer
     /// "what did I just use?" — so it ignores the chosen sort. Everywhere else the sort is
     /// the owner's choice rather than a hard-coded A-Z.
-    private var effectiveSortOrder: ItemSortOrder {
+    var effectiveSortOrder: ItemSortOrder {
         if case .library(.recent) = selectedDestination { return .recentlyUsed }
         return sortOrder
+    }
+
+    /// True where the destination fixes the order, so the sort control should say so rather
+    /// than claim a setting that is not being applied.
+    var isSortOrderFixedByDestination: Bool {
+        if case .library(.recent) = selectedDestination { return true }
+        return false
     }
 
     private func sortComparator(lhs: SecretItemEntity, rhs: SecretItemEntity) -> Bool {

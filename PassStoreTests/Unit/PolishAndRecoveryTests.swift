@@ -315,6 +315,89 @@ struct PolishAndRecoveryTests {
         #expect(viewModel.itemCount(in: .allItems) == 2)
     }
 
+    /// Choosing an item in the command palette has to land on that item's detail, including
+    /// when it lives in a workspace other than the one being viewed.
+    @Test func openingAnItemFromThePaletteSelectsItInAnotherWorkspace() throws {
+        let container = makeContainer("PaletteReveal")
+        let viewModel = VaultViewModel(container: container)
+        let alpha = try container.workspaceRepository.saveWorkspace(
+            WorkspaceDraft(id: nil, name: "Alpha", icon: "shippingbox", colorHex: "#4A7AFF", notes: "")
+        )
+        let beta = try container.workspaceRepository.saveWorkspace(
+            WorkspaceDraft(id: nil, name: "Beta", icon: "server.rack", colorHex: "#2AA198", notes: "")
+        )
+        _ = try container.itemRepository.saveItem(draft(title: "In Alpha", workspaceID: alpha.id))
+        let target = try container.itemRepository.saveItem(draft(title: "In Beta", workspaceID: beta.id))
+        viewModel.reload()
+
+        viewModel.selectDestination(.workspace(alpha.id))
+        #expect(viewModel.selectedItem == nil)
+
+        viewModel.selectItem(id: target.id)
+
+        #expect(viewModel.selectedItemID == target.id)
+        #expect(viewModel.selectedItem?.title == "In Beta")
+        #expect(viewModel.filteredItems.contains { $0.id == target.id })
+    }
+
+    /// SwiftUI writes an empty selection back while a list reconciles against new rows. Taken
+    /// literally that wiped the selection the palette had just made.
+    @Test func aSpuriousEmptySelectionDoesNotClearAValidOne() throws {
+        let container = makeContainer("SelectionGuard")
+        let viewModel = VaultViewModel(container: container)
+        let item = try container.itemRepository.saveItem(draft(title: "Stays Selected"))
+        viewModel.reload()
+
+        viewModel.listSelection = [item.id]
+        #expect(viewModel.selectedItemID == item.id)
+
+        viewModel.listSelection = []
+        #expect(viewModel.selectedItemID == item.id)
+
+        // A genuine deselection — the item is no longer on screen — still clears it.
+        viewModel.searchText = "nothing matches this"
+        viewModel.listSelection = []
+        #expect(viewModel.selectedItemID == nil)
+    }
+
+    @Test func recentDefinesItsOwnOrderAndSaysSo() throws {
+        let container = makeContainer("RecentSortLock")
+        let viewModel = VaultViewModel(container: container)
+        viewModel.sortOrder = .title
+
+        viewModel.selectDestination(.library(.allItems))
+        #expect(!viewModel.isSortOrderFixedByDestination)
+        #expect(viewModel.effectiveSortOrder == .title)
+
+        viewModel.selectDestination(.library(.recent))
+        #expect(viewModel.isSortOrderFixedByDestination)
+        #expect(viewModel.effectiveSortOrder == .recentlyUsed)
+    }
+
+    @Test func aTypeFilterStaysVisibleWhenTheDestinationChanges() throws {
+        let container = makeContainer("FilterVisibility")
+        let viewModel = VaultViewModel(container: container)
+        let workspace = try container.workspaceRepository.saveWorkspace(
+            WorkspaceDraft(id: nil, name: "Infra", icon: "server.rack", colorHex: "#4A7AFF", notes: "")
+        )
+        _ = try container.itemRepository.saveItem(draft(title: "Generic One", workspaceID: workspace.id))
+        viewModel.reload()
+
+        viewModel.setSelectedType(.database)
+        #expect(viewModel.hasActiveFilters)
+
+        // Moving to another destination keeps the filter, which is why the list header has to
+        // show it rather than leaving a mysteriously short list.
+        viewModel.selectDestination(.workspace(workspace.id))
+        #expect(viewModel.selectedType == .database)
+        #expect(viewModel.hasActiveFilters)
+        #expect(viewModel.filteredItems.isEmpty)
+
+        viewModel.clearFilters()
+        #expect(!viewModel.hasActiveFilters)
+        #expect(viewModel.filteredItems.map(\.title) == ["Generic One"])
+    }
+
     @Test func sortOrderChangesTheListOrder() throws {
         let container = makeContainer("SortOrder")
         let viewModel = VaultViewModel(container: container)
