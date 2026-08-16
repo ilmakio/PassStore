@@ -247,70 +247,82 @@ private struct TemplatePickerView: View {
     @Bindable var viewModel: VaultViewModel
     let onSelect: (SecretFieldTemplateEntity) -> Void
 
+    /// Two even columns. The cards are the surface here, so they are not wrapped in a card of
+    /// their own — a box drawn around a row of boxes reads as a mistake.
+    private static let columns = [
+        GridItem(.flexible(), spacing: VaultSpacing.m),
+        GridItem(.flexible(), spacing: VaultSpacing.m)
+    ]
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: VaultSpacing.xl) {
                 if !viewModel.featuredTemplates.isEmpty {
-                    VaultSection("Common", systemImage: "star") {
-                        templateGrid(templates: viewModel.featuredTemplates)
-                    }
+                    templateGroup("Common", systemImage: "star", templates: viewModel.featuredTemplates)
                 }
-                VaultSection("Built-in", systemImage: "square.grid.2x2") {
-                    templateGrid(templates: viewModel.standardBuiltInTemplates)
-                }
+                templateGroup("Built-in", systemImage: "square.grid.2x2", templates: viewModel.standardBuiltInTemplates)
                 if !viewModel.customTemplates.isEmpty {
-                    VaultSection("Custom", systemImage: "wrench.and.screwdriver") {
-                        templateGrid(templates: viewModel.customTemplates)
-                    }
+                    templateGroup("Custom", systemImage: "wrench.and.screwdriver", templates: viewModel.customTemplates)
                 }
             }
-            .padding(20)
+            .padding(VaultSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func templateGrid(templates: [SecretFieldTemplateEntity]) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], spacing: 10) {
-            ForEach(templates, id: \.id) { template in
-                Button { onSelect(template) } label: {
-                    TemplateCard(template: template)
+    private func templateGroup(
+        _ title: String,
+        systemImage: String,
+        templates: [SecretFieldTemplateEntity]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.m) {
+            VaultSectionHeader(title, systemImage: systemImage)
+
+            LazyVGrid(columns: Self.columns, spacing: VaultSpacing.m) {
+                ForEach(templates, id: \.id) { template in
+                    Button { onSelect(template) } label: {
+                        TemplateCard(template: template)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("template-card-\(template.name)")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("template-card-\(template.name)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
     }
 }
 
 private struct TemplateCard: View {
     let template: SecretFieldTemplateEntity
 
+    @State private var isHovering = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
             HStack(alignment: .top) {
                 Image(systemName: template.itemType.systemImage)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Color.vaultAccentStrong)
                     .frame(width: 30, height: 30)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.1))
+                            .fill(Color.vaultAccent.opacity(isHovering ? 0.26 : 0.16))
                     )
+                    .accessibilityHidden(true)
+
                 Spacer(minLength: 0)
+
                 if template.isBuiltIn {
                     Text("Built-in")
-                        .font(.caption2.weight(.medium))
+                        .font(.vaultBadge)
                         .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.leading)
                 }
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(template.name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.vaultRowTitle)
                     .foregroundStyle(.primary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -322,6 +334,8 @@ private struct TemplateCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            Spacer(minLength: 0)
+
             Text(template.summaryText)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -329,16 +343,24 @@ private struct TemplateCard: View {
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+        .padding(VaultSpacing.m)
+        .frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
+        // Hovering is the only affordance a grid of cards has to say it is clickable, and this
+        // one had none: the accent edge is what tells you the card is a button.
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.05))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous)
+                .fill(Color.primary.opacity(isHovering ? 0.08 : 0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous)
+                .strokeBorder(
+                    isHovering ? Color.vaultAccent.opacity(0.55) : VaultChrome.hairline,
+                    lineWidth: 1
                 )
         )
+        .contentShape(RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
     }
 }
 
@@ -487,7 +509,7 @@ private struct EnvGroupImportSection: View {
                     VStack(spacing: 8) {
                         Image(systemName: "square.and.arrow.down.on.square")
                             .font(.system(size: 22, weight: .light))
-                            .foregroundStyle(isImportDropTargeted ? Color.accentColor : .secondary)
+                            .foregroundStyle(isImportDropTargeted ? Color.vaultAccentStrong : .secondary)
                         Text("Drop .env file here")
                             .font(.subheadline.weight(.semibold))
                         Text("Hidden files without extensions are supported.")
@@ -498,7 +520,7 @@ private struct EnvGroupImportSection: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(
-                            isImportDropTargeted ? Color.accentColor : Color.primary.opacity(0.1),
+                            isImportDropTargeted ? Color.vaultAccentStrong : Color.primary.opacity(0.1),
                             lineWidth: isImportDropTargeted ? 2 : 0.5
                         )
                 )
@@ -991,7 +1013,7 @@ struct WorkspaceEditorSheet: View {
                                     if draft.colorHex.caseInsensitiveCompare(preset.hex) == .orderedSame {
                                         Image(systemName: "checkmark")
                                             .font(.system(size: 11, weight: .semibold))
-                                            .foregroundStyle(Color.accentColor)
+                                            .foregroundStyle(Color.vaultAccentStrong)
                                     }
                                 }
                             }
@@ -2214,7 +2236,7 @@ private struct TemplateSettingsPane: View {
             draft = TemplateDraft(name: "", itemType: .customTemplate, fieldDefinitions: [])
         } label: {
             Label("New custom template", systemImage: "plus.circle")
-                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                .foregroundStyle(isSelected ? Color.vaultAccentStrong : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
         }
@@ -2235,7 +2257,7 @@ private struct TemplateSettingsPane: View {
         } label: {
                     HStack {
                         Label(template.name, systemImage: template.itemType.systemImage)
-                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                    .foregroundStyle(isSelected ? Color.vaultAccentStrong : .primary)
                 Spacer(minLength: 0)
                         if template.isBuiltIn {
                             Text("Built-in")

@@ -237,6 +237,8 @@ nonisolated enum PasswordStrength: Equatable, CaseIterable, Sendable {
 struct PasswordStrengthBar: View {
     let password: String
 
+    @Environment(\.isOnVaultHero) private var isOnHero
+
     private var strength: PasswordStrength {
         PasswordStrength.evaluate(password)
     }
@@ -246,7 +248,7 @@ struct PasswordStrengthBar: View {
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(VaultChrome.mutedFill)
+                        .fill(isOnHero ? VaultHeroPalette.surfaceActive : VaultChrome.mutedFill)
                         .frame(height: 4)
 
                     RoundedRectangle(cornerRadius: 3, style: .continuous)

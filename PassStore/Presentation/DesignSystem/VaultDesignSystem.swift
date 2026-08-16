@@ -90,17 +90,26 @@ struct VaultCardBackground: View {
     var isProminent = false
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isOnVaultHero) private var isOnHero
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(isProminent ? AnyShapeStyle(.thickMaterial) : AnyShapeStyle(.regularMaterial))
+            .fill(fill)
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(
-                        Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08),
-                        lineWidth: 0.5
+                        isOnHero ? VaultHeroPalette.stroke : Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08),
+                        lineWidth: isOnHero ? 1 : 0.5
                     )
             )
+    }
+
+    /// Material blurs whatever is behind it, which on the hero means blurring a live animation.
+    private var fill: AnyShapeStyle {
+        if isOnHero {
+            return AnyShapeStyle(isProminent ? VaultHeroPalette.surfaceRaised : VaultHeroPalette.surface)
+        }
+        return AnyShapeStyle(isProminent ? AnyShapeStyle(.thickMaterial) : AnyShapeStyle(.regularMaterial))
     }
 }
 
@@ -136,34 +145,55 @@ struct VaultSection<Content: View, Accessory: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: VaultSpacing.s) {
             if !title.isEmpty {
-                HStack(spacing: VaultSpacing.s) {
-                    Capsule(style: .continuous)
-                        .fill(tint.opacity(0.85))
-                        .frame(width: VaultChrome.sectionRuleWidth, height: 12)
-                        .accessibilityHidden(true)
-
-                    if let systemImage {
-                        Image(systemName: systemImage)
-                            .font(.caption)
-                            .foregroundStyle(tint)
-                            .accessibilityHidden(true)
-                    }
-
-                    Text(title)
-                        .font(.vaultSectionTitle)
-                        .foregroundStyle(.secondary)
-
-                    Spacer(minLength: VaultSpacing.s)
-
-                    accessory()
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityAddTraits(.isHeader)
+                VaultSectionHeader(title: title, systemImage: systemImage, tint: tint, accessory: accessory)
             }
 
             VaultCard { content() }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The accent rule + icon + title line on its own.
+///
+/// Used directly by the few places whose content is already a set of cards: wrapping a grid of
+/// cards in another card just draws a box around a box.
+struct VaultSectionHeader<Accessory: View>: View {
+    let title: String
+    var systemImage: String?
+    var tint: Color = .accentColor
+    @ViewBuilder let accessory: () -> Accessory
+
+    var body: some View {
+        HStack(spacing: VaultSpacing.s) {
+            Capsule(style: .continuous)
+                .fill(tint.opacity(0.85))
+                .frame(width: VaultChrome.sectionRuleWidth, height: 12)
+                .accessibilityHidden(true)
+
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.caption)
+                    .foregroundStyle(tint)
+                    .accessibilityHidden(true)
+            }
+
+            Text(title)
+                .font(.vaultSectionTitle)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: VaultSpacing.s)
+
+            accessory()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+extension VaultSectionHeader where Accessory == EmptyView {
+    init(_ title: String, systemImage: String? = nil, tint: Color = .accentColor) {
+        self.init(title: title, systemImage: systemImage, tint: tint, accessory: { EmptyView() })
     }
 }
 
@@ -424,6 +454,7 @@ struct VaultButtonStyle: ButtonStyle {
     let role: Role
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.controlSize) private var controlSize
+    @Environment(\.isOnVaultHero) private var isOnHero
 
     init(_ role: Role = .secondary) {
         self.role = role
@@ -440,11 +471,11 @@ struct VaultButtonStyle: ButtonStyle {
                 Capsule(style: .continuous)
                     .fill(fill)
             )
-            // Secondary is a translucent wash, which on a busy or very dark surface can lose
-            // its edge entirely. The hairline keeps it a button.
+            // Secondary is a wash, which on a busy or very dark surface can lose its edge
+            // entirely. The hairline keeps it a button.
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(Color.primary.opacity(role == .secondary ? 0.13 : 0), lineWidth: 1)
+                    .strokeBorder(stroke, lineWidth: 1)
             )
             .foregroundStyle(foreground)
             .opacity(configuration.isPressed ? 0.75 : 1)
@@ -454,17 +485,28 @@ struct VaultButtonStyle: ButtonStyle {
 
     /// Disabled is a neutral wash for every role rather than a faded version of the role's own
     /// colour: yellow at 40% over a dark panel comes out as murky olive with black type on it.
+    ///
+    /// On the hero the neutrals are opaque. A translucent button there sits over a drifting
+    /// glow and an animated grid, so it shimmers and its edge disappears wherever the two
+    /// happen to be bright.
     private var fill: Color {
-        guard isEnabled else { return Color.primary.opacity(0.10) }
+        guard isEnabled else {
+            return isOnHero ? VaultHeroPalette.surface : Color.primary.opacity(0.10)
+        }
         switch role {
         case .primary: return Color.vaultAccent
-        case .secondary: return Color.primary.opacity(0.08)
+        case .secondary: return isOnHero ? VaultHeroPalette.surfaceRaised : Color.primary.opacity(0.08)
         case .destructive: return Color.red
         }
     }
 
+    private var stroke: Color {
+        guard role == .secondary || !isEnabled else { return .clear }
+        return isOnHero ? VaultHeroPalette.stroke : Color.primary.opacity(0.13)
+    }
+
     private var foreground: Color {
-        guard isEnabled else { return Color.secondary }
+        guard isEnabled else { return isOnHero ? .white.opacity(0.35) : Color.secondary }
         switch role {
         case .primary: return .black
         case .destructive: return .white
@@ -514,8 +556,6 @@ struct VaultSheetScaffold<Content: View, Footer: View>: View {
         VStack(spacing: 0) {
             header
 
-            Divider()
-
             Group {
                 if scrolls {
                     ScrollView {
@@ -531,7 +571,81 @@ struct VaultSheetScaffold<Content: View, Footer: View>: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            Divider()
+            footerBar
+        }
+        .background(.windowBackground)
+    }
+
+    /// A tinted band rather than a plain strip: it gives the sheet a top edge that belongs to
+    /// the app, and tells you at a glance which kind of sheet you opened.
+    private var header: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: VaultSpacing.m) {
+                if let systemImage {
+                    RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [tint.opacity(0.30), tint.opacity(0.14)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 36, height: 36)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                                .strokeBorder(tint.opacity(0.28), lineWidth: 0.5)
+                        )
+                        .overlay(
+                            Image(systemName: systemImage)
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(headerGlyph)
+                        )
+                        .accessibilityHidden(true)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.vaultFootnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityAddTraits(.isHeader)
+            }
+            .padding(.horizontal, VaultSpacing.xl)
+            .padding(.vertical, VaultSpacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                LinearGradient(
+                    colors: [tint.opacity(0.10), tint.opacity(0.02)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+
+            Rectangle()
+                .fill(VaultChrome.hairline)
+                .frame(height: 1)
+        }
+    }
+
+    /// The brand yellow is too light to carry a glyph on a pale tile; every other tint is fine
+    /// as itself.
+    private var headerGlyph: Color {
+        tint == .accentColor || tint == .vaultAccent ? .vaultAccentStrong : tint
+    }
+
+    private var footerBar: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(VaultChrome.hairline)
+                .frame(height: 1)
 
             HStack(spacing: VaultSpacing.m) {
                 footer()
@@ -539,42 +653,8 @@ struct VaultSheetScaffold<Content: View, Footer: View>: View {
             .padding(.horizontal, VaultSpacing.xl)
             .padding(.vertical, VaultSpacing.m)
             .frame(maxWidth: .infinity)
+            .background(Color.primary.opacity(0.035))
         }
-        .background(.windowBackground)
-    }
-
-    private var header: some View {
-        HStack(alignment: .center, spacing: VaultSpacing.m) {
-            if let systemImage {
-                RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
-                    .fill(tint.opacity(0.14))
-                    .frame(width: 32, height: 32)
-                    .overlay(
-                        Image(systemName: systemImage)
-                            .font(.body)
-                            .foregroundStyle(tint)
-                    )
-                    .accessibilityHidden(true)
-            }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.vaultTitle)
-                    .foregroundStyle(.primary)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.vaultFootnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityAddTraits(.isHeader)
-        }
-        .padding(.horizontal, VaultSpacing.xl)
-        .padding(.vertical, VaultSpacing.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

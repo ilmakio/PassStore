@@ -54,6 +54,46 @@ enum VaultHeroPalette {
     static let baseNSColor = NSColor(
         srgbRed: 0.043, green: 0.043, blue: 0.039, alpha: 1
     )
+
+    // MARK: Surfaces
+    //
+    // Solid greys, not translucency. A control drawn as a wash of white over the hero picks up
+    // whatever the glow and the pixel grid happen to be doing underneath it, so it shimmers and
+    // its edges dissolve. These are opaque, so a button stays a button wherever it sits.
+
+    /// Recessed: text fields, wells, anything you type or read into.
+    static let surface = Color(red: 0.106, green: 0.106, blue: 0.102)
+    /// Raised: secondary buttons, cards, chips.
+    static let surfaceRaised = Color(red: 0.161, green: 0.161, blue: 0.153)
+    /// Raised and lit, for pressed or selected.
+    static let surfaceActive = Color(red: 0.216, green: 0.216, blue: 0.204)
+    static let stroke = Color.white.opacity(0.13)
+    static let strokeStrong = Color.white.opacity(0.22)
+}
+
+// MARK: - Hero environment
+
+private struct VaultHeroEnvironmentKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True inside a screen drawn on `VaultHeroBackground`.
+    ///
+    /// Shared controls read this to swap their translucent macOS fills for the hero's opaque
+    /// greys, rather than every hero screen re-implementing a button and a text field.
+    var isOnVaultHero: Bool {
+        get { self[VaultHeroEnvironmentKey.self] }
+        set { self[VaultHeroEnvironmentKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Marks a subtree as sitting on the hero: dark scheme, opaque control fills.
+    func vaultHeroContent() -> some View {
+        environment(\.isOnVaultHero, true)
+            .environment(\.colorScheme, .dark)
+    }
 }
 
 // MARK: - Window chrome
@@ -350,7 +390,7 @@ struct VaultHeroWordmark: View {
 /// A text field that belongs on the hero.
 ///
 /// `.roundedBorder` draws a light control that punches a hole in the dark panel, so the hero
-/// draws its own: a translucent well with an accent border while it holds focus.
+/// draws its own: an opaque well with an accent border while it holds focus.
 struct VaultHeroFieldBackground: ViewModifier {
     var isFocused: Bool
 
@@ -363,12 +403,12 @@ struct VaultHeroFieldBackground: ViewModifier {
             .padding(.vertical, 11)
             .background(
                 RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
-                    .fill(.white.opacity(0.07))
+                    .fill(VaultHeroPalette.surface)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
                     .strokeBorder(
-                        isFocused ? Color.vaultAccent.opacity(0.8) : .white.opacity(0.14),
+                        isFocused ? Color.vaultAccent.opacity(0.85) : VaultHeroPalette.stroke,
                         lineWidth: isFocused ? 1.5 : 1
                     )
             )
@@ -379,6 +419,30 @@ struct VaultHeroFieldBackground: ViewModifier {
 extension View {
     func vaultHeroField(isFocused: Bool) -> some View {
         modifier(VaultHeroFieldBackground(isFocused: isFocused))
+    }
+}
+
+// MARK: - Card
+
+/// The hero's answer to `VaultCard`: same shape, opaque fill.
+struct VaultHeroCard<Content: View>: View {
+    var padding: CGFloat = VaultSpacing.l
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.m) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(padding)
+        .background(
+            RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous)
+                .fill(VaultHeroPalette.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous)
+                .strokeBorder(VaultHeroPalette.stroke, lineWidth: 1)
+        )
     }
 }
 

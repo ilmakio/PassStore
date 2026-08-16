@@ -11,7 +11,13 @@ struct PassStoreApp: App {
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
-        let container: AppContainer = if arguments.contains("--uitesting") {
+        // `--ui-onboarding` starts on a throwaway container with no vault, so setup can be
+        // driven without erasing anybody's real one.
+        let startsInSetup = arguments.contains("--ui-onboarding")
+        let isUITesting = startsInSetup || arguments.contains("--uitesting")
+        let container: AppContainer = if startsInSetup {
+            .uiTestingSetupRequired()
+        } else if isUITesting {
             .uiTesting()
         } else {
             .live
@@ -20,7 +26,9 @@ struct PassStoreApp: App {
         let viewModel = VaultViewModel(container: container)
         _viewModel = State(initialValue: viewModel)
         _menuBarViewModel = State(initialValue: MenuBarViewModel(vault: viewModel))
-        if !arguments.contains("--uitesting") {
+        // A test instance must never claim the system-wide shortcut out from under the
+        // installed app.
+        if !isUITesting {
             PassStoreAppDelegate.deferredGlobalHotkeyConfiguration = {
                 GlobalCommandPaletteHotkey.shared.configure(viewModel: viewModel, settings: container.settings)
             }

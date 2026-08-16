@@ -60,6 +60,18 @@ final class AppContainer {
         return container
     }
 
+    /// A throwaway container with no vault in it, so the app starts in setup and shows the
+    /// onboarding flow. Nothing here touches the real vault or the real Keychain.
+    static func uiTestingSetupRequired() -> AppContainer {
+        let defaults = UserDefaults(suiteName: "PassStoreUITestSetup-\(UUID().uuidString)")!
+        return AppContainer(
+            inMemory: true,
+            defaults: defaults,
+            keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: true),
+            encryptedVaultStore: InMemoryEncryptedVaultStore()
+        )
+    }
+
     static func uiTesting() -> AppContainer {
         let defaults = UserDefaults(suiteName: "PassStoreUITest-\(UUID().uuidString)")!
         let container = AppContainer(

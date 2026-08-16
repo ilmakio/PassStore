@@ -1609,7 +1609,9 @@ private struct LinkedFileSection: View {
         case .upToDate: .green
         case .unavailable: .red
         case .needsInitialSync, .fileChanged, .vaultChanged, .diverged: .orange
-        case .unlinked: .accentColor
+        // Sits next to green / orange / red as a status glyph, so it needs the readable
+        // shade rather than the bright fill yellow.
+        case .unlinked: .vaultAccentStrong
         }
     }
 
@@ -1902,12 +1904,26 @@ private struct FieldRow: View {
 
 /// Takes the split view's automatic sidebar toggle out of the toolbar while the vault is
 /// locked, leaving the title bar — and so the window buttons — in place.
+///
+/// A toolbar with nothing in it collapses to a short title bar, which moves the traffic lights
+/// up and in by about ten points; the empty item holds the toolbar at its normal height so the
+/// buttons stay exactly where they are in the rest of the app.
 private struct HiddenSidebarToggle: ViewModifier {
     let isHidden: Bool
 
+    private static let toolbarControlHeight: CGFloat = 28
+
     func body(content: Content) -> some View {
         if isHidden {
-            content.toolbar(removing: .sidebarToggle)
+            content
+                .toolbar(removing: .sidebarToggle)
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        Color.clear
+                            .frame(width: 1, height: Self.toolbarControlHeight)
+                            .accessibilityHidden(true)
+                    }
+                }
         } else {
             content
         }
@@ -1930,8 +1946,8 @@ private struct LockedVaultOverlay: View {
                 sessionManager: viewModel.container.sessionManager,
                 settings: viewModel.container.settings
             )
+            .vaultHeroContent()
         }
-        .environment(\.colorScheme, .dark)
     }
 }
 
