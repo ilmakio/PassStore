@@ -20,7 +20,8 @@ All notable changes to PassStore are documented here.
   remove them, so you can clear them for one item, clear them across the whole vault, or turn
   the feature off in Settings → Data.
 - **Item history (⌘Y).** A window with the complete change log for an item and every previous
-  value, each of which can be copied or put back.
+  value, each of which can be copied or put back. Reachable from the ⋯ menu in the detail pane
+  and from an item's right-click menu.
 - **Automatic Touch ID.** The unlock prompt now appears on its own when you open PassStore and
   when you switch back to it. Locking on purpose never triggers it; it returns once you have
   left the app and come back. Turn it off in Settings → General.
@@ -45,18 +46,27 @@ All notable changes to PassStore are documented here.
 
 ### Changed
 
-- **⌘N creates a new secret item.** It used to open a second window. New Workspace moves to
-  ⇧⌘N.
+- **⌘N creates a new secret item.** It used to open a second, empty window, and making an item
+  was on ⇧⌘N — which now makes a new workspace.
 - **⌘⌥P, "Open Main Window" and the Dock icon reuse the existing window** instead of opening
   another one each time, restoring it if it was minimised.
 - **The menus were reorganised:** creating and importing under File, copying and Find under
   Edit, navigation and sorting under View, and everything vault-specific under Vault.
 - **New shortcuts:** ⇧⌘C copy password, ⌘Y item history, ⌘R update from linked file.
-- **"Recent" now lists the items you have actually opened.** It previously showed the same
-  items as "All Items", in a different order.
+- **"Recent" now lists the items you have actually opened**, plus anything you have just
+  created. It previously showed the same items as "All Items", in a different order.
+- **The yellow is a little deeper and warmer**, and filled buttons use a stronger shade of it
+  with white labels. Some of them used to come out with black text and others white, because
+  the label colour was picked automatically from a yellow too light to read white against.
+- **The item editor was reorganised.** Name, workspace and type sit together, the workspace
+  chooser shows each workspace's own icon and colour and can create a new one without leaving
+  the menu, and "favourite" is a labelled checkbox rather than an unlabelled star. Environment
+  moved in alongside the rest instead of occupying a section of its own.
 - **Every screen shares one layout**, so Settings, the editors, import, export, Vault Health
   and bulk edit look and behave consistently. Settings gains a **Data** tab for previous
   values, linked files and recovery.
+- **The list header no longer carries a description.** "Favorites" does not need "Pinned
+  secrets you reach for often" written under it, and the strap line only pushed the list down.
 - **PassStore follows your system text size**, and the sidebar now matches other Mac apps in
   row size and contrast.
 - **The command palette ranks its results**, so typing part of a name brings that item to the
@@ -87,8 +97,11 @@ All notable changes to PassStore are documented here.
 - **Secret values can be revealed from the keyboard.** Hovering still reveals and clicking
   still copies; sensitive fields now also have a reveal button, which keeps the value visible
   after the pointer moves away.
-- **The item list behaves like a list:** arrow keys move through it, ⇧-click selects a range
-  and ⌘-click toggles individual items.
+- **The item list behaves like a list:** ↑ and ↓ move through it, ⇧-click selects a range,
+  ⌘-click adds or removes a single row, and Escape clears the selection. Arrow keys still stay
+  out of the way of whatever you are typing in.
+- **⌘-clicking a second item keeps the first one.** It used to drop whatever was already
+  selected and start again from the row just clicked.
 - **Unlocking, changing your master password and exporting no longer freeze the window.** All
   three now show real progress.
 - **The password field is focused as soon as the lock screen appears**, and Return activates
