@@ -454,11 +454,18 @@ private struct ItemListView: View {
                     // A real `List` selection rather than a stack of buttons: this is what
                     // gives arrow-key navigation, ⇧-click ranges, ⌘-click toggling and a
                     // focus ring, none of which the hand-rolled version had.
+                    //
+                    // The highlight is drawn per row instead of by the system: the system one
+                    // is a solid fill of the accent colour, which against a yellow accent
+                    // swamped the workspace chips. `tint(.clear)` takes the built-in fill out
+                    // of the way so the row's own tinted background is what shows.
                     List(viewModel.filteredItems, id: \.id, selection: $viewModel.listSelection) { item in
                         ItemRow(viewModel: viewModel, item: item)
                             .tag(item.id)
+                            .listRowBackground(rowBackground(for: item))
                     }
                     .listStyle(.inset)
+                    .tint(.clear)
                     .accessibilityIdentifier("item-list")
                 }
 
@@ -613,6 +620,26 @@ private struct ItemListView: View {
         .padding(.horizontal, VaultSpacing.m)
         .padding(.top, VaultSpacing.s)
         .padding(.bottom, VaultSpacing.s)
+    }
+
+    /// A soft wash of the item's workspace colour, so a selected row still reads as belonging
+    /// to that workspace and anything drawn on top of it stays legible.
+    @ViewBuilder
+    private func rowBackground(for item: SecretItemEntity) -> some View {
+        let isSelected = viewModel.listSelection.contains(item.id)
+        let tint = item.workspace.map { Color(hex: $0.colorHex) } ?? Color.accentColor
+
+        if isSelected {
+            RoundedRectangle(cornerRadius: VaultRadius.control - 1, style: .continuous)
+                .fill(tint.opacity(0.16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: VaultRadius.control - 1, style: .continuous)
+                        .strokeBorder(tint.opacity(0.35), lineWidth: 1)
+                )
+                .padding(.horizontal, 2)
+        } else {
+            Color.clear
+        }
     }
 
     /// Filters that are on but have no visible control of their own.
@@ -812,6 +839,10 @@ private struct ItemRow: View {
             }
         }
         Divider()
+        Button("View History…", systemImage: "clock.arrow.circlepath") {
+            viewModel.select(item)
+            viewModel.activeSheet = .itemHistory(item.id)
+        }
         Button("Duplicate", systemImage: "plus.square.on.square") {
             viewModel.duplicate(item)
         }
@@ -1084,6 +1115,14 @@ private struct ItemDetailView: View {
                         .accessibilityIdentifier("toolbar-detail-copy")
 
                         Menu {
+                            Button("View History…", systemImage: "clock.arrow.circlepath") {
+                                viewModel.activeSheet = .itemHistory(item.id)
+                            }
+                            .keyboardShortcut("y", modifiers: [.command])
+                            .accessibilityIdentifier("detail-action-history")
+
+                            Divider()
+
                             Button("Duplicate", systemImage: "plus.square.on.square") {
                                 viewModel.duplicateSelectedItem()
                             }

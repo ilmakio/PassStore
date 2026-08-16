@@ -424,7 +424,9 @@ struct VaultIconButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: VaultRadius.control - 1, style: .continuous)
                     .fill(configuration.isPressed || isActive ? Color.primary.opacity(0.12) : Color.clear)
             )
-            .foregroundStyle(isActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            // The explicit asset colour, not `Color.accentColor`: the item list clears its
+            // tint to suppress the system row highlight, which would take this with it.
+            .foregroundStyle(isActive ? AnyShapeStyle(Color.vaultAccentStrong) : AnyShapeStyle(.secondary))
             .opacity(isEnabled ? 1 : 0.35)
             .contentShape(Rectangle())
     }
