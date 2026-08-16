@@ -362,24 +362,46 @@ struct PolishAndRecoveryTests {
         #expect(viewModel.filteredItems.contains { $0.id == target.id })
     }
 
-    /// SwiftUI writes an empty selection back while a list reconciles against new rows. Taken
-    /// literally that wiped the selection the palette had just made.
-    @Test func aSpuriousEmptySelectionDoesNotClearAValidOne() throws {
-        let container = makeContainer("SelectionGuard")
+    /// The list draws its own selection, so range and toggle behaviour is implemented rather
+    /// than inherited from AppKit — and therefore worth pinning down.
+    @Test func shiftClickSelectsTheRangeAndCommandClickTogglesOneRow() throws {
+        let container = makeContainer("SelectionRange")
         let viewModel = VaultViewModel(container: container)
-        let item = try container.itemRepository.saveItem(draft(title: "Stays Selected"))
+        for title in ["A", "B", "C", "D"] {
+            _ = try container.itemRepository.saveItem(draft(title: title))
+        }
+        viewModel.reload()
+        viewModel.sortOrder = .title
+
+        let rows = viewModel.filteredItems
+        #expect(rows.map(\.title) == ["A", "B", "C", "D"])
+
+        viewModel.select(rows[0])
+        viewModel.extendSelection(to: rows[2])
+        #expect(viewModel.multiSelectedItems.map(\.title) == ["A", "B", "C"])
+        #expect(viewModel.selectedItemID == rows[2].id)
+
+        // Extending backwards from the new anchor covers the other direction.
+        viewModel.select(rows[3])
+        viewModel.extendSelection(to: rows[1])
+        #expect(viewModel.multiSelectedItems.map(\.title) == ["B", "C", "D"])
+
+        // ⌘-click removes a single row from the run.
+        viewModel.toggleMultiSelect(rows[2])
+        #expect(viewModel.multiSelectedItems.map(\.title) == ["B", "D"])
+        #expect(viewModel.isSelected(rows[1]))
+        #expect(!viewModel.isSelected(rows[2]))
+    }
+
+    @Test func shiftClickWithoutAnAnchorJustSelects() throws {
+        let container = makeContainer("SelectionNoAnchor")
+        let viewModel = VaultViewModel(container: container)
+        let item = try container.itemRepository.saveItem(draft(title: "Only One"))
         viewModel.reload()
 
-        viewModel.listSelection = [item.id]
+        viewModel.extendSelection(to: item)
         #expect(viewModel.selectedItemID == item.id)
-
-        viewModel.listSelection = []
-        #expect(viewModel.selectedItemID == item.id)
-
-        // A genuine deselection — the item is no longer on screen — still clears it.
-        viewModel.searchText = "nothing matches this"
-        viewModel.listSelection = []
-        #expect(viewModel.selectedItemID == nil)
+        #expect(!viewModel.isMultiSelecting)
     }
 
     @Test func recentDefinesItsOwnOrderAndSaysSo() throws {

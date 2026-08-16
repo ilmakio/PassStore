@@ -451,21 +451,26 @@ private struct ItemListView: View {
                     emptyListPlaceholder
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    // A real `List` selection rather than a stack of buttons: this is what
-                    // gives arrow-key navigation, ⇧-click ranges, ⌘-click toggling and a
-                    // focus ring, none of which the hand-rolled version had.
-                    //
-                    // The highlight is drawn per row instead of by the system: the system one
-                    // is a solid fill of the accent colour, which against a yellow accent
-                    // swamped the workspace chips. `tint(.clear)` takes the built-in fill out
-                    // of the way so the row's own tinted background is what shows.
-                    List(viewModel.filteredItems, id: \.id, selection: $viewModel.listSelection) { item in
-                        ItemRow(viewModel: viewModel, item: item)
-                            .tag(item.id)
-                            .listRowBackground(rowBackground(for: item))
+                    // Deliberately no `selection:` binding. AppKit draws that highlight as a
+                    // solid fill of the accent colour and there is no public way to restyle
+                    // it — against a yellow accent it swamped the workspace chips, and it
+                    // painted straight over the row's own background. Selection is drawn and
+                    // handled here instead; ⌘-click, ⇧-click ranges and ⌥↑/⌥↓ all still work.
+                    List {
+                        ForEach(viewModel.filteredItems, id: \.id) { item in
+                            ItemRow(viewModel: viewModel, item: item)
+                                .listRowBackground(rowBackground(for: item))
+                        }
                     }
                     .listStyle(.inset)
-                    .tint(.clear)
+                    .onKeyPress(.upArrow) {
+                        viewModel.moveSelection(by: -1)
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        viewModel.moveSelection(by: 1)
+                        return .handled
+                    }
                     .accessibilityIdentifier("item-list")
                 }
 
@@ -626,7 +631,7 @@ private struct ItemListView: View {
     /// to that workspace and anything drawn on top of it stays legible.
     @ViewBuilder
     private func rowBackground(for item: SecretItemEntity) -> some View {
-        let isSelected = viewModel.listSelection.contains(item.id)
+        let isSelected = viewModel.isSelected(item)
         let tint = item.workspace.map { Color(hex: $0.colorHex) } ?? Color.accentColor
 
         if isSelected {
@@ -737,6 +742,35 @@ private struct ItemRow: View {
     }
 
     var body: some View {
+        Button(action: handleClick) {
+            rowContent
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("item-row-\(uiIdentifierSlug(item.title))")
+        .contextMenu {
+            if viewModel.isMultiSelecting {
+                multiSelectionContextMenu
+            } else {
+                singleItemContextMenu
+            }
+        }
+    }
+
+    /// Plain click selects, ⌘ toggles, ⇧ extends — the modifiers a Mac list is expected to
+    /// honour, handled here because the row owns its own selection.
+    private func handleClick() {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.shift) {
+            viewModel.extendSelection(to: item)
+        } else if flags.contains(.command) || viewModel.isMultiSelecting {
+            viewModel.toggleMultiSelect(item)
+        } else {
+            viewModel.select(item)
+        }
+    }
+
+    private var rowContent: some View {
         HStack(spacing: VaultSpacing.s) {
             VStack(alignment: .leading, spacing: VaultSpacing.xs) {
                 HStack(alignment: .center, spacing: VaultSpacing.xs) {
@@ -796,15 +830,6 @@ private struct ItemRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("item-row-\(uiIdentifierSlug(item.title))")
-        .contextMenu {
-            if viewModel.isMultiSelecting {
-                multiSelectionContextMenu
-            } else {
-                singleItemContextMenu
-            }
-        }
     }
 
     private func flashCopied() {

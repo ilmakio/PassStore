@@ -367,41 +367,18 @@ final class VaultViewModel {
 
     // MARK: - Multi-selection
 
-    /// Bridge between SwiftUI's `List(selection:)` and the existing single/multi split.
+    /// Everything currently highlighted, whether that is one row or many.
     ///
-    /// Handing the list a real selection set is what buys arrow keys, ⇧-click ranges and
-    /// ⌘-click toggling; the rest of the app still thinks in terms of "the selected item"
-    /// plus "a multi-selection", so this keeps both in step.
+    /// Read-only: the list draws its own selection rather than handing the job to AppKit, so
+    /// nothing writes a selection set back in. Clicks go through `select`, `toggleMultiSelect`
+    /// and `extendSelection`.
     var listSelection: Set<UUID> {
-        get {
-            if !multiSelectedIDs.isEmpty { return multiSelectedIDs }
-            return selectedItemID.map { [$0] } ?? []
-        }
-        set {
-            guard newValue != listSelection else { return }
+        if !multiSelectedIDs.isEmpty { return multiSelectedIDs }
+        return selectedItemID.map { [$0] } ?? []
+    }
 
-            if newValue.isEmpty {
-                // SwiftUI writes an empty selection back while the list reconciles against a
-                // new set of rows — which is exactly what happens when the command palette
-                // jumps to another destination. Taking that literally wiped the selection the
-                // palette had just made, so the detail pane came up empty.
-                if let selectedItemID, filteredItems.contains(where: { $0.id == selectedItemID }) {
-                    return
-                }
-                multiSelectedIDs = []
-                selectedItemID = nil
-                return
-            }
-
-            if newValue.count > 1 {
-                multiSelectedIDs = newValue
-                if let current = selectedItemID, newValue.contains(current) { return }
-                selectedItemID = filteredItems.first(where: { newValue.contains($0.id) })?.id
-            } else {
-                multiSelectedIDs = []
-                select(items.first(where: { $0.id == newValue.first }))
-            }
-        }
+    func isSelected(_ item: SecretItemEntity) -> Bool {
+        listSelection.contains(item.id)
     }
 
     /// The field a one-click copy should reach for.
@@ -423,6 +400,25 @@ final class VaultViewModel {
 
     var multiSelectedItems: [SecretItemEntity] {
         filteredItems.filter { multiSelectedIDs.contains($0.id) }
+    }
+
+    /// ⇧-click: selects everything between the current anchor and `item`.
+    ///
+    /// The list draws and handles its own selection, so the range behaviour a Mac list is
+    /// expected to have has to be implemented rather than inherited.
+    func extendSelection(to item: SecretItemEntity) {
+        let visible = filteredItems
+        guard let targetIndex = visible.firstIndex(where: { $0.id == item.id }) else { return }
+
+        let anchorID = selectedItemID ?? multiSelectedIDs.first
+        guard let anchorID, let anchorIndex = visible.firstIndex(where: { $0.id == anchorID }) else {
+            select(item)
+            return
+        }
+
+        let range = anchorIndex <= targetIndex ? anchorIndex...targetIndex : targetIndex...anchorIndex
+        multiSelectedIDs = Set(visible[range].map(\.id))
+        selectedItemID = item.id
     }
 
     func toggleMultiSelect(_ item: SecretItemEntity) {
