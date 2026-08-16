@@ -1164,6 +1164,20 @@ final class VaultViewModel {
         container.clipboard.copy(field.value, label: field.label)
     }
 
+    /// Copies the selected item's password, or its first secret when it has no password.
+    ///
+    /// The commonest thing anyone does in this app had no shortcut at all.
+    func copyPrimaryFieldOfSelectedItem() {
+        guard let selectedItem, let field = primaryCopyField(for: selectedItem) else { return }
+        copyField(field)
+        lastActionMessage = "Copied \(field.label) from “\(selectedItem.title)”."
+    }
+
+    func updateSelectedItemFromLinkedFile() {
+        guard let selectedItem else { return }
+        updateItemFromLinkedFile(selectedItem)
+    }
+
     func copyEnv() {
         guard let selectedItem else { return }
         copyEnv(for: selectedItem)

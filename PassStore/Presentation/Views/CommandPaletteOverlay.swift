@@ -266,7 +266,7 @@ extension VaultViewModel {
             .init(
                 id: "cmd.newItem",
                 title: "New Secret Item…",
-                subtitle: "Shortcut: ⌘⇧N",
+                subtitle: "Shortcut: ⌘N",
                 keywords: ["new", "add", "create", "item"],
                 isEnabled: true,
                 perform: wrap { self.activeSheet = .newItemFlow }

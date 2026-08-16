@@ -160,9 +160,7 @@ struct AppView: View {
             if viewModel.container.sessionManager.lockState == .setupRequired {
                 showOnboarding = true
             }
-            GlobalCommandPaletteHotkey.shared.setOpenMainWindowAction {
-                openWindow(id: "main")
-            }
+            MainWindowPresenter.setOpenAction { openWindow(id: PassStoreScene.mainWindowID) }
             viewModel.refreshLinkedFileStatuses()
         }
         // Coming back from an editor is exactly when a linked `.env` is likely to have

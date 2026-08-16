@@ -25,10 +25,17 @@ struct PassStoreApp: App {
                 GlobalCommandPaletteHotkey.shared.configure(viewModel: viewModel, settings: container.settings)
             }
         }
+        PassStoreAppDelegate.terminationHandler = {
+            MainActor.assumeIsolated { container.memoryStore.flushPendingPersist() }
+        }
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        // A single `Window`, not a `WindowGroup`. There is one vault, so there is one window:
+        // a group let ⌘⌥P and "Open Main Window" spawn a fresh copy of the app every time
+        // they fired, and SwiftUI hung its own "New Window" item on ⌘N — which is the
+        // shortcut people expect to create a new entry.
+        Window("PassStore", id: PassStoreScene.mainWindowID) {
             AppView(viewModel: viewModel)
         }
         .commands {
@@ -46,6 +53,10 @@ struct PassStoreApp: App {
     }
 }
 
+enum PassStoreScene {
+    static let mainWindowID = "main"
+}
+
 // MARK: - Menu bar extra
 
 private struct MenuBarExtraOpenWindowBridge: View {
@@ -55,12 +66,10 @@ private struct MenuBarExtraOpenWindowBridge: View {
     var body: some View {
         MenuBarPanelView(
             viewModel: viewModel,
-            onOpenMainWindow: { openWindow(id: "main") }
+            onOpenMainWindow: { MainWindowPresenter.present() }
         )
         .onAppear {
-            GlobalCommandPaletteHotkey.shared.setOpenMainWindowAction {
-                openWindow(id: "main")
-            }
+            MainWindowPresenter.setOpenAction { openWindow(id: PassStoreScene.mainWindowID) }
         }
     }
 }

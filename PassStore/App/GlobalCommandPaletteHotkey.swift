@@ -30,7 +30,6 @@ final class GlobalCommandPaletteHotkey {
     private weak var settings: AppSettingsStore?
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
-    private var openMainWindow: (() -> Void)?
     private var lastTrigger = Date.distantPast
     private var settingsObserver: NSObjectProtocol?
 
@@ -57,11 +56,6 @@ final class GlobalCommandPaletteHotkey {
         reinstallMonitors()
     }
 
-    /// Call from any scene that has `openWindow` in environment (main window and menu bar).
-    func setOpenMainWindowAction(_ action: @escaping () -> Void) {
-        openMainWindow = action
-    }
-
     func stop() {
         unregister()
         if let settingsObserver {
@@ -70,7 +64,6 @@ final class GlobalCommandPaletteHotkey {
         }
         viewModel = nil
         settings = nil
-        openMainWindow = nil
     }
 
     func reinstallMonitors() {
@@ -158,23 +151,15 @@ final class GlobalCommandPaletteHotkey {
             guard now.timeIntervalSince(self.lastTrigger) >= self.throttleInterval else { return }
             self.lastTrigger = now
 
-            NSApp.activate(ignoringOtherApps: true)
-            self.openMainWindow?()
-            self.bringExistingMainWindowForward()
+            // Reuses the existing window; only opens one when there isn't any. This used to
+            // call `openWindow` unconditionally against a `WindowGroup`, so every press left
+            // another window behind.
+            MainWindowPresenter.present()
 
             // Second tick: let SwiftUI/AppKit finish ordering windows before presenting.
             DispatchQueue.main.async { [weak self] in
                 self?.viewModel?.presentCommandPalette()
             }
         }
-    }
-
-    private func bringExistingMainWindowForward() {
-        let candidates = NSApp.windows.filter { !$0.isSheet && $0.level == .normal && $0.canBecomeKey }
-        if let main = candidates.first(where: \.isMainWindow) {
-            main.makeKeyAndOrderFront(nil)
-            return
-        }
-        candidates.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })?.makeKeyAndOrderFront(nil)
     }
 }

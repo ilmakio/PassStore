@@ -43,6 +43,22 @@ All notable changes to PassStore are documented here.
 
 ### Fixed
 
+- **⌘N creates a new secret item.** It used to open a second, empty copy of the app window:
+  PassStore was built as a multi-window app, so SwiftUI claimed ⌘N for "New Window" and the
+  new-item command was pushed onto ⌘⇧N. There is one vault, so there is now one window.
+- **The global shortcut reuses the window instead of stacking up new ones.** ⌘⌥P, "Open Main
+  Window" in the menu bar, and clicking the Dock icon now all bring the existing window
+  forward — un-minimising it if needed — and only open one when none exists. Pressing ⌘⌥P
+  three times used to leave three windows behind.
+- **The menus were reorganised** to match where a Mac user looks: making and importing under
+  File, copying and Find under Edit, navigation and sorting under View, and everything
+  vault-specific in a new **Vault** menu. The password generator and the health report used to
+  live under View, and Lock sat in the app menu next to Settings.
+- **New shortcuts:** ⌘⇧C copies the selected item's password — the commonest action in the app
+  had none — ⌘Y opens its history, and ⌘R pulls in changes from its linked file.
+- **Commands that need an unlocked vault are now disabled while it is locked.** ⌘N and the
+  import commands would previously open a sheet on top of the lock screen.
+- Quitting immediately after opening an item no longer drops its "last used" timestamp.
 - **Restoring a backup no longer replaces your vault without asking.** A `.pstore` used to be
   applied the instant the password was accepted: every workspace, item, template and
   preference gone, with no summary, no confirmation and no way back. PassStore now shows what
