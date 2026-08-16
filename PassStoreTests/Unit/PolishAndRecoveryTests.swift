@@ -297,22 +297,44 @@ struct PolishAndRecoveryTests {
 
     // MARK: - Library sections and sorting
 
-    @Test func recentOnlyContainsItemsThatHaveActuallyBeenOpened() throws {
-        let container = makeContainer("RecentSection")
+    /// Something you just made belongs in Recent — it is where you would go looking for it.
+    @Test func aNewlyCreatedItemAppearsAtTheTopOfRecent() throws {
+        let container = makeContainer("RecentNewItem")
         let viewModel = VaultViewModel(container: container)
-        _ = try container.itemRepository.saveItem(draft(title: "Untouched"))
-        let opened = try container.itemRepository.saveItem(draft(title: "Opened"))
+
+        let older = try container.itemRepository.saveItem(draft(title: "Older"))
+        older.lastAccessedAt = Date().addingTimeInterval(-3600)
+        let created = try container.itemRepository.saveItem(draft(title: "Just Imported"))
         viewModel.reload()
 
-        #expect(viewModel.itemCount(in: .recent) == 0)
-
-        viewModel.select(viewModel.items.first { $0.id == opened.id })
-        viewModel.reload()
+        #expect(created.lastAccessedAt != nil)
 
         viewModel.selectDestination(.library(.recent))
-        #expect(viewModel.filteredItems.map(\.title) == ["Opened"])
-        #expect(viewModel.itemCount(in: .recent) == 1)
-        #expect(viewModel.itemCount(in: .allItems) == 2)
+        #expect(viewModel.filteredItems.first?.title == "Just Imported")
+        #expect(viewModel.itemCount(in: .recent) == 2)
+    }
+
+    @Test func recentIsOrderedByUseRatherThanName() throws {
+        let container = makeContainer("RecentSection")
+        let viewModel = VaultViewModel(container: container)
+        let alpha = try container.itemRepository.saveItem(draft(title: "Alpha"))
+        alpha.lastAccessedAt = Date().addingTimeInterval(-600)
+        let zulu = try container.itemRepository.saveItem(draft(title: "Zulu"))
+        zulu.lastAccessedAt = Date().addingTimeInterval(-60)
+        viewModel.reload()
+
+        // Sorting by name is ignored here: Recent defines its own order.
+        viewModel.sortOrder = .title
+        viewModel.selectDestination(.library(.recent))
+        #expect(viewModel.filteredItems.map(\.title) == ["Zulu", "Alpha"])
+
+        // An archived item drops out of Recent even though it has been used.
+        var archived = viewModel.draft(forItemID: alpha.id)
+        archived.id = alpha.id
+        archived.isArchived = true
+        viewModel.saveItem(archived)
+        viewModel.selectDestination(.library(.recent))
+        #expect(viewModel.filteredItems.map(\.title) == ["Zulu"])
     }
 
     /// Choosing an item in the command palette has to land on that item's detail, including

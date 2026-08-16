@@ -7,16 +7,33 @@ struct AppView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.controlActiveState) private var controlActiveState
     @State private var showOnboarding = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         ZStack {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
                 SidebarView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 196, ideal: 220, max: 260)
-                    // Has to sit on the sidebar column itself. Applied further out it was
-                    // ignored, which left the split-view toggle as the only thing in the
-                    // toolbar while the vault was locked.
+                    // The built-in toggle cannot be hidden only while locked without
+                    // rebuilding the toolbar, which used to glitch the split view. It is
+                    // removed outright and replaced with one this view controls.
                     .toolbar(removing: .sidebarToggle)
+                    .toolbar {
+                        if !isVaultLocked {
+                            ToolbarItem(placement: .navigation) {
+                                Button {
+                                    withAnimation(.easeOut(duration: 0.18)) {
+                                        columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                                    }
+                                } label: {
+                                    Label("Toggle Sidebar", systemImage: "sidebar.left")
+                                }
+                                .keyboardShortcut("s", modifiers: [.control, .command])
+                                .help("Hide or show the sidebar")
+                                .accessibilityIdentifier("toolbar-toggle-sidebar")
+                            }
+                        }
+                    }
             } content: {
                 ItemListView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
@@ -456,8 +473,9 @@ private struct ItemListView: View {
             .onChange(of: viewModel.searchFocusRequests) { _, _ in
                 isSearchFocused = true
             }
+            // No subtitle: "Favorites" does not need "Pinned secrets you reach for often"
+            // under it, and the strap line only pushed the list down.
             .navigationTitle(isVaultLocked ? "" : viewModel.destinationTitle)
-            .navigationSubtitle(isVaultLocked ? "" : viewModel.destinationSubtitle)
             .toolbar {
                 if !isVaultLocked {
                     ToolbarItem(placement: .automatic) {
@@ -522,7 +540,7 @@ private struct ItemListView: View {
                     Button("New Secret Item…") {
                         viewModel.activeSheet = .newItemFlow
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(VaultButtonStyle(.primary))
                     .accessibilityIdentifier("empty-vault-new-item")
 
                     Button("Import a .env File…") {
@@ -551,7 +569,7 @@ private struct ItemListView: View {
                 Button("New Secret Item…") {
                     viewModel.activeSheet = .newItemFlow
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(VaultButtonStyle(.primary))
             }
         }
     }
@@ -1724,8 +1742,6 @@ private struct LockedVaultOverlay: View {
                 sessionManager: viewModel.container.sessionManager,
                 settings: viewModel.container.settings
             )
-                .frame(maxWidth: 400)
-                .padding(VaultSpacing.xxl)
         }
     }
 }
@@ -1752,50 +1768,60 @@ private struct LockedVaultView: View {
     }
 
     var body: some View {
-        VStack(spacing: VaultSpacing.xl) {
-            icon
+        VStack(spacing: 0) {
+            Spacer(minLength: VaultSpacing.xxl)
 
-            VStack(spacing: VaultSpacing.xs) {
-                Text(isSetup ? "Create Your Password" : "PassStore is Locked")
-                    .font(.title2.weight(.semibold))
-                Text(isSetup
-                     ? "Set a master password to protect your secrets."
-                     : "Unlock with Touch ID, or enter your master password.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: VaultSpacing.xl) {
+                icon
+
+                VStack(spacing: VaultSpacing.xs) {
+                    Text(isSetup ? "Create Your Password" : "PassStore is Locked")
+                        .font(.title2.weight(.semibold))
+                    Text(isSetup
+                         ? "Set a master password to protect your secrets."
+                         : "Unlock with Touch ID, or enter your master password.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(spacing: VaultSpacing.m) {
+                    SecureField(isSetup ? "New master password" : "Master password", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.large)
+                        .frame(width: 300)
+                        .focused($isPasswordFocused)
+                        .disabled(sessionManager.isBusy)
+                        .onSubmit { submit() }
+                        .accessibilityIdentifier("lock-password-field")
+
+                    actions
+
+                    // Fixed height so the spinner, an error and the strength bar all occupy
+                    // the same space. Swapping between them used to shove the buttons up and
+                    // down the screen mid-unlock.
+                    statusLine
+                        .frame(width: 300, height: Self.statusLineHeight, alignment: .top)
+                }
             }
+            .frame(maxWidth: 400)
 
-            VStack(spacing: VaultSpacing.m) {
-                SecureField(isSetup ? "New master password" : "Master password", text: $password)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.large)
-                    .frame(width: 300)
-                    .focused($isPasswordFocused)
-                    .disabled(sessionManager.isBusy)
-                    .onSubmit { submit() }
-                    .accessibilityIdentifier("lock-password-field")
+            Spacer(minLength: VaultSpacing.xxl)
 
-                statusLine
-
-                actions
-            }
-
-        }
-        .padding(VaultSpacing.xxl)
-        // Kept quiet and out of the way at the very bottom: it is the escape hatch for a lost
-        // password, not something anyone should reach for while trying to remember one.
-        .overlay(alignment: .bottom) {
+            // Pinned to the bottom of the window, not tucked under the buttons: it is the
+            // escape hatch for a lost password, not a step in unlocking.
             if !isSetup {
                 Button("Forgot your master password?") { isConfirmingReset = true }
                     .buttonStyle(.plain)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .padding(.bottom, VaultSpacing.xs)
+                    .padding(.bottom, VaultSpacing.l)
                     .accessibilityIdentifier("lock-forgot-password")
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, VaultSpacing.xxl)
         .onAppear {
             focusOrAuthenticate()
         }
@@ -1846,6 +1872,9 @@ private struct LockedVaultView: View {
             }
     }
 
+    /// Reserved space under the buttons, tall enough for the tallest of the three states.
+    private static let statusLineHeight: CGFloat = 34
+
     @ViewBuilder
     private var statusLine: some View {
         if sessionManager.isBusy {
@@ -1856,6 +1885,7 @@ private struct LockedVaultView: View {
                     .font(.vaultFootnote)
                     .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity)
             .accessibilityIdentifier("lock-busy")
         } else if let message = sessionManager.lastErrorMessage, !message.isEmpty {
             Text(message)
@@ -1863,10 +1893,12 @@ private struct LockedVaultView: View {
                 .font(.vaultFootnote)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity)
                 .accessibilityIdentifier("lock-error")
         } else if isSetup {
             PasswordStrengthBar(password: password)
-                .frame(width: 300)
+        } else {
+            Color.clear
         }
     }
 

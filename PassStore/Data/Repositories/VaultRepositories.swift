@@ -223,6 +223,10 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                 type: draft.type,
                 environment: draft.environment
             )
+            // Creating something counts as using it. Without this a brand-new item — the
+            // `.env` you just imported, say — had no "last used" date at all and so did not
+            // appear in Recent, which is exactly where you would go looking for it.
+            item.lastAccessedAt = .now
             store.items.append(item)
             isNewItem = true
         }

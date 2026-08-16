@@ -237,25 +237,6 @@ final class VaultViewModel {
         }
     }
 
-    var destinationSubtitle: String {
-        switch selectedDestination {
-        case .library(.allItems):
-            "Everything in your vault"
-        case .library(.favorites):
-            "Pinned secrets you reach for often"
-        case .library(.recent):
-            "Sorted by last modified, newest first"
-        case .library(.archived):
-            "Archived items you can still restore"
-        case .workspace:
-            "Scoped to a workspace"
-        case .tag:
-            "Items carrying this tag"
-        case .environment:
-            "Items for this environment"
-        }
-    }
-
     var hasActiveFilters: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedType != nil
     }

@@ -544,7 +544,7 @@ private struct EnvGroupImportSection: View {
                 .onDrop(of: [UTType.fileURL], isTargeted: $isImportDropTargeted, perform: handleDropFileURL)
 
             Button("Choose File…", action: applyFromFile)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(VaultButtonStyle(.primary))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -2066,7 +2066,7 @@ private struct MasterPasswordSection: View {
                     .disabled(sessionManager.isBusy)
                 Spacer(minLength: 0)
                 Button("Update Password", action: submit)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(VaultButtonStyle(.primary))
                     .disabled(!canSubmit)
                     .accessibilityIdentifier("master-password-submit")
             }
@@ -2386,7 +2386,7 @@ private struct TemplateSettingsPane: View {
                             // from one: adding a field to "Database" meant rebuilding the
                             // whole template by hand.
                             Button("Duplicate as Custom Template") { duplicateSelected() }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(VaultButtonStyle(.primary))
                                 .accessibilityIdentifier("template-duplicate")
                             Spacer(minLength: 0)
                         } else {
@@ -2404,7 +2404,7 @@ private struct TemplateSettingsPane: View {
                                 selection = .template(saved.id)
                                 draft = viewModel.draftForTemplate(saved)
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(VaultButtonStyle(.primary))
                             .keyboardShortcut(.defaultAction)
                             .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityIdentifier("template-save")
