@@ -360,6 +360,115 @@ struct PolishAndRecoveryTests {
         #expect(titles.contains("Token Copy 2"))
     }
 
+    // MARK: - Linked .env files
+
+    /// Importing from a file used to throw the source URL away, so the item you had just
+    /// built from a file had to be linked to that same file by hand afterwards.
+    @Test func importingFromAFileLinksTheItemToItImmediately() throws {
+        let container = makeContainer("EnvAutoLink")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("API_KEY=first\nPORT=5432\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let picked = try #require(viewModel.readEnvFile(at: url))
+        var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
+        draft.title = picked.suggestedTitle
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
+
+        let link = try #require(item.linkedFile)
+        #expect(link.displayPath == url.path)
+        #expect(link.syncedDigest != nil)
+        #expect(link.syncedVaultDigest != nil)
+        #expect(viewModel.linkedFileStatus(for: item) == .upToDate)
+    }
+
+    @Test func editingTheFileOnDiskIsReportedAndCanBePulledIn() throws {
+        let container = makeContainer("EnvPull")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("API_KEY=first\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let picked = try #require(viewModel.readEnvFile(at: url))
+        var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
+        draft.title = "Project env"
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
+        #expect(viewModel.linkedFileStatus(for: item) == .upToDate)
+
+        // Someone edits the file in an editor.
+        try "API_KEY=second\nNEW_ONE=added\n".write(to: url, atomically: true, encoding: .utf8)
+        #expect(viewModel.linkedFileStatus(for: item) == .fileChanged)
+
+        viewModel.refreshLinkedFileStatuses()
+        #expect(viewModel.itemsWithOutdatedLinks.contains(item.id))
+
+        #expect(viewModel.updateItemFromLinkedFile(item))
+
+        let updated = try #require(viewModel.items.first { $0.id == item.id })
+        let values = Dictionary(updated.fields.map { ($0.fieldKey, $0.plainValue) }, uniquingKeysWith: { first, _ in first })
+        #expect(values["API_KEY"] == "second")
+        #expect(values["NEW_ONE"] == "added")
+        #expect(viewModel.linkedFileStatus(for: updated) == .upToDate)
+        // The value it replaced is still recoverable.
+        #expect(updated.fields.contains { $0.previousValues.contains { $0.value == "first" } })
+    }
+
+    @Test func writingBackReplacesTheFileContents() throws {
+        let container = makeContainer("EnvPush")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("TOKEN=old\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let picked = try #require(viewModel.readEnvFile(at: url))
+        var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
+        draft.title = "Writable env"
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
+
+        // Change the stored value, then push it out.
+        var edit = viewModel.draft(forItemID: item.id)
+        edit.id = item.id
+        if let index = edit.fieldDrafts.firstIndex(where: { $0.key == "TOKEN" }) {
+            edit.fieldDrafts[index].value = "new"
+        }
+        viewModel.saveItem(edit)
+
+        let saved = try #require(viewModel.items.first { $0.id == item.id })
+        #expect(viewModel.linkedFileStatus(for: saved) == .vaultChanged)
+        #expect(viewModel.writeLinkedFile(from: saved))
+
+        let onDisk = try String(contentsOf: url, encoding: .utf8)
+        #expect(onDisk.contains("TOKEN=new"))
+        #expect(viewModel.linkedFileStatus(for: saved) == .upToDate)
+    }
+
+    @Test func aMissingLinkedFileIsReportedRatherThanFailingSilently() throws {
+        let container = makeContainer("EnvMissing")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("A=1\n")
+        let picked = try #require(viewModel.readEnvFile(at: url))
+        var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
+        draft.title = "Vanishing env"
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
+
+        try FileManager.default.removeItem(at: url)
+        #expect(viewModel.linkedFileStatus(for: item) == .unavailable)
+    }
+
+    private func writeTemporaryEnvFile(_ contents: String) throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("passstore-test-\(UUID().uuidString)")
+            .appendingPathComponent(".env")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
     // MARK: - Automatic unlock
 
     /// Locking on purpose must not be undone by a Touch ID prompt a second later.

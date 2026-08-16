@@ -280,6 +280,15 @@ extension VaultViewModel {
                 perform: wrap { self.activeSheet = .newWorkspace }
             ),
             .init(
+                id: "cmd.importEnvFile",
+                title: "Import .env File…",
+                subtitle: "Creates an item linked to that file",
+                keywords: ["import", "env", "dotenv", "file", "link"],
+                isEnabled: container.sessionManager.lockState == .unlocked,
+                priority: 10,
+                perform: wrap { self.importEnvFileCreatingItem() }
+            ),
+            .init(
                 id: "cmd.importExport",
                 title: "Import .pstore Backup…",
                 subtitle: nil,

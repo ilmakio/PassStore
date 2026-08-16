@@ -6,11 +6,16 @@ All notable changes to PassStore are documented here.
 
 ### Added
 
-- **Linked `.env` files.** An item can now remember the file it was imported from. When that
-  file changes on disk, the item shows **Update from file** — one click instead of find,
-  open, copy, paste, save. **Write to file** pushes the other way. PassStore checks linked
-  files when its window comes to the front; nothing runs in the background and nothing is
-  written without you asking. If both sides changed, it says so and lets you pick.
+- **Linked `.env` files.** An item now remembers the file it was imported from, automatically:
+  choosing or dropping a `.env` while creating an item links the two, with no second trip
+  through a file picker. When that file changes on disk, the item shows **Update from file** —
+  one click instead of find, open, copy, paste, save. **Write to file** pushes the other way.
+  PassStore checks linked files when its window comes to the front; nothing runs in the
+  background and nothing is written without you asking. If both sides changed, it says so and
+  lets you pick. Untick "Keep a link to this file" if you only want a one-off copy.
+- **File → Import .env File… (⇧⌘O)** creates the item and links it in a single step, skipping
+  the template picker for what is the commonest job in the app. Also in the command palette
+  and on the empty-vault screen.
 - **Previous values.** Rotating a secret now keeps the value it replaced, so you can look up
   or restore the password an item had before. Up to 10 versions per field, inside the same
   encrypted vault, revealed only on request. This is a real trade-off — an old secret stays

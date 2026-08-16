@@ -64,6 +64,17 @@ struct PassStoreCommands: Commands {
         }
 
         CommandGroup(after: .importExport) {
+            // One step: pick the file, get an item that stays linked to it.
+            Button {
+                viewModel.importEnvFileCreatingItem()
+            } label: {
+                Label("Import .env File…", systemImage: "doc.badge.plus")
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .disabled(isLocked)
+
+            Divider()
+
             Button {
                 viewModel.activeSheet = .importEncryptedExport
             } label: {

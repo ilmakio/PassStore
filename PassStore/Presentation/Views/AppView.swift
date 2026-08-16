@@ -512,11 +512,18 @@ private struct ItemListView: View {
             } description: {
                 Text("Add your first API key, database credential, or .env file to get started.")
             } actions: {
-                Button("New Secret Item…") {
-                    viewModel.activeSheet = .newItemFlow
+                VStack(spacing: VaultSpacing.s) {
+                    Button("New Secret Item…") {
+                        viewModel.activeSheet = .newItemFlow
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("empty-vault-new-item")
+
+                    Button("Import a .env File…") {
+                        viewModel.importEnvFileCreatingItem()
+                    }
+                    .accessibilityIdentifier("empty-vault-import-env")
                 }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("empty-vault-new-item")
             }
         } else if viewModel.hasActiveFilters {
             ContentUnavailableView {

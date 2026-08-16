@@ -50,6 +50,8 @@ struct ItemCreationFlowSheet: View {
     @State private var envImportPasteBuffer = ""
     @State private var envImportParseIntoEntries = true
     @State private var envImportSuggestedTitleFromFile: String?
+    @State private var envImportSourceURL: URL?
+    @State private var envImportLinkToFile = true
 
     init(viewModel: VaultViewModel) {
         self.viewModel = viewModel
@@ -100,7 +102,9 @@ struct ItemCreationFlowSheet: View {
                         showEnvImportStaging: true,
                         envImportPasteBuffer: $envImportPasteBuffer,
                         envImportParseIntoEntries: $envImportParseIntoEntries,
-                        envImportSuggestedTitleFromFile: $envImportSuggestedTitleFromFile
+                        envImportSuggestedTitleFromFile: $envImportSuggestedTitleFromFile,
+                        envImportSourceURL: $envImportSourceURL,
+                        envImportLinkToFile: $envImportLinkToFile
                     )
                 } else {
                     TemplatePickerView(viewModel: viewModel) { template in
@@ -128,7 +132,10 @@ struct ItemCreationFlowSheet: View {
             parseIntoEntries: envImportParseIntoEntries,
             suggestedTitleFromFile: envImportSuggestedTitleFromFile
         )
-        viewModel.saveItem(toSave)
+        // If the contents came from a file, link the item to it here rather than making the
+        // owner pick the same file again from the detail pane.
+        let linkURL = envImportLinkToFile ? envImportSourceURL : nil
+        viewModel.saveNewItem(toSave, linkingTo: linkURL, parsedIntoFields: envImportParseIntoEntries)
         dismiss()
     }
 
@@ -153,6 +160,8 @@ struct ItemCreationFlowSheet: View {
         envImportPasteBuffer = ""
         envImportSuggestedTitleFromFile = nil
         envImportParseIntoEntries = true
+        envImportSourceURL = nil
+        envImportLinkToFile = true
     }
 }
 
@@ -214,7 +223,9 @@ struct ItemEditorSheet: View {
                 showEnvImportStaging: false,
                 envImportPasteBuffer: .constant(""),
                 envImportParseIntoEntries: .constant(true),
-                envImportSuggestedTitleFromFile: .constant(nil)
+                envImportSuggestedTitleFromFile: .constant(nil),
+                envImportSourceURL: .constant(nil),
+                envImportLinkToFile: .constant(false)
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -391,18 +402,21 @@ private struct EnvGroupImportSection: View {
     @Binding var pasteBuffer: String
     @Binding var parseIntoEntries: Bool
     @Binding var suggestedTitleFromFile: String?
+    /// The file the staged text came from. Carried all the way to Save so the new item can be
+    /// linked to it without asking for the same file a second time.
+    @Binding var sourceURL: URL?
+    @Binding var linkToSourceFile: Bool
+
     @State private var stagingTab: EnvStagingTab = .importFile
     @State private var isImportDropTargeted = false
     @State private var isPasteDropTargeted = false
-    /// Last file picked or dropped (`lastPathComponent`); cleared when staging text is cleared.
-    @State private var stagedPickedEnvFileName: String?
+
+    private var hasStagedText: Bool {
+        !pasteBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VaultSection("Import .env", systemImage: "square.and.arrow.down") {
-            Toggle("Parse KEY=value lines into separate fields", isOn: $parseIntoEntries)
-                .toggleStyle(.checkbox)
-                .help("When off, the entire file is stored as one multiline .env field.")
-
             Picker("", selection: $stagingTab) {
                 ForEach(EnvStagingTab.allCases) { tab in
                     Text(tab.title).tag(tab)
@@ -422,53 +436,84 @@ private struct EnvGroupImportSection: View {
             }
             .animation(.easeInOut(duration: 0.15), value: stagingTab)
 
-            if let name = stagedPickedEnvFileName, !pasteBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                envFileLoadedFeedback(fileName: name)
+            if let sourceURL, hasStagedText {
+                envFileLoadedFeedback(url: sourceURL)
             }
 
-            Text("Staged text and files are merged into the fields below when you click Save.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .multilineTextAlignment(.leading)
+            Divider()
+
+            Toggle("Parse KEY=value lines into separate fields", isOn: $parseIntoEntries)
+                .toggleStyle(.checkbox)
+                .help("When off, the entire file is stored as one multiline .env field.")
+
+            if sourceURL != nil {
+                Toggle("Keep a link to this file", isOn: $linkToSourceFile)
+                    .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("env-import-keep-link")
+
+                VaultNote(
+                    text: linkToSourceFile
+                        ? "When the file changes on disk, this item will offer to pull the new contents in — no re-importing by hand."
+                        : "The contents are copied once. Later changes to the file will not be offered.",
+                    tone: linkToSourceFile ? .success : .neutral,
+                    systemImage: linkToSourceFile ? "link" : "link.badge.plus"
+                )
+            } else {
+                VaultNote(text: "Staged text is merged into the fields below when you click Save. Import from a file instead of pasting to keep a link you can update later.")
+            }
         }
         .onChange(of: pasteBuffer) { _, newValue in
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                stagedPickedEnvFileName = nil
+                sourceURL = nil
             }
         }
     }
 
-    private func envFileLoadedFeedback(fileName: String) -> some View {
-        HStack(alignment: .center, spacing: 10) {
+    private func envFileLoadedFeedback(url: URL) -> some View {
+        HStack(alignment: .center, spacing: VaultSpacing.m) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.title3)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.green)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(".env file ready")
-                    .font(.caption.weight(.semibold))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(url.lastPathComponent)
+                    .font(.vaultRowTitle)
+                    .lineLimit(1)
+                // The full path, so it is obvious *which* .env this is when several projects
+                // all have one.
+                Text((url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
+                    .font(.vaultFootnote)
                     .foregroundStyle(.secondary)
-                Text(fileName)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.head)
                     .textSelection(.enabled)
             }
+
             Spacer(minLength: 0)
+
+            Button("Remove") {
+                pasteBuffer = ""
+                sourceURL = nil
+                suggestedTitleFromFile = nil
+            }
+            .buttonStyle(.link)
+            .font(.vaultFootnote)
+            .accessibilityLabel("Remove the staged file")
         }
-        .padding(12)
+        .padding(VaultSpacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.green.opacity(0.12))
+            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                .fill(Color.green.opacity(0.10))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
                         .strokeBorder(Color.green.opacity(0.28), lineWidth: 0.5)
                 )
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(".env file ready: \(fileName)")
+        .accessibilityLabel(".env file ready: \(url.lastPathComponent)")
         .accessibilityIdentifier("env-import-file-loaded-feedback")
     }
 
@@ -529,10 +574,15 @@ private struct EnvGroupImportSection: View {
     }
 
     private func applyFromFile() {
-        guard let (content, title, pickedName) = viewModel.readEnvFileForImport() else { return }
-        pasteBuffer = content
-        suggestedTitleFromFile = title
-        stagedPickedEnvFileName = pickedName
+        guard let picked = viewModel.readEnvFileForImport() else { return }
+        stage(picked)
+    }
+
+    private func stage(_ picked: VaultViewModel.PickedEnvFile) {
+        pasteBuffer = picked.contents
+        suggestedTitleFromFile = picked.suggestedTitle
+        sourceURL = picked.url
+        linkToSourceFile = true
     }
 
     private func handleDropFileURL(_ providers: [NSItemProvider]) -> Bool {
@@ -542,10 +592,8 @@ private struct EnvGroupImportSection: View {
         provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
             guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
             Task { @MainActor in
-                guard let string = try? String(contentsOf: url, encoding: .utf8) else { return }
-                pasteBuffer = string
-                suggestedTitleFromFile = viewModel.suggestedEnvImportTitle(for: url)
-                stagedPickedEnvFileName = url.lastPathComponent
+                guard let picked = viewModel.readEnvFile(at: url) else { return }
+                stage(picked)
             }
         }
         return true
@@ -556,10 +604,8 @@ private struct EnvGroupImportSection: View {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
                 Task { @MainActor in
-                    guard let string = try? String(contentsOf: url, encoding: .utf8) else { return }
-                    pasteBuffer = string
-                    suggestedTitleFromFile = viewModel.suggestedEnvImportTitle(for: url)
-                    stagedPickedEnvFileName = url.lastPathComponent
+                    guard let picked = viewModel.readEnvFile(at: url) else { return }
+                    stage(picked)
                 }
             }
             return true
@@ -568,9 +614,10 @@ private struct EnvGroupImportSection: View {
             _ = provider.loadObject(ofClass: String.self) { string, _ in
                 guard let string else { return }
                 Task { @MainActor in
+                    // Dropped text has no file behind it, so there is nothing to link to.
                     pasteBuffer = string
                     suggestedTitleFromFile = nil
-                    stagedPickedEnvFileName = nil
+                    sourceURL = nil
                 }
             }
             return true
@@ -592,6 +639,8 @@ private struct ItemEditorContent: View {
     @Binding var envImportPasteBuffer: String
     @Binding var envImportParseIntoEntries: Bool
     @Binding var envImportSuggestedTitleFromFile: String?
+    @Binding var envImportSourceURL: URL?
+    @Binding var envImportLinkToFile: Bool
 
     var body: some View {
         ScrollView {
@@ -692,7 +741,9 @@ private struct ItemEditorContent: View {
                         viewModel: viewModel,
                         pasteBuffer: $envImportPasteBuffer,
                         parseIntoEntries: $envImportParseIntoEntries,
-                        suggestedTitleFromFile: $envImportSuggestedTitleFromFile
+                        suggestedTitleFromFile: $envImportSuggestedTitleFromFile,
+                        sourceURL: $envImportSourceURL,
+                        linkToSourceFile: $envImportLinkToFile
                     )
                 }
 

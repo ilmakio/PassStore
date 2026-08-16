@@ -1644,18 +1644,76 @@ final class VaultViewModel {
         )
     }
 
-    /// Reads a `.env` file from an open panel; returns UTF-8 text, suggested item title, and the file name for UI feedback.
-    func readEnvFileForImport() -> (content: String, suggestedTitle: String, pickedFileName: String)? {
+    /// A `.env` chosen from disk, with everything the creation flow needs to both fill in the
+    /// item and remember where it came from.
+    struct PickedEnvFile {
+        let url: URL
+        let contents: String
+        let suggestedTitle: String
+
+        var fileName: String { url.lastPathComponent }
+    }
+
+    /// Reads a `.env` file from an open panel. `showsHiddenFiles` matters: `.env` is hidden.
+    func readEnvFileForImport() -> PickedEnvFile? {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = true
         panel.canChooseDirectories = false
+        panel.prompt = "Import"
+        panel.message = "Choose a .env file to import."
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return readEnvFile(at: url)
+    }
+
+    func readEnvFile(at url: URL) -> PickedEnvFile? {
         guard let string = try? String(contentsOf: url, encoding: .utf8) else {
-            alertMessage = "Unable to read the selected .env file as UTF-8 text."
+            alertMessage = "Unable to read “\(url.lastPathComponent)” as UTF-8 text."
             return nil
         }
-        return (string, importedEnvTitle(from: url), url.lastPathComponent)
+        return PickedEnvFile(url: url, contents: string, suggestedTitle: importedEnvTitle(from: url))
+    }
+
+    /// Picks a `.env`, creates the item from it and links the two — in one step.
+    ///
+    /// The long way round still exists (New Secret → .env File → drop the file), but for the
+    /// commonest job in the app there is no reason to walk through a template picker.
+    @discardableResult
+    func importEnvFileCreatingItem(parseIntoEntries: Bool = true) -> SecretItemEntity? {
+        guard container.sessionManager.lockState == .unlocked else {
+            alertMessage = "Unlock the vault before importing."
+            return nil
+        }
+        guard let picked = readEnvFileForImport() else { return nil }
+
+        var draft = buildEnvImportDraft(
+            from: picked.contents,
+            suggestedTitle: picked.suggestedTitle,
+            parseIntoEntries: parseIntoEntries
+        )
+        draft.workspaceID = preferredWorkspaceID
+        return saveNewItem(draft, linkingTo: picked.url, parsedIntoFields: parseIntoEntries)
+    }
+
+    /// Saves a new item and, when it came from a file, links it to that file straight away.
+    ///
+    /// Importing used to throw the source URL away, so the item you had just built from a
+    /// file had to be linked to that same file by hand, through a second file picker.
+    @discardableResult
+    func saveNewItem(_ draft: SecretItemDraft, linkingTo url: URL?, parsedIntoFields: Bool) -> SecretItemEntity? {
+        do {
+            let item = try container.itemRepository.saveItem(draft)
+            reload()
+            selectedItemID = item.id
+            if let url {
+                linkFile(at: url, to: item, parsedIntoFields: parsedIntoFields)
+                lastActionMessage = "Created “\(item.title)” and linked it to \(url.lastPathComponent)."
+            }
+            return item
+        } catch {
+            alertMessage = error.localizedDescription
+            return nil
+        }
     }
 
     func prepareEnvImport(from source: EnvImportSource, parseIntoEntries: Bool = true) -> SecretItemDraft? {
