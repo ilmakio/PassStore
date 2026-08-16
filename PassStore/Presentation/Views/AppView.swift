@@ -2015,7 +2015,7 @@ private struct LockedVaultView: View {
             isPasswordFocused = true
         }
         .sheet(isPresented: $isConfirmingReset) {
-            EraseVaultSheet {
+            EraseVaultSheet(sessionManager: sessionManager) {
                 try sessionManager.resetVaultDestroyingAllData()
                 password = ""
             }

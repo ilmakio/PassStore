@@ -36,10 +36,12 @@ struct OnboardingView: View {
     private var steps: [OnboardingStep] {
         var s: [OnboardingStep] = [.welcome, .masterPassword]
         if hasBiometricHardware { s.append(.touchID) }
-        // Restoring brings its own workspaces, so asking someone to invent one first — only to
-        // have the backup land next to it — is a step with no purpose.
-        if !wantsBackupRestore { s.append(.workspace) }
-        s.append(.ready)
+        // Restoring brings its own workspaces, and "You're all set" is a lie until the backup
+        // has actually been chosen. Both steps are dropped and the picker opens straight away.
+        if !wantsBackupRestore {
+            s.append(.workspace)
+            s.append(.ready)
+        }
         return s
     }
 
@@ -140,8 +142,9 @@ struct OnboardingView: View {
     /// Vault creation used to live only in the workspace step's continue action, so skipping
     /// that step would have walked to "You're all set" without ever making a vault.
     private func advance() {
-        guard let idx = steps.firstIndex(of: currentStep), idx + 1 < steps.count else { return }
-        if steps[idx + 1] == .ready {
+        guard let idx = steps.firstIndex(of: currentStep) else { return }
+        let isFinalStep = idx + 1 >= steps.count
+        if isFinalStep || steps[idx + 1] == .ready {
             completeOnboarding()
         } else {
             goNext()
@@ -191,6 +194,14 @@ struct OnboardingView: View {
         let trimmedName = workspaceDraft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedName.isEmpty {
             viewModel.saveWorkspace(workspaceDraft)
+        }
+
+        // Restoring goes straight to the file picker: the vault exists but is empty, and
+        // congratulating somebody before they have chosen their backup is premature.
+        if wantsBackupRestore {
+            viewModel.activeSheet = .importEncryptedExport
+            onComplete()
+            return
         }
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
@@ -284,6 +295,9 @@ private struct PasswordStepView: View {
     let onBack: () -> Void
     let onContinue: () -> Void
 
+    @FocusState private var isConfirmFocused: Bool
+    @State private var hasVisitedConfirmField = false
+
     private var passwordsMatch: Bool {
         !confirmPassword.isEmpty && password == confirmPassword
     }
@@ -292,8 +306,13 @@ private struct PasswordStepView: View {
         password.count >= 8 && passwordsMatch
     }
 
+    /// Only once the confirmation field has been left alone.
+    ///
+    /// Judging every keystroke meant "Passwords don't match" appeared on the first character
+    /// and stayed there while you typed the rest, which is scolding somebody for not having
+    /// finished yet.
     private var showMismatch: Bool {
-        !confirmPassword.isEmpty && !passwordsMatch
+        hasVisitedConfirmField && !isConfirmFocused && !confirmPassword.isEmpty && !passwordsMatch
     }
 
     var body: some View {
@@ -319,7 +338,11 @@ private struct PasswordStepView: View {
 
                     SecureField("Confirm password", text: $confirmPassword)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isConfirmFocused)
                         .onSubmit(submitIfReady)
+                        .onChange(of: isConfirmFocused) { _, focused in
+                            if focused { hasVisitedConfirmField = true }
+                        }
                         .accessibilityIdentifier("onboarding-confirm-field")
                 }
                 .frame(width: 300)

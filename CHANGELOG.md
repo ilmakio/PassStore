@@ -29,6 +29,9 @@ All notable changes to PassStore are documented here.
   when you switch back to it. Locking on purpose never triggers it; it returns once you have
   left the app and come back. Turn it off in Settings → General.
 - **Restore a backup during setup.** The welcome screen offers "I already have a backup".
+- **Erase the vault from Settings → Data**, for handing a Mac on or starting again from a
+  backup — not only from the lock screen. Where Touch ID is set up it is now required before
+  erasing, so nobody who walks past an unattended Mac can wipe your vault.
 - **Start over after a forgotten master password.** A small link at the foot of the lock screen
   opens a page that lists exactly what will be deleted and what will be left alone, and asks
   you to type ERASE before it will do anything. There is still no way to recover a forgotten

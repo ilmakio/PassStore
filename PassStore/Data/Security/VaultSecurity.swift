@@ -808,6 +808,39 @@ final class VaultSessionManager {
     /// design depends on that — but "start over" is not the same as "recover", and without
     /// it a forgotten password left the app permanently stuck at the lock screen with the
     /// only fix being to delete files in `~/Library` by hand.
+    /// Whether erasing has to be authorised first.
+    ///
+    /// Wiping a vault is destructive and, from the lock screen, reachable by anyone sitting at
+    /// an unattended Mac. Where Touch ID is configured there is no reason to allow it
+    /// unauthenticated: someone who can pass Touch ID can simply unlock instead, so gating it
+    /// costs the owner nothing and removes the "walk up and destroy" case entirely.
+    ///
+    /// Without Touch ID the gate cannot exist — the whole point of this escape hatch is that
+    /// the master password is gone — so the typed confirmation stands on its own. That is no
+    /// weaker than the alternative already available to anyone at the machine: deleting the
+    /// vault files in Finder.
+    var requiresBiometricAuthorisationToErase: Bool {
+        settings.biometricsEnabled && isBiometricAvailable && keyStore.isBiometricHardwareAvailable
+    }
+
+    /// Confirms the owner's identity before an erase, when that is possible.
+    func authoriseErase() async -> Bool {
+        guard requiresBiometricAuthorisationToErase else { return true }
+        let context = LAContext()
+        context.localizedReason = "Erase the PassStore vault"
+        do {
+            return try await context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: "Erase the PassStore vault"
+            )
+        } catch {
+            lastErrorMessage = Self.isUserCancelledBiometrics(error)
+                ? nil
+                : "Erase was not authorised: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     func resetVaultDestroyingAllData() throws {
         invalidateSecurityOperations()
         isBusy = false

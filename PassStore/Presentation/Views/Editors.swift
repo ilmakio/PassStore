@@ -1099,6 +1099,7 @@ private struct DataSettingsPane: View {
 
     @State private var isConfirmingPurge = false
     @State private var isConfirmingRollback = false
+    @State private var isConfirmingErase = false
 
     var body: some View {
         ScrollView {
@@ -1143,6 +1144,15 @@ private struct DataSettingsPane: View {
                     }
                 }
 
+                VaultSection("Erase everything", systemImage: "exclamationmark.triangle", tint: .red) {
+                    VaultNote(
+                        text: "Deletes every secret stored on this Mac and returns PassStore to first-run setup. Useful when handing the machine on, or to start again from a backup.",
+                        tone: .warning
+                    )
+                    Button("Erase Vault…") { isConfirmingErase = true }
+                        .accessibilityIdentifier("settings-erase-vault")
+                }
+
                 VaultSection("Recovery", systemImage: "arrow.uturn.backward") {
                     if let date = viewModel.rollbackCopyDate {
                         VaultNote(text: "A copy of your vault from before the last backup restore is on disk, taken \(Self.formatter.string(from: date)).")
@@ -1162,6 +1172,11 @@ private struct DataSettingsPane: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .sheet(isPresented: $isConfirmingErase) {
+            EraseVaultSheet(sessionManager: viewModel.container.sessionManager) {
+                try viewModel.container.sessionManager.resetVaultDestroyingAllData()
+            }
+        }
         .confirmationDialog(
             "Delete every stored previous value?",
             isPresented: $isConfirmingPurge,
@@ -2716,14 +2731,15 @@ struct ImportPreviewSheet: View {
 
             Spacer(minLength: 0)
 
-            Button(mode == .replace ? "Replace Vault…" : "Merge Into Vault") {
-                if mode == .replace {
+            Button(applyButtonTitle) {
+                // Replacing is only destructive when there is something to destroy.
+                if mode == .replace, !vaultIsEmpty {
                     isConfirmingReplace = true
                 } else {
                     apply()
                 }
             }
-            .buttonStyle(VaultButtonStyle(mode == .replace ? .destructive : .primary))
+            .buttonStyle(VaultButtonStyle(mode == .replace && !vaultIsEmpty ? .destructive : .primary))
             .disabled(viewModel.importPreview == nil)
             .accessibilityIdentifier("import-apply")
         } content: {
@@ -2736,6 +2752,11 @@ struct ImportPreviewSheet: View {
             }
         }
         .frame(width: 520, height: 560)
+        .onAppear {
+            // Into an empty vault, "replace" is the complete restore — it brings back settings
+            // and templates too — and it destroys nothing, so it is the right default.
+            if vaultIsEmpty { mode = .replace }
+        }
         // Dismissing with Escape must not leave a decrypted backup sitting in memory.
         .onDisappear { viewModel.cancelStagedImport() }
         .confirmationDialog(
@@ -2783,9 +2804,27 @@ struct ImportPreviewSheet: View {
         .accessibilityLabel("\(count) \(label)")
     }
 
+    /// Nothing to merge with and nothing to replace: restoring into a fresh vault, which is
+    /// what happens straight after setup or an erase.
+    private var vaultIsEmpty: Bool {
+        viewModel.items.isEmpty && viewModel.workspaces.isEmpty
+    }
+
+    private var applyButtonTitle: String {
+        if vaultIsEmpty { return "Restore Backup" }
+        return mode == .replace ? "Replace Vault…" : "Merge Into Vault"
+    }
+
     @ViewBuilder
     private func modePicker(_ preview: ImportPreview) -> some View {
-        if preview.isLegacyFormat {
+        if vaultIsEmpty {
+            VaultSection("How it will be applied", systemImage: "arrow.down.doc", tint: .green) {
+                VaultNote(
+                    text: "Your vault is empty, so the backup is restored as it is — there is nothing here to merge with or overwrite.",
+                    tone: .success
+                )
+            }
+        } else if preview.isLegacyFormat {
             VaultSection("How it will be applied", systemImage: "arrow.triangle.merge") {
                 VaultNote(text: ImportPreview.Mode.merge.explanation, tone: .success)
             }
