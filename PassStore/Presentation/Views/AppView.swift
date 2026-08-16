@@ -7,36 +7,26 @@ struct AppView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.controlActiveState) private var controlActiveState
     @State private var showOnboarding = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    /// Bridges the split view's three-way column state onto the single "is the sidebar
+    /// showing?" flag the View menu also drives. `.doubleColumn` keeps the item list; only
+    /// the sidebar goes away.
+    private var sidebarVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { viewModel.isSidebarVisible ? .all : .doubleColumn },
+            set: { viewModel.isSidebarVisible = ($0 == .all) }
+        )
+    }
 
     var body: some View {
         ZStack {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
+            NavigationSplitView(columnVisibility: sidebarVisibility) {
+                // The system sidebar toggle is kept: it sits where every other Mac app puts
+                // it, at the head of the sidebar's own toolbar area. It used to be removed
+                // outright because it was the one control still showing on the lock screen —
+                // the whole toolbar is hidden there now instead.
                 SidebarView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 196, ideal: 220, max: 260)
-                    // The built-in toggle cannot be hidden only while locked without
-                    // rebuilding the toolbar, which used to glitch the split view. It is
-                    // removed outright and replaced with one this view controls.
-                    .toolbar(removing: .sidebarToggle)
-                    .toolbar {
-                        if !isVaultLocked {
-                            ToolbarItem(placement: .navigation) {
-                                Button {
-                                    withAnimation(.easeOut(duration: 0.18)) {
-                                        // `.doubleColumn` hides the sidebar and keeps the item
-                                        // list. `.detailOnly` hid the list too, which is why
-                                        // the button appeared to do nothing useful.
-                                        columnVisibility = columnVisibility == .all ? .doubleColumn : .all
-                                    }
-                                } label: {
-                                    Label("Toggle Sidebar", systemImage: "sidebar.left")
-                                }
-                                .keyboardShortcut("s", modifiers: [.control, .command])
-                                .help("Hide or show the sidebar")
-                                .accessibilityIdentifier("toolbar-toggle-sidebar")
-                            }
-                        }
-                    }
             } content: {
                 ItemListView(viewModel: viewModel)
                     .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
@@ -44,6 +34,9 @@ struct AppView: View {
                 ItemDetailView(viewModel: viewModel)
             }
             .navigationSplitViewStyle(.balanced)
+            // Nothing in the toolbar belongs on a locked vault, including the sidebar toggle
+            // the split view contributes by itself.
+            .toolbar(isVaultLocked ? .hidden : .visible, for: .windowToolbar)
             .disabled(isVaultLocked || showOnboarding)
             // Attached here rather than on the enclosing ZStack: that already owns a
             // confirmationDialog for workspace deletion and two on one view conflict.

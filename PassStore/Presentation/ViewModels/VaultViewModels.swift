@@ -43,6 +43,8 @@ final class VaultViewModel {
 
     var isCommandPalettePresented = false
     var commandPaletteQuery = ""
+    /// Shared so the View menu and the split view's own toggle drive the same state.
+    var isSidebarVisible = true
     /// Cancels installation of async crypto results after lock, dismissal or a newer request.
     @ObservationIgnored private var transientOperationGeneration: UInt64 = 0
 

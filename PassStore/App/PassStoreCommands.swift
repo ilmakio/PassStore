@@ -221,6 +221,23 @@ struct PassStoreCommands: Commands {
 
     private var viewCommands: some Commands {
         CommandGroup(after: .sidebar) {
+            // The split view contributes a toolbar button but no menu entry, so the keyboard
+            // had no way to reach the sidebar at all.
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    viewModel.isSidebarVisible.toggle()
+                }
+            } label: {
+                Label(
+                    viewModel.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar",
+                    systemImage: "sidebar.left"
+                )
+            }
+            .keyboardShortcut("s", modifiers: [.control, .command])
+            .disabled(isLocked)
+
+            Divider()
+
             Button {
                 viewModel.presentCommandPalette()
             } label: {
