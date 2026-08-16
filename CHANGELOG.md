@@ -2,7 +2,7 @@
 
 All notable changes to PassStore are documented here.
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-08-17
 
 ### Added
 
@@ -28,7 +28,10 @@ All notable changes to PassStore are documented here.
 - **Automatic Touch ID.** The unlock prompt now appears on its own when you open PassStore and
   when you switch back to it. Locking on purpose never triggers it; it returns once you have
   left the app and come back. Turn it off in Settings → General.
-- **Restore a backup during setup.** The welcome screen offers "I already have a backup".
+- **Restore a backup during setup.** The welcome screen offers "I already have a backup", which
+  takes you straight from your new master password to choosing the file — no workspace step to
+  invent and no "You're all set" before there is anything to be set up. An empty vault is not
+  asked whether to merge or replace, because there is nothing to merge with.
 - **Erase the vault from Settings → Data**, for handing a Mac on or starting again from a
   backup — not only from the lock screen. Where Touch ID is set up it is now required before
   erasing, so nobody who walks past an unattended Mac can wipe your vault.
@@ -61,9 +64,26 @@ All notable changes to PassStore are documented here.
 - **New shortcuts:** ⇧⌘C copy password, ⌘Y item history, ⌘R update from linked file.
 - **"Recent" now lists the items you have actually opened**, plus anything you have just
   created. It previously showed the same items as "All Items", in a different order.
-- **The yellow is a little deeper and warmer**, and filled buttons use a stronger shade of it
-  with white labels. Some of them used to come out with black text and others white, because
-  the label colour was picked automatically from a yellow too light to read white against.
+- **The welcome and lock screens have a look of their own.** Both now sit on a dark backdrop
+  with a slowly drifting glow and an animated pixel grid, the app icon breathing above the
+  wordmark set at display size. Everything on them is drawn in solid colours rather than
+  translucency, so no button or field dissolves into whatever is moving underneath it. Setup
+  runs on the same backdrop from the first screen to the last. The animation stops while
+  PassStore is in the background and when Reduce Motion is on.
+- **Every yellow button has black text**, in every view and in both light and dark. Some used to
+  come out black and others white, because the label colour was picked automatically from the
+  fill's brightness. Where the accent is the text rather than what sits behind it, a deeper
+  shade of the same yellow is used so it stays readable on a light background.
+- **The item header tells you where the item lives.** It runs the full width of the detail pane
+  and takes its colour from the workspace, with workspace, type and environment above the name
+  and tags below it. All of them are links: click one to see everything else in that workspace,
+  of that type, in that environment or with that tag.
+- **Sheets have a proper header and footer.** Each opens with a tinted band carrying its icon
+  and title, and closes with a pinned row of actions. Picking a template for a new secret is now
+  two clean columns of cards that respond to the pointer, rather than a grid boxed inside
+  another box.
+- **About is a real window**: the app icon, the version you are running, who made it, the
+  licence, and links to the repository, the contributing guide, issues and makio.app.
 - **The item editor was reorganised.** Name, workspace and type sit together, the workspace
   chooser shows each workspace's own icon and colour and can create a new one without leaving
   the menu, and "favourite" is a labelled checkbox rather than an unlabelled star. Environment
@@ -96,8 +116,10 @@ All notable changes to PassStore are documented here.
   and the complete merge is committed in one encrypted write.
 - **Opening an item from the command palette shows it.** Picking an item that lived in another
   workspace closed the palette and left the detail pane empty.
-- **The toolbar is empty while the vault is locked.** A stray sidebar toggle was left behind on
-  the lock screen.
+- **The lock screen has no leftover toolbar button**, and keeps the close and minimise buttons
+  exactly where they sit everywhere else in the app.
+- **The sidebar toggle is back in the toolbar** and can also be reached from View → Hide Sidebar
+  (⌃⌘S).
 - **Active filters are shown above the list.** A type picked in the sidebar stayed on when you
   moved to another workspace or section, so the list could look mysteriously short with nothing
   explaining why. Filters now appear as a chip you can remove, with a Clear button.
@@ -114,7 +136,15 @@ All notable changes to PassStore are documented here.
 - **Unlocking, changing your master password and exporting no longer freeze the window.** All
   three now show real progress.
 - **The password field is focused as soon as the lock screen appears**, and Return activates
-  Unlock.
+  Unlock. The Touch ID progress line no longer shifts the buttons up and down mid-unlock.
+- **"Passwords don't match" waits until you leave the field.** It used to appear on the first
+  character of the confirmation and sit there while you typed the rest.
+- **Writing to a linked `.env` works for files outside a folder you have opened.** It reported
+  that the file could not be written, having asked for permission to a directory rather than to
+  the file you picked.
+- **Erasing the vault no longer reports a failure after succeeding.** Clearing a leftover key
+  from an old version was treated as a fatal error even though everything had been deleted.
+  Erasing now returns you to first-run setup.
 - **Browsing a large vault is much faster.** Selecting an item no longer rewrites the entire
   vault to disk.
 - **Starring or archiving an item no longer counts as editing it**, so it does not jump to the
