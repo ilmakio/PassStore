@@ -109,16 +109,30 @@ nonisolated final class KeychainVaultKeyStore: VaultKeyStore, @unchecked Sendabl
         }
     }
 
+    /// Best-effort removal of secrets written under the app's former identity.
+    ///
+    /// A sandboxed app cannot always address a keychain service it never created: the delete
+    /// comes back with an ownership or access error rather than "not found". That is not a
+    /// failed erase — there is nothing of ours left behind — so those statuses are treated as
+    /// success. Reporting them made a completed Erase claim it had failed.
     func clearLegacySecrets() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: legacySecretService
         ]
         let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw VaultKeyStoreError.unexpectedStatus(status)
-        }
+        guard !Self.tolerableLegacyCleanupStatuses.contains(status) else { return }
+        throw VaultKeyStoreError.unexpectedStatus(status)
     }
+
+    private static let tolerableLegacyCleanupStatuses: Set<OSStatus> = [
+        errSecSuccess,
+        errSecItemNotFound,
+        errSecInvalidOwnerEdit,
+        errSecNoAccessForItem,
+        errSecMissingEntitlement,
+        errSecNoSuchKeychain
+    ]
 }
 
 nonisolated final class InMemoryVaultKeyStore: VaultKeyStore, @unchecked Sendable {

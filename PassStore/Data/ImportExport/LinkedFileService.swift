@@ -122,6 +122,23 @@ nonisolated struct LinkedFileService: Sendable {
             ".\(resolution.url.lastPathComponent).passstore-\(UUID().uuidString).tmp",
             isDirectory: false
         )
+
+        // A security-scoped bookmark grants access to the *file*, not to the directory holding
+        // it, so the temporary file needed for an atomic rename usually cannot be created at
+        // all. Fall back to rewriting the file itself, which the bookmark does cover.
+        guard fileManager.createFile(
+            atPath: temporary.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            try writeInPlace(data, to: resolution.url, requiringCurrentDigest: expectedDigest)
+            return WriteResult(
+                refreshedBookmark: resolution.refreshedBookmark,
+                resolvedPath: resolution.url.path
+            )
+        }
+        try? fileManager.removeItem(at: temporary)
+
         do {
             let attributes = try fileManager.attributesOfItem(atPath: resolution.url.path)
             let originalPermissions = attributes[.posixPermissions] as? NSNumber ?? NSNumber(value: 0o600)
@@ -184,6 +201,37 @@ nonisolated struct LinkedFileService: Sendable {
             refreshedBookmark: resolution.refreshedBookmark,
             resolvedPath: resolution.url.path
         )
+    }
+
+    /// Rewrites the file itself, for the common sandbox case where only the file — not its
+    /// directory — is reachable.
+    ///
+    /// Truncating in place is not atomic: an interrupted write can leave the file short. The
+    /// contents are a `.env` the owner asked to overwrite and PassStore still holds the full
+    /// value, so that is a far better outcome than being unable to write at all.
+    private func writeInPlace(
+        _ data: Data,
+        to url: URL,
+        requiringCurrentDigest expectedDigest: String?
+    ) throws {
+        if let expectedDigest {
+            var currentData = try readBoundedData(from: url)
+            defer { VaultCryptoService.overwrite(&currentData) }
+            guard Self.digest(currentData) == expectedDigest else {
+                throw LinkedFileError.fileChangedBeforeWrite
+            }
+        }
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.truncate(atOffset: 0)
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+        } catch let error as LinkedFileError {
+            throw error
+        } catch {
+            throw LinkedFileError.notWritable
+        }
     }
 
     /// True when the bookmark still points at something readable.

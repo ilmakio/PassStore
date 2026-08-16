@@ -156,6 +156,15 @@ All notable changes to PassStore are documented here.
 
 - Vaults and `.pstore` backups written by 1.1.x open unchanged, and a vault written by 1.2.0
   stays readable by earlier versions.
+- **The vault is now saved as a single file** rather than a key file plus a data file written
+  one after the other. Interrupting the old two-file save — a crash or a flat battery at the
+  wrong moment, particularly while changing your master password — could leave the two out of
+  step and the vault unreadable. PassStore keeps the old pair up to date alongside it, so an
+  earlier version still opens your vault.
+- **The order of tags and environments in the sidebar moved inside the encrypted vault.** It
+  used to sit in plain preferences, where the names of your tags were readable without
+  unlocking anything. Your existing order is carried over on first unlock. If you later go
+  back to an older version, that ordering resets to alphabetical — nothing else is affected.
 
 ## [1.1.1] - 2026-08-16
 

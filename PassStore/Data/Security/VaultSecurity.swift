@@ -1193,11 +1193,10 @@ final class VaultSessionManager {
                 failures.append("Keychain key: \(error.localizedDescription)")
             }
         }
-        do { try keyStore.clearLegacySecrets() } catch {
-            if requiringCompleteKeychainCleanup {
-                failures.append("Legacy Keychain data: \(error.localizedDescription)")
-            }
-        }
+        // Never a hard failure: this clears secrets belonging to a former app identity that a
+        // sandboxed build may not be able to address at all. Erasing the current vault is what
+        // the owner asked for, and that is covered by the checks around it.
+        try? keyStore.clearLegacySecrets()
         do { try vaultStore.resetSecureVault() } catch {
             failures.append("Encrypted vault files: \(error.localizedDescription)")
         }

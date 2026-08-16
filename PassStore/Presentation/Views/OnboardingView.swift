@@ -36,7 +36,10 @@ struct OnboardingView: View {
     private var steps: [OnboardingStep] {
         var s: [OnboardingStep] = [.welcome, .masterPassword]
         if hasBiometricHardware { s.append(.touchID) }
-        s.append(contentsOf: [.workspace, .ready])
+        // Restoring brings its own workspaces, so asking someone to invent one first — only to
+        // have the backup land next to it — is a step with no purpose.
+        if !wantsBackupRestore { s.append(.workspace) }
+        s.append(.ready)
         return s
     }
 
@@ -78,14 +81,14 @@ struct OnboardingView: View {
                             confirmPassword: $confirmPassword,
                             errorMessage: errorMessage,
                             onBack: goBack,
-                            onContinue: goNext
+                            onContinue: advance
                         )
                         .transition(stepTransition)
                     case .touchID:
                         TouchIDStepView(
                             enableTouchID: $enableTouchID,
                             onBack: goBack,
-                            onContinue: goNext
+                            onContinue: advance
                         )
                         .transition(stepTransition)
                     case .workspace:
@@ -130,6 +133,19 @@ struct OnboardingView: View {
             insertion: .move(edge: isForward ? .trailing : .leading).combined(with: .opacity),
             removal: .move(edge: isForward ? .leading : .trailing).combined(with: .opacity)
         )
+    }
+
+    /// Moves on, creating the vault when the next stop is the final screen.
+    ///
+    /// Vault creation used to live only in the workspace step's continue action, so skipping
+    /// that step would have walked to "You're all set" without ever making a vault.
+    private func advance() {
+        guard let idx = steps.firstIndex(of: currentStep), idx + 1 < steps.count else { return }
+        if steps[idx + 1] == .ready {
+            completeOnboarding()
+        } else {
+            goNext()
+        }
     }
 
     private func goNext() {
