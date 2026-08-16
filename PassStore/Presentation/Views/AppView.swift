@@ -1421,6 +1421,7 @@ private struct FieldRow: View {
     /// keyboard and VoiceOver users unable to read a stored secret at all.
     @State private var isRevealPinned = false
     @State private var isHoveringValue = false
+    @State private var didPushCursor = false
 
     private var isOpenableURL: Bool {
         field.kind == .url && !field.isSensitive && FieldURLSupport.url(from: field.value) != nil
@@ -1453,6 +1454,14 @@ private struct FieldRow: View {
         .onChange(of: field.id) { _, _ in
             isRevealPinned = false
             isHoveringValue = false
+        }
+        .onDisappear {
+            // Scrolling a hovered row out of view would otherwise leave the pushed cursor
+            // behind, and the pointing hand would stick for the whole app.
+            if didPushCursor {
+                NSCursor.pop()
+                didPushCursor = false
+            }
         }
     }
 
@@ -1515,9 +1524,36 @@ private struct FieldRow: View {
         }
     }
 
+    /// The value, as a button when it can be copied.
+    ///
+    /// It has to be a real `Button`, not a tap gesture on the box: a tap gesture layered over
+    /// selectable `Text` never fires, because the text view claims the click for selection.
+    /// That is exactly what broke click-to-copy — and selection is not wanted here anyway,
+    /// since clicking already copies.
+    @ViewBuilder
     private var valueBox: some View {
+        if field.isCopyable {
+            Button(action: onCopy) {
+                valueSurface
+            }
+            .buttonStyle(.plain)
+            .onHover(perform: handleHover)
+            .help(helpText)
+            .accessibilityIdentifier("detail-field-value-\(field.key)")
+            .accessibilityLabel(field.label)
+            .accessibilityHint(accessibilityCopyHint)
+        } else {
+            valueSurface
+                .textSelection(.enabled)
+                .onHover(perform: handleHover)
+                .help(helpText)
+                .accessibilityIdentifier("detail-field-value-\(field.key)")
+        }
+    }
+
+    private var valueSurface: some View {
         VaultValueBox(isHighlighted: isCopied) {
-            valueText
+            Text(displayText)
                 .font(.vaultValue)
                 .foregroundStyle(showsPlaintext ? .primary : .secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1526,28 +1562,56 @@ private struct FieldRow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .contentShape(Rectangle())
-        .onTapGesture { if field.isCopyable { onCopy() } }
-        .onHover { hovering in
-            if field.isSensitive, canRevealSecrets {
-                isHoveringValue = hovering
+        .overlay {
+            if isCopied {
+                copiedFeedbackBadge
+                    .allowsHitTesting(false)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
             }
-            guard field.isCopyable else { return }
-            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
-        .help(helpText)
-        .accessibilityIdentifier("detail-field-value-\(field.key)")
-        .accessibilityLabel("\(field.label): \(showsPlaintext ? "shown" : "hidden")")
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isCopied)
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: isCopied)
     }
 
-    @ViewBuilder
-    private var valueText: some View {
-        if showsPlaintext {
-            Text(displayText)
-                .textSelection(.enabled)
-        } else {
-            Text(displayText)
+    private var copiedFeedbackBadge: some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.body.weight(.semibold))
+                .symbolRenderingMode(.hierarchical)
+            Text("Copied")
+                .font(.subheadline.weight(.semibold))
         }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, VaultSpacing.m)
+        .padding(.vertical, VaultSpacing.s - 1)
+        .background {
+            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                .fill(.thickMaterial)
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Reveals on hover, and shows the pointing hand only while the value is actually
+    /// copyable. The pushed cursor is tracked so an unbalanced `pop` cannot leave the whole
+    /// app stuck with a pointing hand.
+    private func handleHover(_ hovering: Bool) {
+        if field.isSensitive, canRevealSecrets {
+            isHoveringValue = hovering
+        }
+        guard field.isCopyable else { return }
+        if hovering, !didPushCursor {
+            NSCursor.pointingHand.push()
+            didPushCursor = true
+        } else if !hovering, didPushCursor {
+            NSCursor.pop()
+            didPushCursor = false
+        }
+    }
+
+    private var accessibilityCopyHint: String {
+        field.isSensitive && canRevealSecrets
+            ? "Hover to show the value, then activate to copy it"
+            : "Activate to copy to the clipboard"
     }
 
     private var valueLineLimit: Int {
