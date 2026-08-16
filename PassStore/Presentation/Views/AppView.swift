@@ -1145,10 +1145,14 @@ private struct ItemDetailView: View {
         NavigationStack {
             Group {
                 if let item = viewModel.selectedItem {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: VaultSpacing.xl) {
-                            VaultCard { detailHero(for: item) }
+                    VStack(spacing: 0) {
+                        // Edge to edge and pinned above the scroll view, rather than a card
+                        // floating inside it: it is the identity of what you are looking at,
+                        // not the first row of its contents.
+                        ItemDetailHeader(viewModel: viewModel, item: item)
 
+                        ScrollView {
+                        VStack(alignment: .leading, spacing: VaultSpacing.xl) {
                             LinkedFileSection(viewModel: viewModel, item: item)
 
                             if !viewModel.visibleSelectedFields.isEmpty {
@@ -1188,6 +1192,7 @@ private struct ItemDetailView: View {
                         }
                         .padding(VaultSpacing.xl)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .accessibilityIdentifier("detail-item-\(uiIdentifierSlug(item.title))")
@@ -1266,84 +1271,6 @@ private struct ItemDetailView: View {
                 copiedFieldID = nil
             }
         }
-    }
-
-    // MARK: Hero
-
-    private func detailHero(for item: SecretItemEntity) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 14) {
-                let accent = item.workspace.map { Color(hex: $0.colorHex) } ?? Color.accentColor
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(accent.opacity(0.15))
-                    .frame(width: 46, height: 46)
-                    .overlay(
-                        Image(systemName: item.type.systemImage)
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(accent)
-                    )
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityIdentifier("detail-item-title")
-                    Text(item.type.title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Button {
-                    viewModel.toggleFavoriteForSelectedItem()
-                } label: {
-                    Image(systemName: item.isFavorite ? "star.fill" : "star")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(item.isFavorite ? .yellow : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
-                .accessibilityIdentifier("detail-favorite-toggle")
-            }
-            .padding(.vertical, 2)
-
-            heroPills(for: item)
-        }
-    }
-
-    private func heroPills(for item: SecretItemEntity) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                if let workspace = item.workspace {
-                    pillChip(workspace.name, systemImage: workspace.icon, color: Color(hex: workspace.colorHex))
-                }
-                pillChip(item.environmentValue.title, systemImage: "circle.hexagongrid")
-                ForEach(item.tags, id: \.self) { tag in
-                    pillChip("#\(tag)", systemImage: "tag")
-                }
-            }
-            .padding(.vertical, 1)
-        }
-    }
-
-    private func pillChip(_ title: String, systemImage: String, color: Color = .secondary) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.weight(.medium))
-            .labelStyle(.titleAndIcon)
-            .foregroundStyle(color)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(color.opacity(0.12))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(color.opacity(0.18), lineWidth: 0.5)
-            )
     }
 
     // MARK: Metadata
@@ -1897,6 +1824,231 @@ private struct FieldRow: View {
             result.append(character)
         }
         return result
+    }
+}
+
+// MARK: - Item detail header
+
+/// The banner at the top of the detail pane: where this item lives, what it is, and how to get
+/// back to everything like it.
+///
+/// Takes its colour from the workspace, so moving between items reads as moving between
+/// projects rather than between identical grey cards. The pixel grid is the same one the
+/// welcome and lock screens use, turned right down — enough to give the band a texture, not
+/// enough to compete with the title sitting on it.
+private struct ItemDetailHeader: View {
+    @Bindable var viewModel: VaultViewModel
+    let item: SecretItemEntity
+
+    private var accent: Color {
+        item.workspace.map { Color(hex: $0.colorHex) } ?? .vaultAccent
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: VaultSpacing.l) {
+                icon
+
+                VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                    breadcrumb
+
+                    Text(item.title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("detail-item-title")
+
+                    if !item.tags.isEmpty {
+                        tags
+                            .padding(.top, VaultSpacing.hair)
+                    }
+                }
+
+                favouriteButton
+            }
+            .padding(.horizontal, VaultSpacing.xl)
+            .padding(.vertical, VaultSpacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(banner)
+
+            Rectangle()
+                .fill(VaultChrome.hairline)
+                .frame(height: 1)
+        }
+    }
+
+    // MARK: Bands
+
+    private var banner: some View {
+        ZStack {
+            LinearGradient(
+                colors: [accent.opacity(0.20), accent.opacity(0.04)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VaultPixelGrid(
+                tint: accent,
+                spacing: 11,
+                dot: 1.5,
+                maxAlpha: 0.30,
+                baseAlpha: 0.03,
+                focus: UnitPoint(x: 0.12, y: 0.35),
+                framesPerSecond: 8
+            )
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Solid workspace colour with a lit top edge, not a 20% wash of it.
+    ///
+    /// The washed version read as a disabled control on a tinted band — the one element that
+    /// should carry the workspace's colour was the palest thing on screen. The glyph picks
+    /// black or white from the colour's own luminance so it stays legible whichever colour the
+    /// workspace was given.
+    private var icon: some View {
+        let shape = RoundedRectangle(cornerRadius: VaultRadius.hero, style: .continuous)
+
+        return shape
+            .fill(accent)
+            .overlay(
+                LinearGradient(
+                    colors: [.white.opacity(0.32), .white.opacity(0.04), .black.opacity(0.14)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(shape)
+            )
+            .overlay(shape.strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+            .frame(width: 50, height: 50)
+            .shadow(color: accent.opacity(0.40), radius: 9, y: 4)
+            .overlay(
+                Image(systemName: item.type.systemImage)
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(accent.vaultContrastingGlyph)
+                    .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
+            )
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Rows
+
+    /// Where the item sits, above its name — workspace, then type, then environment.
+    ///
+    /// Every part is a link back to the list it came from, so the header doubles as a way of
+    /// asking "what else is in here?". Wraps rather than scrolls: a long workspace name used
+    /// to leave the next chip sliced in half at the edge of the pane.
+    private var breadcrumb: some View {
+        VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.xs) {
+            if let workspace = item.workspace {
+                DetailHeaderLink(
+                    title: workspace.name,
+                    systemImage: workspace.icon,
+                    color: Color(hex: workspace.colorHex),
+                    hint: "Show everything in \(workspace.name)"
+                ) {
+                    viewModel.selectDestination(.workspace(workspace.id))
+                    viewModel.setSelectedType(nil)
+                }
+            }
+
+            DetailHeaderLink(
+                title: item.type.title,
+                systemImage: item.type.systemImage,
+                hint: "Show every \(item.type.title)"
+            ) {
+                viewModel.selectDestination(.library(.allItems))
+                viewModel.setSelectedType(item.type)
+            }
+
+            DetailHeaderLink(
+                title: item.environmentValue.title,
+                systemImage: "circle.hexagongrid",
+                hint: "Show everything in \(item.environmentValue.title)"
+            ) {
+                viewModel.selectDestination(.environment(item.environmentValue.title))
+                viewModel.setSelectedType(nil)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Plain `#tag` text under the name, not chips: they are the least important line here and
+    /// a row of capsules gave them the same weight as the workspace.
+    private var tags: some View {
+        VaultFlowLayout(spacing: VaultSpacing.m, lineSpacing: VaultSpacing.xs) {
+            ForEach(item.tags, id: \.self) { tag in
+                DetailHeaderTagLink(tag: tag) {
+                    viewModel.selectDestination(.tag(tag))
+                    viewModel.setSelectedType(nil)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var favouriteButton: some View {
+        Button { viewModel.toggleFavoriteForSelectedItem() } label: {
+            Image(systemName: item.isFavorite ? "star.fill" : "star")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(item.isFavorite ? AnyShapeStyle(Color.vaultAccentStrong) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(.plain)
+        .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
+        .accessibilityIdentifier("detail-favorite-toggle")
+    }
+}
+
+/// One clickable part of the breadcrumb.
+private struct DetailHeaderLink: View {
+    let title: String
+    let systemImage: String
+    var color: Color = .secondary
+    let hint: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: VaultSpacing.xs) {
+                Image(systemName: systemImage)
+                    .font(.caption2)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.caption.weight(.medium))
+            }
+            .foregroundStyle(color == .secondary ? Color.secondary : color)
+            .opacity(isHovering ? 1 : 0.85)
+            .underline(isHovering)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(hint)
+        .accessibilityLabel("\(title). \(hint)")
+    }
+}
+
+private struct DetailHeaderTagLink: View {
+    let tag: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("#\(tag)")
+                .font(.caption)
+                .foregroundStyle(isHovering ? AnyShapeStyle(Color.primary) : AnyShapeStyle(.tertiary))
+                .underline(isHovering)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help("Show everything tagged #\(tag)")
+        .accessibilityLabel("Tag \(tag). Show everything tagged \(tag)")
     }
 }
 

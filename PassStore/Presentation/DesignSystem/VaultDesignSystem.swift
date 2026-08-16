@@ -436,6 +436,72 @@ struct VaultChip: View {
     }
 }
 
+// MARK: - Flow layout
+
+/// Lays children out left to right, wrapping to a new line when the row runs out of room.
+///
+/// Chips used to sit in a horizontal `ScrollView`, which meant a long workspace name left the
+/// next chip sliced down the middle at the edge of the pane, with nothing to say it was
+/// scrollable. Metadata should wrap like text, not queue up off-screen.
+struct VaultFlowLayout: Layout {
+    var spacing: CGFloat = VaultSpacing.s
+    var lineSpacing: CGFloat = VaultSpacing.s
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let rows = self.rows(within: proposal.width ?? .infinity, subviews: subviews)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        var y = bounds.minY
+        for row in rows(within: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y + (row.height - size.height) / 2),
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func rows(within maxWidth: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+
+            if !current.indices.isEmpty, needed > maxWidth {
+                rows.append(current)
+                current = Row()
+                current.indices = [index]
+                current.width = size.width
+                current.height = size.height
+            } else {
+                current.indices.append(index)
+                current.width = needed
+                current.height = max(current.height, size.height)
+            }
+        }
+
+        if !current.indices.isEmpty { rows.append(current) }
+        return rows
+    }
+}
+
 // MARK: - Button styles
 
 /// Primary / secondary sheet actions.

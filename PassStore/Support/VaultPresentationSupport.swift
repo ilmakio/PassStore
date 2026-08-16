@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -405,5 +406,27 @@ extension Color {
             blue: Double(blue) / 255,
             opacity: 1
         )
+    }
+
+    /// Black or white, whichever a glyph should be when it sits directly on this colour.
+    ///
+    /// Workspace colours are chosen freely, so a fixed white icon disappears on the pale ones
+    /// and a fixed black one disappears on the deep ones. Threshold is WCAG relative luminance,
+    /// biased a little towards white: the saturated mid-tones these are usually set to read
+    /// better light-on-colour than the raw crossover point suggests, and a bold glyph only
+    /// needs 3:1.
+    var vaultContrastingGlyph: Color {
+        guard let resolved = NSColor(self).usingColorSpace(.sRGB) else { return .white }
+
+        func linear(_ channel: CGFloat) -> Double {
+            let value = Double(channel)
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+
+        let luminance = 0.2126 * linear(resolved.redComponent)
+            + 0.7152 * linear(resolved.greenComponent)
+            + 0.0722 * linear(resolved.blueComponent)
+
+        return luminance > 0.45 ? .black : .white
     }
 }

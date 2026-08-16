@@ -73,7 +73,11 @@ private struct AboutPassStoreView: View {
 
     var body: some View {
         ZStack {
+            // Under the title bar too: the window is full-size content, so without this the
+            // backdrop stops at the safe area and leaves a flat band behind the close button
+            // while the content below it is covered in pixel grid.
             VaultHeroBackground()
+                .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 Spacer(minLength: VaultSpacing.xl)

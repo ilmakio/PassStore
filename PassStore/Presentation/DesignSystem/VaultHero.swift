@@ -216,12 +216,22 @@ private struct VaultHeroGlows: View {
 /// several thousand dots costs a dozen fills per frame rather than one fill per dot. It ticks
 /// at 12fps — fast enough to read as alive, slow enough that a vault left locked all afternoon
 /// is not quietly spinning a fan.
-private struct VaultPixelGrid: View {
+struct VaultPixelGrid: View {
+    /// Colour of the lit dots; the unlit base grid is always neutral.
+    var tint: Color = VaultHeroPalette.glow
+    var spacing: CGFloat = 13
+    var dot: CGFloat = 2
+    /// Brightness of the lit dots at the centre of the glow.
+    var maxAlpha: Double = 0.8
+    /// Brightness of the grid everywhere else.
+    var baseAlpha: Double = 0.055
+    /// Where the lit patch sits, before it starts drifting.
+    var focus = UnitPoint(x: 0.24, y: 0.20)
+    var framesPerSecond: Double = 12
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.controlActiveState) private var controlActiveState
 
-    private static let spacing: CGFloat = 13
-    private static let dot: CGFloat = 2
     private static let buckets = 6
 
     /// Nothing repaints while the window is in the background: this view can sit on screen for
@@ -231,7 +241,7 @@ private struct VaultPixelGrid: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: isPaused)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / framesPerSecond, paused: isPaused)) { timeline in
             Canvas(opaque: false, rendersAsynchronously: true) { context, size in
                 draw(in: &context, size: size, time: timeline.date.timeIntervalSinceReferenceDate)
             }
@@ -241,13 +251,13 @@ private struct VaultPixelGrid: View {
     private func draw(in context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
         guard size.width > 1, size.height > 1 else { return }
 
-        let columns = Int(size.width / Self.spacing) + 2
-        let rows = Int(size.height / Self.spacing) + 2
+        let columns = Int(size.width / spacing) + 2
+        let rows = Int(size.height / spacing) + 2
 
-        // Follows the top-left glow, on its own slower loop so the two never quite line up.
+        // Follows the glow, on its own slower loop so the two never quite line up.
         let centre = CGPoint(
-            x: size.width * (0.24 + 0.05 * sin(time * 0.11)),
-            y: size.height * (0.20 + 0.07 * cos(time * 0.09))
+            x: size.width * (focus.x + 0.05 * sin(time * 0.11)),
+            y: size.height * (focus.y + 0.07 * cos(time * 0.09))
         )
         let reach = max(size.width, size.height) * 0.85
 
@@ -256,9 +266,9 @@ private struct VaultPixelGrid: View {
 
         for row in 0..<rows {
             for column in 0..<columns {
-                let x = CGFloat(column) * Self.spacing
-                let y = CGFloat(row) * Self.spacing
-                let rect = CGRect(x: x, y: y, width: Self.dot, height: Self.dot)
+                let x = CGFloat(column) * spacing
+                let y = CGFloat(row) * spacing
+                let rect = CGRect(x: x, y: y, width: dot, height: dot)
 
                 base.addRect(rect)
 
@@ -275,10 +285,10 @@ private struct VaultPixelGrid: View {
             }
         }
 
-        context.fill(base, with: .color(.white.opacity(0.055)))
+        context.fill(base, with: .color(.white.opacity(baseAlpha)))
         for (index, path) in lit.enumerated() where !path.isEmpty {
-            let alpha = Double(index + 1) / Double(Self.buckets) * 0.8
-            context.fill(path, with: .color(VaultHeroPalette.glow.opacity(alpha)))
+            let alpha = Double(index + 1) / Double(Self.buckets) * maxAlpha
+            context.fill(path, with: .color(tint.opacity(alpha)))
         }
     }
 
