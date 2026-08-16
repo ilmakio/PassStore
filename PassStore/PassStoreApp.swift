@@ -37,6 +37,7 @@ struct PassStoreApp: App {
         // shortcut people expect to create a new entry.
         Window("PassStore", id: PassStoreScene.mainWindowID) {
             AppView(viewModel: viewModel)
+                .background(MainWindowIdentifierMarker().frame(width: 0, height: 0))
         }
         .commands {
             PassStoreCommands(viewModel: viewModel)

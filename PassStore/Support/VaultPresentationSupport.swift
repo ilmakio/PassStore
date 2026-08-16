@@ -102,7 +102,7 @@ enum FieldURLSupport {
 
 // MARK: - Password strength
 
-enum PasswordStrength: Equatable, CaseIterable {
+nonisolated enum PasswordStrength: Equatable, CaseIterable, Sendable {
     case empty
     case tooShort
     case weak

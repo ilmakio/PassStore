@@ -4,7 +4,9 @@
 
 | Version | Supported |
 |---------|-----------|
-| 1.0.x   | Yes       |
+| 1.2.x   | Yes       |
+| 1.1.x   | Yes       |
+| 1.0.x   | No        |
 
 ## Reporting a Vulnerability
 
@@ -36,8 +38,10 @@ The canonical **user-facing** security write-up (threat model, session, clipboar
 
 **On-disk artifacts**
 
-- **`vault.meta`:** wrapped vault key (KDF id, salt, ops/mem limits, AES-GCM nonce, ciphertext, tag — base64 in JSON).
-- **`vault.enc`:** encrypted envelope (version, nonce, ciphertext, tag, timestamp).
+- **`vault.package`:** authoritative atomic package containing the wrapped vault key metadata and encrypted vault envelope.
+- **`vault.meta` / `vault.enc`:** owner-only compatibility mirrors for older PassStore versions; current builds never fall back to them while `vault.package` exists, even if the package is corrupt.
+- **`vault.rollback`:** owner-only atomic recovery package created before a destructive restore. The vault and rollback settings remain AES-256-GCM encrypted; pre-release 1.2 rollback files with legacy plaintext settings are read only for recovery and are never newly written.
+- Custom tag and environment ordering is stored inside the encrypted vault, not in `UserDefaults`; plaintext keys written by pre-release 1.2 builds are migrated and removed after a successful unlock.
 
 **Encrypted backup (`.pstore`)**
 
@@ -49,7 +53,7 @@ The canonical **user-facing** security write-up (threat model, session, clipboar
 
 **On disk**
 
-- Default location: `~/Library/Application Support/app.makio.PassStore/` (or the app bundle id), directory `0700`, `vault.enc` / `vault.meta` `0600`, atomic writes.
+- Default location: `~/Library/Application Support/app.makio.PassStore/` (or the app bundle id), directory `0700`; vault, compatibility mirrors and rollback files are `0600` and use atomic replacement.
 
 **Previous values (1.2.0)**
 
@@ -57,7 +61,7 @@ The canonical **user-facing** security write-up (threat model, session, clipboar
 
 **Linked files (1.2.0)**
 
-- An item may store a security-scoped bookmark to the `.env` it mirrors. The bookmark grants PassStore access to that one file; reads and writes happen only when you press Update or Write, and access is released immediately afterwards. No file is watched and nothing runs in the background.
+- An item may store an app-scoped security bookmark to the `.env` it mirrors. The bookmark grants PassStore access to that one file. PassStore reads linked files when you open their status or bring the app to the front (if the setting is enabled), and releases access immediately afterwards. It writes only after you press **Write** and confirm any conflict; no file is watched continuously. Generated values are quoted and shell expansion characters are escaped before writing.
 
 **Global shortcut**
 
@@ -65,7 +69,7 @@ The canonical **user-facing** security write-up (threat model, session, clipboar
 
 **Memory**
 
-- Password bytes used in Argon2id and PBKDF2 paths are zeroed after derivation where the code controls the buffer; the in-memory vault key is cleared on lock; sensitive field values are overwritten when the vault locks (`VaultMemoryStore`). Swift `String` passwords cannot be reliably zeroed (platform limitation).
+- Password bytes used in Argon2id and PBKDF2 paths are zeroed after derivation where the code controls the buffer; the in-memory vault key, all decrypted item/workspace/template strings, private sidebar metadata, previous values, decrypted import previews and undo snapshots are cleared on lock. Swift `String` passwords cannot be reliably zeroed (platform limitation).
 
 **Network**
 

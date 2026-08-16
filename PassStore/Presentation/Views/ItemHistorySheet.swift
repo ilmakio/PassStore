@@ -65,7 +65,7 @@ struct ItemHistorySheet: View {
             .accessibilityIdentifier("history-confirm-purge")
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The change log is kept. Only the old values themselves are deleted, and they cannot be recovered afterwards.")
+            Text("The change log is kept. Only the old values are deleted. You can press ⌘Z until the vault locks or the app quits; after that they cannot be recovered.")
         }
         .confirmationDialog(
             pendingRestore.map { "Restore the previous value of “\($0.fieldLabel)”?" } ?? "Restore previous value?",
@@ -104,7 +104,7 @@ struct ItemHistorySheet: View {
                     VaultNote(text: "No value has been replaced yet. When you change a secret, the old one is kept here so you can look it up or put it back.")
                 } else {
                     VaultNote(
-                        text: "Keeping previous values is switched off in Settings → Privacy, so nothing is recorded when a secret changes.",
+                        text: "Keeping previous values is switched off in Settings → Data, so nothing is recorded when a secret changes.",
                         tone: .warning
                     )
                 }

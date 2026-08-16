@@ -452,7 +452,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEVELOPMENT_TEAM = AUNK4Y4APT;
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = AUNK4Y4APT;
 				ENABLE_APP_SANDBOX = YES;
@@ -481,7 +481,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.1;
+				MARKETING_VERSION = 1.2.0;
 				OTHER_CODE_SIGN_FLAGS = "";
 				PASSSTORE_SPARKLE_PUBLIC_ED_KEY = "gGKML5DsXo2Z5gPhFm9ma2M0+s/KY3Cw82A6J1tYryY=";
 				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStore;
@@ -508,7 +508,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEVELOPMENT_TEAM = AUNK4Y4APT;
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = AUNK4Y4APT;
 				ENABLE_APP_SANDBOX = YES;
@@ -537,7 +537,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.1;
+				MARKETING_VERSION = 1.2.0;
 				OTHER_CODE_SIGN_FLAGS = "";
 				PASSSTORE_SPARKLE_PUBLIC_ED_KEY = "gGKML5DsXo2Z5gPhFm9ma2M0+s/KY3Cw82A6J1tYryY=";
 				PRODUCT_BUNDLE_IDENTIFIER = app.makio.PassStore;
@@ -681,7 +681,7 @@
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.6.4;
+				minimumVersion = 2.9.5;
 			};
 		};
 		F2BBB0012F7D580000456378 /* XCRemoteSwiftPackageReference "swift-sodium" */ = {
@@ -689,7 +689,7 @@
 			repositoryURL = "https://github.com/jedisct1/swift-sodium";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.9.1;
+				minimumVersion = 0.11.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

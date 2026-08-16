@@ -114,19 +114,33 @@ struct PassStoreCommands: Commands {
 
     private var editCommands: some Commands {
         Group {
-            // The system Undo entry does nothing here — there is no text document behind it —
-            // but destructive vault actions are worth being able to take back.
+            // Preserve native NSTextView undo whenever an editor/search field has focus, and
+            // fall back to PassStore's snapshot undo only outside text editing. Replacing the
+            // group with a vault-only command made ⌘Z erase an item while the user expected
+            // it to undo the last typed character, and removed Redo entirely.
             CommandGroup(replacing: .undoRedo) {
                 Button {
+                    if let undoManager = activeTextUndoManager {
+                        if undoManager.canUndo { undoManager.undo() }
+                        return
+                    }
                     viewModel.undoLastDestructiveAction()
                 } label: {
                     Label(
-                        viewModel.undoActionLabel.map { "Undo \($0)" } ?? "Undo",
+                        undoMenuTitle,
                         systemImage: "arrow.uturn.backward"
                     )
                 }
                 .keyboardShortcut("z", modifiers: [.command])
-                .disabled(viewModel.undoActionLabel == nil)
+                .disabled(!canUndo)
+
+                Button {
+                    activeTextUndoManager?.redo()
+                } label: {
+                    Label(redoMenuTitle, systemImage: "arrow.uturn.forward")
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!(activeTextUndoManager?.canRedo ?? false))
             }
 
             CommandGroup(after: .pasteboard) {
@@ -175,6 +189,32 @@ struct PassStoreCommands: Commands {
                 .disabled(isLocked)
             }
         }
+    }
+
+    /// SwiftUI text fields use an NSTextView field editor. Restricting this to editable text
+    /// views keeps unrelated responders from intercepting the vault's own undo command.
+    private var activeTextUndoManager: UndoManager? {
+        guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+              textView.isEditable else { return nil }
+        return textView.undoManager
+    }
+
+    private var canUndo: Bool {
+        if let manager = activeTextUndoManager { return manager.canUndo }
+        return viewModel.undoActionLabel != nil
+    }
+
+    private var undoMenuTitle: String {
+        if let manager = activeTextUndoManager {
+            guard manager.canUndo else { return "Undo" }
+            return manager.undoActionName.isEmpty ? "Undo" : "Undo \(manager.undoActionName)"
+        }
+        return viewModel.undoActionLabel.map { "Undo \($0)" } ?? "Undo"
+    }
+
+    private var redoMenuTitle: String {
+        guard let manager = activeTextUndoManager, manager.canRedo else { return "Redo" }
+        return manager.redoActionName.isEmpty ? "Redo" : "Redo \(manager.redoActionName)"
     }
 
     // MARK: - View

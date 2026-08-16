@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Testing
 @testable import PassStore
 
@@ -98,7 +99,7 @@ struct TransferTests {
     @Test func exportImportRoundTripWithUnicodePassword() throws {
         let crypto = VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192)
         let service = ExportService(cryptoService: crypto)
-        let unicodePassword = "🔐päss_字"
+        let unicodePassword = "🔐päss_字!"
         let vaultKey = crypto.generateVaultKey()
         let wrapped = try crypto.wrapVaultKey(vaultKey, password: unicodePassword)
         let unwrapped = try crypto.unwrapVaultKey(wrapped, password: unicodePassword)
@@ -125,10 +126,47 @@ struct TransferTests {
 
     @Test func exportImportFailsWithWrongPassword() throws {
         let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
-        let fileData = try service.exportFullBackupSynchronously(backup: makeBackupPayload(title: "Item"), password: "good")
+        let fileData = try service.exportFullBackupSynchronously(backup: makeBackupPayload(title: "Item"), password: "good-password")
         #expect(throws: TransferError.wrongExportPassword) {
-            try service.importPayloadSynchronously(from: fileData, password: "wrong")
+            try service.importPayloadSynchronously(from: fileData, password: "wrong-password")
         }
+    }
+
+    @Test func exportingRequiresAtLeastEightCharacters() {
+        let service = ExportService(cryptoService: VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192))
+        #expect(throws: TransferError.exportPasswordTooShort(8)) {
+            try service.exportFullBackupSynchronously(backup: makeBackupPayload(), password: "short")
+        }
+    }
+
+    @Test func importingStillAcceptsAnOlderShortBackupPassword() throws {
+        let crypto = VaultCryptoService(defaultIterations: 2_000, defaultOpsLimit: 1, defaultMemLimit: 8_192)
+        let service = ExportService(cryptoService: crypto)
+        let password = "old"
+        let vaultKey = crypto.generateVaultKey()
+        let wrappedKey = try crypto.wrapVaultKey(vaultKey, password: password)
+        let plaintext = try JSONEncoder().encode(makeBackupPayload(title: "Legacy short password"))
+        let sealed = try AES.GCM.seal(plaintext, using: SymmetricKey(data: vaultKey))
+        let envelope = EncryptedExportEnvelope(
+            version: 3,
+            kdf: wrappedKey,
+            payload: VaultEnvelope(
+                version: 1,
+                nonce: Data(sealed.nonce).base64EncodedString(),
+                ciphertext: sealed.ciphertext.base64EncodedString(),
+                tag: sealed.tag.base64EncodedString(),
+                createdAt: .now
+            ),
+            createdAt: .now
+        )
+
+        let fileData = try JSONEncoder().encode(envelope)
+        let imported = try service.importPayloadSynchronously(from: fileData, password: password)
+        guard case let .fullBackup(restored) = imported else {
+            Issue.record("Expected a v3 full backup payload.")
+            return
+        }
+        #expect(restored.vault.items.first?.title == "Legacy short password")
     }
 }
 

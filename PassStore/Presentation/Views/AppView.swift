@@ -149,7 +149,9 @@ struct AppView: View {
                     viewModel.reload()
                 }
             case .locked, .setupRequired:
-                viewModel.resetUnlockedSelection()
+                // Sensitive view-model state is cleared synchronously by the session's lock
+                // callback, including when this window is closed.
+                break
             }
         }
         .alert("PassStore", isPresented: Binding(
@@ -182,13 +184,13 @@ struct AppView: View {
                 showOnboarding = true
             }
             MainWindowPresenter.setOpenAction { openWindow(id: PassStoreScene.mainWindowID) }
-            viewModel.refreshLinkedFileStatuses()
+            Task { await viewModel.refreshLinkedFileStatuses() }
         }
         // Coming back from an editor is exactly when a linked `.env` is likely to have
         // changed, so that is when PassStore looks — no watcher, no background work.
         .onChange(of: controlActiveState) { _, newValue in
             guard newValue != .inactive else { return }
-            viewModel.refreshLinkedFileStatuses()
+            Task { await viewModel.refreshLinkedFileStatuses() }
         }
     }
 
@@ -351,7 +353,7 @@ private struct SidebarView: View {
                                 viewModel.setSelectedType(nil)
                             },
                             onReorder: { ids in
-                                viewModel.container.settings.sidebarTagsOrder = ids
+                                viewModel.reorderSidebarTags(ids)
                             }
                         )
                     .sidebarSectionRows(count: viewModel.orderedTags.count)
@@ -383,7 +385,7 @@ private struct SidebarView: View {
                                 viewModel.setSelectedType(nil)
                             },
                             onReorder: { ids in
-                                viewModel.container.settings.sidebarEnvironmentsOrder = ids
+                                viewModel.reorderSidebarEnvironments(ids)
                             }
                         )
                     .sidebarSectionRows(count: viewModel.orderedEnvironments.count)
@@ -434,7 +436,8 @@ private struct SidebarView: View {
 
 private struct ItemListView: View {
     @Bindable var viewModel: VaultViewModel
-    @FocusState private var isSearchFocused: Bool
+    private enum FocusArea: Hashable { case search, list }
+    @FocusState private var focusedArea: FocusArea?
 
     private var isVaultLocked: Bool {
         viewModel.container.sessionManager.lockState != .unlocked
@@ -458,11 +461,15 @@ private struct ItemListView: View {
                     // handled here instead; ⌘-click, ⇧-click ranges and ⌥↑/⌥↓ all still work.
                     List {
                         ForEach(viewModel.filteredItems, id: \.id) { item in
-                            ItemRow(viewModel: viewModel, item: item)
+                            ItemRow(viewModel: viewModel, item: item) {
+                                focusedArea = .list
+                            }
                                 .listRowBackground(rowBackground(for: item))
                         }
                     }
                     .listStyle(.inset)
+                    .focusable()
+                    .focused($focusedArea, equals: .list)
                     .accessibilityIdentifier("item-list")
                 }
 
@@ -478,6 +485,7 @@ private struct ItemListView: View {
                         && viewModel.activeSheet == nil
                         && !viewModel.isSettingsPresented
                         && !viewModel.isCommandPalettePresented
+                        && focusedArea == .list
                 },
                 onMove: { viewModel.moveSelection(by: $0) },
                 onEscape: {
@@ -487,7 +495,7 @@ private struct ItemListView: View {
                 }
             )
             .onChange(of: viewModel.searchFocusRequests) { _, _ in
-                isSearchFocused = true
+                focusedArea = .search
             }
             // No subtitle: "Favorites" does not need "Pinned secrets you reach for often"
             // under it, and the strap line only pushed the list down.
@@ -618,7 +626,7 @@ private struct ItemListView: View {
                     Label("\(viewModel.outdatedLinkedFileCount)", systemImage: "arrow.down.doc")
                         .font(.vaultBadge)
                         .foregroundStyle(.orange)
-                        .help("\(viewModel.outdatedLinkedFileCount) linked .env \(viewModel.outdatedLinkedFileCount == 1 ? "file has" : "files have") changed on disk")
+                        .help("\(viewModel.outdatedLinkedFileCount) linked .env \(viewModel.outdatedLinkedFileCount == 1 ? "file needs" : "files need") attention")
                         .accessibilityIdentifier("outdated-links-badge")
                 }
             }
@@ -705,7 +713,7 @@ private struct ItemListView: View {
             TextField("Search", text: $viewModel.searchText)
                 .textFieldStyle(.plain)
                 .font(.callout)
-                .focused($isSearchFocused)
+                .focused($focusedArea, equals: .search)
                 .accessibilityIdentifier("item-list-search")
             if !viewModel.searchText.isEmpty {
                 Button {
@@ -732,6 +740,7 @@ private struct ItemListView: View {
 private struct ItemRow: View {
     @Bindable var viewModel: VaultViewModel
     let item: SecretItemEntity
+    let onActivateList: () -> Void
 
     @State private var isHovering = false
     @State private var didCopy = false
@@ -750,7 +759,7 @@ private struct ItemRow: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("item-row-\(uiIdentifierSlug(item.title))")
         .contextMenu {
-            if viewModel.isMultiSelecting {
+            if viewModel.multiSelectedIDs.count > 1 && viewModel.multiSelectedIDs.contains(item.id) {
                 multiSelectionContextMenu
             } else {
                 singleItemContextMenu
@@ -761,10 +770,11 @@ private struct ItemRow: View {
     /// Plain click selects, ⌘ toggles, ⇧ extends — the modifiers a Mac list is expected to
     /// honour, handled here because the row owns its own selection.
     private func handleClick() {
+        onActivateList()
         let flags = NSEvent.modifierFlags
         if flags.contains(.shift) {
             viewModel.extendSelection(to: item)
-        } else if flags.contains(.command) || viewModel.isMultiSelecting {
+        } else if flags.contains(.command) {
             viewModel.toggleMultiSelect(item)
         } else {
             viewModel.select(item)
@@ -1344,10 +1354,11 @@ private struct ItemDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             metadataRow("Created", value: Self.absoluteFormatter.string(from: item.createdAt))
             metadataRow("Last modified", value: Self.relative(item.updatedAt))
-            metadataRow(
-                "Last used",
-                value: item.lastAccessedAt.map(Self.relative) ?? "Never"
-            )
+            if let lastAccessedAt = item.lastAccessedAt {
+                metadataRow("Last used", value: Self.relative(lastAccessedAt))
+            } else {
+                metadataRow("Last used", value: "Never")
+            }
             if item.isArchived {
                 metadataRow("Status", value: "Archived")
             }
@@ -1495,9 +1506,11 @@ private struct LinkedFileSection: View {
                 unlinkedPrompt
             }
         }
-        .onAppear { refresh() }
-        .onChange(of: item.id) { _, _ in refresh() }
-        .onChange(of: viewModel.itemsWithOutdatedLinks) { _, _ in refresh() }
+        .task(id: item.id) { await refresh() }
+        .onChange(of: viewModel.itemsWithOutdatedLinks) { _, _ in Task { await refresh() } }
+        .onChange(of: viewModel.linkedFileStatuses[item.id]) { _, newValue in
+            if let newValue { status = newValue }
+        }
     }
 
     // MARK: Linked
@@ -1507,7 +1520,6 @@ private struct LinkedFileSection: View {
             Menu {
                 Button("Choose a different file…") {
                     viewModel.chooseLinkedFile(for: item, parsedIntoFields: link.parsedIntoFields)
-                    refresh()
                 }
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.selectFile(link.displayPath, inFileViewerRootedAtPath: "")
@@ -1515,7 +1527,7 @@ private struct LinkedFileSection: View {
                 Divider()
                 Button("Remove link", role: .destructive) {
                     viewModel.unlinkFile(from: item)
-                    refresh()
+                    Task { await refresh() }
                 }
             } label: {
                 Label(link.abbreviatedPath, systemImage: "doc.text")
@@ -1529,8 +1541,10 @@ private struct LinkedFileSection: View {
 
             HStack(spacing: VaultSpacing.s) {
                 Button {
-                    viewModel.updateItemFromLinkedFile(item)
-                    refresh()
+                    Task {
+                        _ = await viewModel.updateItemFromLinkedFile(item)
+                        await refresh()
+                    }
                 } label: {
                     Label("Update from file", systemImage: "arrow.down.doc")
                 }
@@ -1538,7 +1552,7 @@ private struct LinkedFileSection: View {
                 .accessibilityIdentifier("linked-file-pull")
 
                 Button {
-                    if status == .diverged || status == .fileChanged {
+                    if status == .diverged || status == .fileChanged || status == .needsInitialSync {
                         isConfirmingWrite = true
                     } else {
                         write()
@@ -1557,7 +1571,7 @@ private struct LinkedFileSection: View {
             isPresented: $isConfirmingWrite,
             titleVisibility: .visible
         ) {
-            Button("Overwrite File", role: .destructive) { write() }
+            Button("Overwrite File", role: .destructive) { write(allowingFileChanges: true) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("That file has changed since the last sync. Writing replaces its contents with what this item holds.")
@@ -1574,6 +1588,8 @@ private struct LinkedFileSection: View {
                 text: link.syncedAt.map { "In sync as of \(Self.relative($0))." } ?? "In sync.",
                 tone: .success
             )
+        case .needsInitialSync:
+            VaultNote(text: "The file and this item differ. Choose Update to keep the file, or Write to replace it.", tone: .warning)
         case .fileChanged:
             VaultNote(text: "The file on disk has changed. Update to pull the new contents in.", tone: .warning)
         case .vaultChanged:
@@ -1592,7 +1608,7 @@ private struct LinkedFileSection: View {
         switch status {
         case .upToDate: .green
         case .unavailable: .red
-        case .fileChanged, .vaultChanged, .diverged: .orange
+        case .needsInitialSync, .fileChanged, .vaultChanged, .diverged: .orange
         case .unlinked: .accentColor
         }
     }
@@ -1604,7 +1620,6 @@ private struct LinkedFileSection: View {
             VaultNote(text: "Link this item to the .env it mirrors, and you can pull in changes with one click instead of copying and pasting.")
             Button {
                 viewModel.chooseLinkedFile(for: item, parsedIntoFields: true)
-                refresh()
             } label: {
                 Label("Link a .env file…", systemImage: "link.badge.plus")
             }
@@ -1614,13 +1629,15 @@ private struct LinkedFileSection: View {
 
     // MARK: Helpers
 
-    private func write() {
-        viewModel.writeLinkedFile(from: item)
-        refresh()
+    private func write(allowingFileChanges: Bool = false) {
+        Task {
+            _ = await viewModel.writeLinkedFile(from: item, allowingFileChanges: allowingFileChanges)
+            await refresh()
+        }
     }
 
-    private func refresh() {
-        status = viewModel.linkedFileStatus(for: item)
+    private func refresh() async {
+        status = await viewModel.linkedFileStatus(for: item)
     }
 
     private static func relative(_ date: Date) -> String {
@@ -1649,12 +1666,17 @@ private struct FieldRow: View {
     @State private var isHoveringValue = false
     @State private var didPushCursor = false
 
+    /// `isSensitive` governs history/search policy; `isMasked` is the explicit presentation
+    /// preference. Treat either as concealed so a malformed or legacy record cannot expose a
+    /// secret merely because those two flags drifted apart.
+    private var isConcealed: Bool { field.isSensitive || field.isMasked }
+
     private var isOpenableURL: Bool {
-        field.kind == .url && !field.isSensitive && FieldURLSupport.url(from: field.value) != nil
+        field.kind == .url && !isConcealed && FieldURLSupport.url(from: field.value) != nil
     }
 
     private var showsPlaintext: Bool {
-        guard field.isSensitive else { return true }
+        guard isConcealed else { return true }
         guard canRevealSecrets else { return false }
         return isRevealPinned || isHoveringValue
     }
@@ -1692,7 +1714,7 @@ private struct FieldRow: View {
     }
 
     private var helpText: String {
-        switch (field.isCopyable, field.isSensitive && canRevealSecrets) {
+        switch (field.isCopyable, isConcealed && canRevealSecrets) {
         case (true, true): "Hover to show, click to copy"
         case (true, false): "Click to copy"
         case (false, true): "Hover to show"
@@ -1707,7 +1729,7 @@ private struct FieldRow: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("field-label-\(field.key)")
 
-            if field.isSensitive {
+            if isConcealed {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 8))
                     .foregroundStyle(.tertiary)
@@ -1716,7 +1738,7 @@ private struct FieldRow: View {
 
             Spacer(minLength: VaultSpacing.s)
 
-            if field.isSensitive, canRevealSecrets {
+            if isConcealed, canRevealSecrets {
                 Button {
                     isRevealPinned.toggle()
                 } label: {
@@ -1821,7 +1843,7 @@ private struct FieldRow: View {
     /// copyable. The pushed cursor is tracked so an unbalanced `pop` cannot leave the whole
     /// app stuck with a pointing hand.
     private func handleHover(_ hovering: Bool) {
-        if field.isSensitive, canRevealSecrets {
+        if isConcealed, canRevealSecrets {
             isHoveringValue = hovering
         }
         guard field.isCopyable else { return }
@@ -1835,7 +1857,7 @@ private struct FieldRow: View {
     }
 
     private var accessibilityCopyHint: String {
-        field.isSensitive && canRevealSecrets
+        isConcealed && canRevealSecrets
             ? "Hover to show the value, then activate to copy it"
             : "Activate to copy to the clipboard"
     }
@@ -1993,7 +2015,7 @@ private struct LockedVaultView: View {
         }
         .sheet(isPresented: $isConfirmingReset) {
             EraseVaultSheet {
-                sessionManager.resetVaultDestroyingAllData()
+                try sessionManager.resetVaultDestroyingAllData()
                 password = ""
             }
         }

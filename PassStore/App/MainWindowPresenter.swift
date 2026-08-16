@@ -9,6 +9,7 @@ import SwiftUI
 /// the remaining edge cases: minimised, closed, or reopened from the Dock.
 @MainActor
 enum MainWindowPresenter {
+    static let windowIdentifier = NSUserInterfaceItemIdentifier("app.makio.PassStore.main-window")
     /// Set by whichever scene currently has `openWindow` in its environment.
     private static var openAction: (() -> Void)?
 
@@ -32,14 +33,20 @@ enum MainWindowPresenter {
 
     /// The app's own window, ignoring sheets, panels and the menu bar extra's host window.
     static func existingMainWindow() -> NSWindow? {
-        let candidates = NSApp.windows.filter { window in
-            !window.isSheet
-                && window.level == .normal
-                && window.canBecomeKey
-                && window.contentViewController != nil
-        }
-        if let main = candidates.first(where: \.isMainWindow) { return main }
-        // Fall back to the largest, which is the app window rather than a stray helper.
-        return candidates.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+        NSApp.windows.first { $0.identifier == windowIdentifier }
+    }
+}
+
+/// SwiftUI's scene id is not guaranteed to become `NSWindow.identifier`. Install an explicit
+/// marker so a menu-bar panel or helper window can never be mistaken for the vault window.
+struct MainWindowIdentifierMarker: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { view.window?.identifier = MainWindowPresenter.windowIdentifier }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { nsView.window?.identifier = MainWindowPresenter.windowIdentifier }
     }
 }

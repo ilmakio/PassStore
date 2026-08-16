@@ -8,9 +8,10 @@ import SwiftUI
 /// confirmation word has been typed.
 struct EraseVaultSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let onErase: () -> Void
+    let onErase: () throws -> Void
 
     @State private var typedConfirmation = ""
+    @State private var errorMessage: String?
     @FocusState private var isFieldFocused: Bool
 
     /// Deliberately not localised and deliberately not the word on the button: it has to be
@@ -35,8 +36,7 @@ struct EraseVaultSheet: View {
                 .keyboardShortcut(.cancelAction)
 
             Button("Erase Vault") {
-                onErase()
-                dismiss()
+                erase()
             }
             .buttonStyle(VaultButtonStyle(.destructive))
             .disabled(!canErase)
@@ -46,6 +46,10 @@ struct EraseVaultSheet: View {
                 text: "A master password cannot be recovered or reset. Your secrets are encrypted with it, so without it nothing — including PassStore — can read them.",
                 tone: .danger
             )
+
+            if let errorMessage {
+                VaultNote(text: errorMessage, tone: .danger)
+            }
 
             VaultSection("What will be deleted", systemImage: "trash", tint: .red) {
                 bullet("Every secret, workspace, template and custom field stored on this Mac.")
@@ -69,13 +73,22 @@ struct EraseVaultSheet: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.vaultValue)
                         .focused($isFieldFocused)
-                        .onSubmit { if canErase { onErase(); dismiss() } }
+                        .onSubmit { if canErase { erase() } }
                         .accessibilityIdentifier("erase-vault-confirmation-field")
                 }
             }
         }
         .frame(width: 500, height: 600)
         .onAppear { isFieldFocused = true }
+    }
+
+    private func erase() {
+        do {
+            try onErase()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func bullet(_ text: String) -> some View {

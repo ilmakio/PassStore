@@ -40,6 +40,10 @@ final class GlobalCommandPaletteHotkey {
     private init() {}
 
     func configure(viewModel: VaultViewModel, settings: AppSettingsStore) {
+        if let settingsObserver {
+            NotificationCenter.default.removeObserver(settingsObserver)
+            self.settingsObserver = nil
+        }
         self.viewModel = viewModel
         self.settings = settings
 
@@ -97,7 +101,9 @@ final class GlobalCommandPaletteHotkey {
                     nil,
                     &hotKeyID
                 )
-                guard status == noErr, hotKeyID.id == GlobalCommandPaletteHotkey.hotKeyID else {
+                guard status == noErr,
+                      hotKeyID.signature == GlobalCommandPaletteHotkey.hotKeySignature,
+                      hotKeyID.id == GlobalCommandPaletteHotkey.hotKeyID else {
                     return OSStatus(eventNotHandledErr)
                 }
                 // The Carbon handler runs on the main thread, but hop explicitly so the

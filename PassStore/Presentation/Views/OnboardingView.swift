@@ -166,8 +166,9 @@ struct OnboardingView: View {
         // "Creating your vault…" state is actually visible rather than a frozen window.
         await sessionManager.createVault(password: password)
 
-        if let error = sessionManager.lastErrorMessage {
-            errorMessage = error
+        guard sessionManager.lockState == .unlocked else {
+            errorMessage = sessionManager.lastErrorMessage
+                ?? "Vault creation was interrupted. Try again."
             return
         }
 

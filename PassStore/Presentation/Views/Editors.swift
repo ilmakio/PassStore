@@ -535,8 +535,10 @@ private struct EnvGroupImportSection: View {
     }
 
     private func applyFromFile() {
-        guard let picked = viewModel.readEnvFileForImport() else { return }
-        stage(picked)
+        Task {
+            guard let picked = await viewModel.readEnvFileForImportOffMain() else { return }
+            stage(picked)
+        }
     }
 
     private func stage(_ picked: VaultViewModel.PickedEnvFile) {
@@ -553,7 +555,7 @@ private struct EnvGroupImportSection: View {
         provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
             guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
             Task { @MainActor in
-                guard let picked = viewModel.readEnvFile(at: url) else { return }
+                guard let picked = await viewModel.readEnvFileOffMain(at: url) else { return }
                 stage(picked)
             }
         }
@@ -565,7 +567,7 @@ private struct EnvGroupImportSection: View {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
                 Task { @MainActor in
-                    guard let picked = viewModel.readEnvFile(at: url) else { return }
+                    guard let picked = await viewModel.readEnvFileOffMain(at: url) else { return }
                     stage(picked)
                 }
             }
@@ -1074,7 +1076,11 @@ struct AppSettingsView: View {
             Group {
                 switch selectedTab {
                 case .general:
-                    GeneralSettingsPane(settings: settings, sessionManager: viewModel.container.sessionManager)
+                    GeneralSettingsPane(
+                        settings: settings,
+                        sessionManager: viewModel.container.sessionManager,
+                        viewModel: viewModel
+                    )
                 case .data:
                     DataSettingsPane(settings: settings, viewModel: viewModel)
                 case .templates:
@@ -1131,7 +1137,7 @@ private struct DataSettingsPane: View {
 
                     if viewModel.outdatedLinkedFileCount > 0 {
                         VaultNote(
-                            text: "\(viewModel.outdatedLinkedFileCount) linked \(viewModel.outdatedLinkedFileCount == 1 ? "file has" : "files have") changed on disk.",
+                            text: "\(viewModel.outdatedLinkedFileCount) linked \(viewModel.outdatedLinkedFileCount == 1 ? "file needs" : "files need") your attention.",
                             tone: .warning
                         )
                     }
@@ -1148,7 +1154,7 @@ private struct DataSettingsPane: View {
                                 .accessibilityIdentifier("settings-discard-rollback")
                         }
                     } else {
-                        VaultNote(text: "No pre-restore copy is stored. PassStore takes one automatically whenever you restore a backup, so a restore can be undone even after quitting.")
+                        VaultNote(text: "No pre-restore copy is stored. Before applying a backup, PassStore must successfully save one; otherwise the import is not applied.")
                     }
                 }
             }
@@ -1165,7 +1171,7 @@ private struct DataSettingsPane: View {
                 .accessibilityIdentifier("settings-confirm-purge-history")
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Change logs are kept — only the old values are removed, across every item. This cannot be undone once you quit.")
+            Text("Change logs are kept — only the old values are removed across every item. You can press ⌘Z until the vault locks or the app quits.")
         }
         .confirmationDialog(
             "Restore the vault from before the last backup restore?",
@@ -1197,6 +1203,7 @@ private struct DataSettingsPane: View {
 private struct GeneralSettingsPane: View {
     @Bindable var settings: AppSettingsStore
     @Bindable var sessionManager: VaultSessionManager
+    @Bindable var viewModel: VaultViewModel
 
     @State private var isShortcutUnavailable = false
 
@@ -1206,11 +1213,12 @@ private struct GeneralSettingsPane: View {
                 VaultSection("Unlock", systemImage: "touchid") {
                     Toggle("Use Touch ID to unlock", isOn: $settings.biometricsEnabled)
                         .toggleStyle(.checkbox)
+                        .disabled(sessionManager.isBusy)
                         .accessibilityIdentifier("settings-biometrics")
 
                     Toggle("Ask automatically when PassStore opens", isOn: $settings.unlocksWithBiometricsAutomatically)
                         .toggleStyle(.checkbox)
-                        .disabled(!settings.biometricsEnabled)
+                        .disabled(!settings.biometricsEnabled || sessionManager.isBusy)
                         .accessibilityIdentifier("settings-auto-biometrics")
 
                     VaultNote(text: "The Touch ID prompt appears by itself on launch and when you switch back to PassStore, so unlocking needs no clicks. Turn it off to reach for it yourself.")
@@ -1289,7 +1297,14 @@ private struct GeneralSettingsPane: View {
             }
         }
         .onChange(of: settings.biometricsEnabled) { _, _ in
-            sessionManager.syncBiometricPreferenceIfUnlocked()
+            do {
+                try sessionManager.syncBiometricPreferenceIfUnlocked()
+                if let warning = sessionManager.lastErrorMessage {
+                    viewModel.alertMessage = warning
+                }
+            } catch {
+                viewModel.alertMessage = error.localizedDescription
+            }
         }
         .onChange(of: settings.globalCommandPaletteHotkeyEnabled) { _, _ in
             refreshGlobalHotkeyAccessibilityState()
@@ -2500,7 +2515,10 @@ struct ExportSheet: View {
     }
 
     private var canExport: Bool {
-        !password.isEmpty && !confirmation.isEmpty && !mismatch && !viewModel.isWorking
+        password.count >= VaultSessionManager.minimumPasswordLength
+            && !confirmation.isEmpty
+            && !mismatch
+            && !viewModel.isWorking
     }
 
     var body: some View {
@@ -2509,7 +2527,10 @@ struct ExportSheet: View {
             subtitle: "An encrypted copy of your whole vault, as a .pstore file.",
             systemImage: "arrow.up.doc"
         ) {
-            Button("Cancel") { dismiss() }
+            Button("Cancel") {
+                viewModel.cancelPendingCryptoOperation()
+                dismiss()
+            }
                 .buttonStyle(VaultButtonStyle(.secondary))
                 .keyboardShortcut(.cancelAction)
 
@@ -2555,6 +2576,11 @@ struct ExportSheet: View {
         }
         .frame(width: 460, height: 520)
         .onAppear { isPasswordFocused = true }
+        .onDisappear {
+            if viewModel.isWorking {
+                viewModel.cancelPendingCryptoOperation()
+            }
+        }
     }
 
     private func export() {
@@ -2586,7 +2612,10 @@ struct ImportEncryptedExportSheet: View {
             subtitle: "Open a .pstore file. You choose what to do with it on the next step.",
             systemImage: "arrow.down.doc"
         ) {
-            Button("Cancel") { dismiss() }
+            Button("Cancel") {
+                viewModel.cancelPendingCryptoOperation()
+                dismiss()
+            }
                 .buttonStyle(VaultButtonStyle(.secondary))
                 .keyboardShortcut(.cancelAction)
 
@@ -2639,6 +2668,11 @@ struct ImportEncryptedExportSheet: View {
         ) { result in
             viewModel.applyImportFilePickerResult(result)
             isPasswordFocused = true
+        }
+        .onDisappear {
+            if viewModel.isWorking {
+                viewModel.cancelPendingCryptoOperation()
+            }
         }
     }
 
@@ -2819,8 +2853,9 @@ struct ImportPreviewSheet: View {
     }
 
     private func apply() {
-        viewModel.applyStagedImport(mode: mode)
-        dismiss()
+        if viewModel.applyStagedImport(mode: mode) != nil {
+            dismiss()
+        }
     }
 }
 
@@ -3033,6 +3068,10 @@ private struct SimpleFieldEditor: View {
         )
     }
 
+    private var isConcealed: Bool {
+        field.isSensitive || field.isMasked
+    }
+
     @ViewBuilder
     private var fieldValueRow: some View {
         if itemType == .database, field.key == VaultFormFieldKeys.databaseEngine {
@@ -3056,24 +3095,56 @@ private struct SimpleFieldEditor: View {
         } else {
             switch field.kind {
             case .multiline, .json:
-                TextEditor(text: $field.value)
-                    .scrollContentBackground(.hidden)
-                    .font(.system(field.kind == .json ? .body : .body, design: field.kind == .json ? .monospaced : .default))
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                            .overlay(
+                VStack(alignment: .trailing, spacing: 6) {
+                    if isConcealed, !isRevealed {
+                        HStack(spacing: 8) {
+                            Image(systemName: "lock.fill")
+                                .foregroundStyle(.secondary)
+                            Text(field.value.isEmpty ? "Empty masked value" : "Masked value hidden")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Reveal to edit") { isRevealed = true }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+                                )
+                        )
+                        .accessibilityLabel(field.value.isEmpty ? "Empty masked value" : "Masked value hidden")
+                    } else {
+                        TextEditor(text: $field.value)
+                            .scrollContentBackground(.hidden)
+                            .font(.system(.body, design: field.kind == .json ? .monospaced : .default))
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
+                            .padding(8)
+                            .background(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+                                    )
                             )
-                    )
+                    }
+
+                    if isConcealed, isRevealed {
+                        Button("Hide") { isRevealed = false }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                }
             default:
                 HStack(alignment: .center, spacing: 8) {
                     Group {
-                        if field.kind == .secret, !isRevealed {
+                        if isConcealed, !isRevealed {
                             SecureField("", text: $field.value, prompt: Text("Secret value"))
                                 .textFieldStyle(.roundedBorder)
                         } else {
@@ -3098,7 +3169,7 @@ private struct SimpleFieldEditor: View {
                         .accessibilityIdentifier("editor-generate-\(field.key)")
                     }
 
-                    if field.kind == .secret {
+                    if isConcealed {
                         Button(isRevealed ? "Hide" : "Reveal") {
                             isRevealed.toggle()
                         }

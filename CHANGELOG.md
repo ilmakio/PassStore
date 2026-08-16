@@ -85,6 +85,9 @@ All notable changes to PassStore are documented here.
   **Replace**. Either way your current vault is copied aside first, so a restore can be undone
   with ⌘Z, or recovered later from Settings → Data even after quitting.
 - **Restoring the same backup twice no longer duplicates every secret.**
+- Backup merge now preserves custom templates, field metadata, timestamps, history, health
+  dismissals and linked-file metadata. Conflicting copies and legacy exports are idempotent,
+  and the complete merge is committed in one encrypted write.
 - **Opening an item from the command palette shows it.** Picking an item that lived in another
   workspace closed the palette and left the detail pane empty.
 - **The toolbar is empty while the vault is locked.** A stray sidebar toggle was left behind on
@@ -136,6 +139,18 @@ All notable changes to PassStore are documented here.
 - **The delay after failed password attempts survives quitting the app.**
 - Restoring a backup re-checks Touch ID against this Mac rather than trusting the setting
   saved in the file.
+- Lock, sleep and erase now invalidate in-flight unlock/import/export work and clear decrypted
+  previews and undo state, so a late asynchronous result cannot reopen or repopulate a vault.
+- Linked-file access now uses the app-scoped bookmark entitlement, renews stale bookmarks and
+  refuses an unconfirmed overwrite if the file changed again.
+- Generated `.env` output now quotes every value, escapes shell expansion/command substitution
+  and repairs unsafe imported keys, so sourcing a linked or copied file cannot execute text
+  smuggled into a field name, value or item title.
+- Clipboard expiry now relies on the pasteboard ownership counter instead of retaining a hash
+  of the copied secret in memory, while still leaving a newer clipboard value untouched.
+- Sparkle now authenticates update archives before extracting any downloaded contents.
+- Updated Sparkle from 2.9.1 to 2.9.5 and raised the package floor to the patched release.
+- Updated swift-sodium from 0.10.0 to 0.11.0 (libsodium 1.0.22).
 
 ### Compatibility
 

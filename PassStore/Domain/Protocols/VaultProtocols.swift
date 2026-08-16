@@ -1,6 +1,13 @@
 import Foundation
 
-protocol VaultKeyStore: AnyObject {
+nonisolated enum RollbackSettingsPayload: Sendable {
+    case encrypted(VaultEnvelope)
+    /// Compatibility with rollback files created by pre-release 1.2 builds. New rollback
+    /// packages never write settings in plaintext.
+    case legacyPlaintext(ExportedSettingsPayload)
+}
+
+nonisolated protocol VaultKeyStore: AnyObject, Sendable {
     var isBiometricHardwareAvailable: Bool { get }
     func saveVaultKey(_ key: Data, requireBiometrics: Bool) throws
     func readVaultKey(prompt: String) throws -> Data
@@ -18,12 +25,12 @@ protocol EncryptedVaultStore: AnyObject {
 
     /// Copies the current vault aside so a destructive operation can be undone after a relaunch.
     /// Still encrypted with the same vault key — this is a copy, not a decryption.
-    func writeRollbackCopy() throws
+    func writeRollbackCopy(settingsEnvelope: VaultEnvelope) throws
     /// When the rollback copy was taken, or nil if there isn't one.
     func rollbackCopyDate() -> Date?
     /// Puts the rollback copy back in place. Throws if there is none.
-    func restoreRollbackCopy() throws
-    func discardRollbackCopy()
+    @discardableResult func restoreRollbackCopy() throws -> RollbackSettingsPayload?
+    func discardRollbackCopy() throws
 }
 
 protocol WorkspaceRepositoryProtocol: AnyObject {

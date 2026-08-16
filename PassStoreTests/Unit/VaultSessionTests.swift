@@ -78,7 +78,7 @@ struct VaultSessionTests {
         #expect(session.lockState == .locked)
     }
 
-    @Test func changingMasterPasswordRejectsWrongCurrentAndShortNewPassword() async throws {
+    @Test func changingMasterPasswordRejectsWrongCurrentShortAndUnchangedPasswords() async throws {
         let defaults = UserDefaults(suiteName: "VaultPasswordChangeGuards-\(UUID().uuidString)")!
         let session = VaultSessionManager(
             defaults: defaults,
@@ -95,6 +95,12 @@ struct VaultSessionTests {
         }
         await #expect(throws: VaultCryptoError.self) {
             try await session.changeMasterPassword(current: "original-password", to: "short")
+        }
+        await #expect(throws: VaultCryptoError.newPasswordMustDiffer) {
+            try await session.changeMasterPassword(
+                current: "original-password",
+                to: "original-password"
+            )
         }
 
         // Both rejections must leave the original password working.
@@ -149,7 +155,7 @@ struct VaultSessionTests {
     }
 }
 
-private final class FailingVaultKeyStore: VaultKeyStore {
+nonisolated private final class FailingVaultKeyStore: VaultKeyStore, @unchecked Sendable {
     var isBiometricHardwareAvailable = true
 
     func saveVaultKey(_ key: Data, requireBiometrics: Bool) throws {

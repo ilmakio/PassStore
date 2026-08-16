@@ -175,6 +175,9 @@ struct CommandPaletteOverlay: View {
                 NSEvent.removeMonitor(escapeKeyMonitor)
             }
             escapeKeyMonitor = nil
+            // Entry titles/keywords can contain secret item metadata; actions also capture
+            // the view model. Release all of it as soon as the overlay closes.
+            allEntries = []
         }
         .onExitCommand {
             viewModel.dismissCommandPalette()
@@ -365,7 +368,8 @@ extension VaultViewModel {
         var dynamic: [CommandPaletteEntry] = []
 
         for workspace in workspaces.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
-            let id = workspace.id.uuidString
+            let workspaceID = workspace.id
+            let id = workspaceID.uuidString
             dynamic.append(
                 .init(
                     id: "go.workspace.\(id)",
@@ -374,7 +378,7 @@ extension VaultViewModel {
                     keywords: ["workspace", "folder", workspace.name],
                     isEnabled: true,
                     perform: wrap {
-                        self.selectDestination(.workspace(workspace.id))
+                        self.selectDestination(.workspace(workspaceID))
                         self.setSelectedType(nil)
                     }
                 )
@@ -386,7 +390,8 @@ extension VaultViewModel {
             if t != .orderedSame { return t == .orderedAscending }
             return lhs.id.uuidString < rhs.id.uuidString
         }) {
-            let id = item.id.uuidString
+            let itemID = item.id
+            let id = itemID.uuidString
             let subtitleParts = [item.type.title, item.workspace?.name].compactMap { $0 }
             dynamic.append(
                 .init(
@@ -397,15 +402,14 @@ extension VaultViewModel {
                     isEnabled: true,
                     // Items outrank commands: the palette is mostly used to reach a secret.
                     priority: 40,
-                    perform: wrap {
-                        self.revealAndSelectItemFromPalette(item)
-                    }
+                    perform: wrap { self.selectItem(id: itemID) }
                 )
             )
 
             // Copying a single field used to mean: open the palette, open the item, move to
             // the detail pane, then copy. The palette can just do it.
             if let primary = primaryCopyField(for: item) {
+                let fieldID = primary.id
                 dynamic.append(
                     .init(
                         id: "copy.field.\(id).\(primary.key)",
@@ -414,7 +418,7 @@ extension VaultViewModel {
                         keywords: ["copy", "clipboard", primary.label, item.title] + item.tags,
                         isEnabled: true,
                         priority: 20,
-                        perform: wrap { self.copyField(primary) }
+                        perform: wrap { self.copyField(itemID: itemID, fieldID: fieldID) }
                     )
                 )
             }

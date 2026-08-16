@@ -10,6 +10,9 @@
 	<string>https://s3.makio.app/storage/passstore/updates/stable/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>gGKML5DsXo2Z5gPhFm9ma2M0+s/KY3Cw82A6J1tYryY=</string>
+	<!-- Authenticate the downloaded archive before any of its contents are extracted. -->
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 	<!-- Required for sandboxed apps: run InstallerLauncher inside Installer.xpc (not in-app) so admin auth / launchd jobs work. -->
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>

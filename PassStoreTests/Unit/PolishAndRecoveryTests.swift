@@ -80,18 +80,18 @@ struct PolishAndRecoveryTests {
             vault: source.memoryStore.makeSnapshot(),
             settings: source.settings.makeSettingsSnapshot()
         )
-        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "pw")
+        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "backup-password")
 
         let target = makeContainer("MergeTwiceTarget")
         let viewModel = VaultViewModel(container: target)
 
         viewModel.stageImport(data: data, fileName: "backup.pstore")
-        #expect(await viewModel.prepareImport(password: "pw"))
+        #expect(await viewModel.prepareImport(password: "backup-password"))
         _ = viewModel.applyStagedImport(mode: .merge)
         let afterFirst = viewModel.items.count
 
         viewModel.stageImport(data: data, fileName: "backup.pstore")
-        #expect(await viewModel.prepareImport(password: "pw"))
+        #expect(await viewModel.prepareImport(password: "backup-password"))
         let second = try #require(viewModel.applyStagedImport(mode: .merge))
 
         #expect(second.addedItems == 0)
@@ -110,7 +110,7 @@ struct PolishAndRecoveryTests {
             vault: source.memoryStore.makeSnapshot(),
             settings: source.settings.makeSettingsSnapshot()
         )
-        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "pw")
+        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "backup-password")
 
         let target = makeContainer("ConflictTarget")
         let viewModel = VaultViewModel(container: target)
@@ -118,7 +118,7 @@ struct PolishAndRecoveryTests {
         viewModel.reload()
 
         viewModel.stageImport(data: data, fileName: "backup.pstore")
-        #expect(await viewModel.prepareImport(password: "pw"))
+        #expect(await viewModel.prepareImport(password: "backup-password"))
         _ = viewModel.applyStagedImport(mode: .merge)
 
         let local = try #require(viewModel.items.first { $0.id == sharedID })
@@ -133,7 +133,7 @@ struct PolishAndRecoveryTests {
             vault: source.memoryStore.makeSnapshot(),
             settings: source.settings.makeSettingsSnapshot()
         )
-        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "pw")
+        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "backup-password")
 
         let target = makeContainer("ReplaceTarget")
         let viewModel = VaultViewModel(container: target)
@@ -141,7 +141,7 @@ struct PolishAndRecoveryTests {
         viewModel.reload()
 
         viewModel.stageImport(data: data, fileName: "backup.pstore")
-        #expect(await viewModel.prepareImport(password: "pw"))
+        #expect(await viewModel.prepareImport(password: "backup-password"))
         _ = viewModel.applyStagedImport(mode: .replace)
 
         #expect(!viewModel.items.contains { $0.title == "Original" })
@@ -160,14 +160,14 @@ struct PolishAndRecoveryTests {
             vault: source.memoryStore.makeSnapshot(),
             settings: source.settings.makeSettingsSnapshot()
         )
-        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "pw")
+        let data = try source.exportService.exportFullBackupSynchronously(backup: backup, password: "backup-password")
 
         let target = makeContainer("RollbackTarget")
         let viewModel = VaultViewModel(container: target)
         #expect(viewModel.rollbackCopyDate == nil)
 
         viewModel.stageImport(data: data, fileName: "backup.pstore")
-        #expect(await viewModel.prepareImport(password: "pw"))
+        #expect(await viewModel.prepareImport(password: "backup-password"))
         _ = viewModel.applyStagedImport(mode: .replace)
 
         #expect(viewModel.rollbackCopyDate != nil)
@@ -550,7 +550,7 @@ struct PolishAndRecoveryTests {
 
     /// Importing from a file used to throw the source URL away, so the item you had just
     /// built from a file had to be linked to that same file by hand afterwards.
-    @Test func importingFromAFileLinksTheItemToItImmediately() throws {
+    @Test func importingFromAFileLinksTheItemToItImmediately() async throws {
         let container = makeContainer("EnvAutoLink")
         let viewModel = VaultViewModel(container: container)
 
@@ -562,14 +562,19 @@ struct PolishAndRecoveryTests {
         draft.title = picked.suggestedTitle
         let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
 
+        for _ in 0..<200 where item.linkedFile == nil {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
         let link = try #require(item.linkedFile)
         #expect(link.displayPath == url.path)
         #expect(link.syncedDigest != nil)
         #expect(link.syncedVaultDigest != nil)
-        #expect(viewModel.linkedFileStatus(for: item) == .upToDate)
+        let status = await viewModel.linkedFileStatus(for: item)
+        #expect(status == .upToDate)
     }
 
-    @Test func editingTheFileOnDiskIsReportedAndCanBePulledIn() throws {
+    @Test func editingTheFileOnDiskIsReportedAndCanBePulledIn() async throws {
         let container = makeContainer("EnvPull")
         let viewModel = VaultViewModel(container: container)
 
@@ -579,28 +584,33 @@ struct PolishAndRecoveryTests {
         let picked = try #require(viewModel.readEnvFile(at: url))
         var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
         draft.title = "Project env"
-        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
-        #expect(viewModel.linkedFileStatus(for: item) == .upToDate)
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: nil, parsedIntoFields: true))
+        await viewModel.linkFile(at: url, to: item, parsedIntoFields: true, acceptCurrentContentsAsSynced: true)
+        let initialStatus = await viewModel.linkedFileStatus(for: item)
+        #expect(initialStatus == .upToDate)
 
         // Someone edits the file in an editor.
         try "API_KEY=second\nNEW_ONE=added\n".write(to: url, atomically: true, encoding: .utf8)
-        #expect(viewModel.linkedFileStatus(for: item) == .fileChanged)
+        let changedStatus = await viewModel.linkedFileStatus(for: item)
+        #expect(changedStatus == .fileChanged)
 
-        viewModel.refreshLinkedFileStatuses()
+        await viewModel.refreshLinkedFileStatuses()
         #expect(viewModel.itemsWithOutdatedLinks.contains(item.id))
 
-        #expect(viewModel.updateItemFromLinkedFile(item))
+        let didPull = await viewModel.updateItemFromLinkedFile(item)
+        #expect(didPull)
 
         let updated = try #require(viewModel.items.first { $0.id == item.id })
         let values = Dictionary(updated.fields.map { ($0.fieldKey, $0.plainValue) }, uniquingKeysWith: { first, _ in first })
         #expect(values["API_KEY"] == "second")
         #expect(values["NEW_ONE"] == "added")
-        #expect(viewModel.linkedFileStatus(for: updated) == .upToDate)
+        let finalStatus = await viewModel.linkedFileStatus(for: updated)
+        #expect(finalStatus == .upToDate)
         // The value it replaced is still recoverable.
         #expect(updated.fields.contains { $0.previousValues.contains { $0.value == "first" } })
     }
 
-    @Test func writingBackReplacesTheFileContents() throws {
+    @Test func writingBackReplacesTheFileContents() async throws {
         let container = makeContainer("EnvPush")
         let viewModel = VaultViewModel(container: container)
 
@@ -610,7 +620,8 @@ struct PolishAndRecoveryTests {
         let picked = try #require(viewModel.readEnvFile(at: url))
         var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
         draft.title = "Writable env"
-        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: nil, parsedIntoFields: true))
+        await viewModel.linkFile(at: url, to: item, parsedIntoFields: true, acceptCurrentContentsAsSynced: true)
 
         // Change the stored value, then push it out.
         var edit = viewModel.draft(forItemID: item.id)
@@ -621,15 +632,19 @@ struct PolishAndRecoveryTests {
         viewModel.saveItem(edit)
 
         let saved = try #require(viewModel.items.first { $0.id == item.id })
-        #expect(viewModel.linkedFileStatus(for: saved) == .vaultChanged)
-        #expect(viewModel.writeLinkedFile(from: saved))
+        let changedStatus = await viewModel.linkedFileStatus(for: saved)
+        #expect(changedStatus == .vaultChanged)
+        let didWrite = await viewModel.writeLinkedFile(from: saved)
+        #expect(didWrite)
 
         let onDisk = try String(contentsOf: url, encoding: .utf8)
-        #expect(onDisk.contains("TOKEN=new"))
-        #expect(viewModel.linkedFileStatus(for: saved) == .upToDate)
+        #expect(onDisk.contains("TOKEN=\"new\""))
+        #expect(EnvImportService().parse(onDisk).entries.first(where: { $0.key == "TOKEN" })?.value == "new")
+        let finalStatus = await viewModel.linkedFileStatus(for: saved)
+        #expect(finalStatus == .upToDate)
     }
 
-    @Test func aMissingLinkedFileIsReportedRatherThanFailingSilently() throws {
+    @Test func aMissingLinkedFileIsReportedRatherThanFailingSilently() async throws {
         let container = makeContainer("EnvMissing")
         let viewModel = VaultViewModel(container: container)
 
@@ -637,10 +652,12 @@ struct PolishAndRecoveryTests {
         let picked = try #require(viewModel.readEnvFile(at: url))
         var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
         draft.title = "Vanishing env"
-        let item = try #require(viewModel.saveNewItem(draft, linkingTo: url, parsedIntoFields: true))
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: nil, parsedIntoFields: true))
+        await viewModel.linkFile(at: url, to: item, parsedIntoFields: true, acceptCurrentContentsAsSynced: true)
 
         try FileManager.default.removeItem(at: url)
-        #expect(viewModel.linkedFileStatus(for: item) == .unavailable)
+        let status = await viewModel.linkedFileStatus(for: item)
+        #expect(status == .unavailable)
     }
 
     private func writeTemporaryEnvFile(_ contents: String) throws -> URL {
@@ -788,7 +805,9 @@ struct EnvRoundTripTests {
         let fields = [
             FieldResolvedValue(id: UUID(), key: "Api_Key", label: "API key", value: "abc 123", kind: .secret, isSensitive: true, isCopyable: true, isMasked: true, sortOrder: 0),
             FieldResolvedValue(id: UUID(), key: "NOTE", label: "Note", value: "has # hash", kind: .text, isSensitive: false, isCopyable: true, isMasked: false, sortOrder: 1),
-            FieldResolvedValue(id: UUID(), key: "MULTI", label: "Multi", value: "a\nb", kind: .multiline, isSensitive: false, isCopyable: true, isMasked: false, sortOrder: 2)
+            FieldResolvedValue(id: UUID(), key: "MULTI", label: "Multi", value: "a\nb", kind: .multiline, isSensitive: false, isCopyable: true, isMasked: false, sortOrder: 2),
+            FieldResolvedValue(id: UUID(), key: "SHELL", label: "Shell", value: "$(whoami) `hostname` $HOME", kind: .text, isSensitive: false, isCopyable: true, isMasked: false, sortOrder: 3),
+            FieldResolvedValue(id: UUID(), key: "BAD\nINJECTED", label: "Invalid key", value: "safe", kind: .text, isSensitive: false, isCopyable: true, isMasked: false, sortOrder: 4)
         ]
 
         let text = CopyFormatter.envFileContents(fields: fields)
@@ -799,6 +818,15 @@ struct EnvRoundTripTests {
         #expect(byKey["Api_Key"] == "abc 123")
         #expect(byKey["NOTE"] == "has # hash")
         #expect(byKey["MULTI"] == "a\nb")
+        #expect(byKey["SHELL"] == "$(whoami) `hostname` $HOME")
+        #expect(byKey["BAD_INJECTED"] == "safe")
+        #expect(text.contains("SHELL=\"\\$(whoami) \\`hostname\\` \\$HOME\""))
+        #expect(!text.contains("\nINJECTED="))
+
+        let item = SecretItemEntity(title: "Project\nEVIL=$(whoami)", type: .envGroup)
+        let withTitle = CopyFormatter.envString(for: item, fields: fields)
+        #expect(withTitle.hasPrefix("# Project\n# EVIL=$(whoami)\n"))
+        #expect(!withTitle.contains("\nEVIL=$(whoami)\n"))
     }
 }
 

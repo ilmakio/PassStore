@@ -211,6 +211,8 @@ enum LinkedFileStatus: Equatable {
     case unlinked
     /// The file is reachable and matches what the vault holds.
     case upToDate
+    /// The file and vault differed when the link was created; the owner must pick a side.
+    case needsInitialSync
     /// The file on disk has changed since the last sync.
     case fileChanged
     /// The vault has changed since the last sync, so writing back would push local edits out.
@@ -223,7 +225,7 @@ enum LinkedFileStatus: Equatable {
     var isActionable: Bool {
         switch self {
         case .unlinked, .upToDate, .unavailable: false
-        case .fileChanged, .vaultChanged, .diverged: true
+        case .needsInitialSync, .fileChanged, .vaultChanged, .diverged: true
         }
     }
 }

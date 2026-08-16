@@ -1,14 +1,19 @@
 import CryptoKit
+import Darwin
 import Foundation
 
-enum TransferError: LocalizedError {
+enum TransferError: LocalizedError, Equatable {
     case invalidDatabaseItem
     case missingPassword
+    case exportPasswordTooShort(Int)
     case exportPasswordMismatch
     case importFileMissing
     case invalidExportFile
     case wrongExportPassword
     case unsupportedExportVersion
+    case exportFileTooLarge
+    case importFileTooLarge
+    case importFileUnreadable
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +21,8 @@ enum TransferError: LocalizedError {
             "The selected item does not contain enough fields to build a connection string."
         case .missingPassword:
             "Provide an export password."
+        case let .exportPasswordTooShort(minimum):
+            "Backup password must be at least \(minimum) characters."
         case .exportPasswordMismatch:
             "The export passwords do not match."
         case .importFileMissing:
@@ -26,13 +33,25 @@ enum TransferError: LocalizedError {
             "The export password is incorrect or the file is corrupted."
         case .unsupportedExportVersion:
             "This export was created with a newer PassStore version."
+        case .exportFileTooLarge:
+            "This vault is too large to export as a backup that PassStore can safely import."
+        case .importFileTooLarge:
+            "This backup is too large to import safely."
+        case .importFileUnreadable:
+            "The selected backup could not be read."
         }
     }
 }
 
 struct CopyFormatter {
     static func envString(for item: SecretItemEntity, fields: [FieldResolvedValue]) -> String {
-        "# \(item.title)\n" + envFileContents(fields: fields)
+        // Titles are encrypted user/imported data too. Prefix every physical line so a title
+        // containing a newline cannot escape the comment and inject a sourced assignment.
+        let titleComment = item.title
+            .components(separatedBy: .newlines)
+            .map { "# \($0)" }
+            .joined(separator: "\n")
+        return titleComment + "\n" + envFileContents(fields: fields)
     }
 
     /// Serialises fields as `.env` text.
@@ -42,30 +61,51 @@ struct CopyFormatter {
     /// were never quoted, so anything containing a space, a newline, a quote or a `#` came
     /// back out as an invalid or truncated line.
     static func envFileContents(fields: [FieldResolvedValue]) -> String {
-        fields
-            .sorted { $0.sortOrder < $1.sortOrder }
-            .map { "\($0.key)=\(envQuoted($0.value))" }
-            .joined(separator: "\n")
+        let ordered = fields.sorted {
+                if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+        var usedKeys: Set<String> = []
+        return ordered.map { field in
+            let base = safeEnvKey(field.key)
+            var key = base
+            var suffix = 2
+            while !usedKeys.insert(key).inserted {
+                key = "\(base)_\(suffix)"
+                suffix += 1
+            }
+            return "\(key)=\(envQuoted(field.value))"
+        }.joined(separator: "\n")
     }
 
-    /// Quotes only when the bare form would not survive a re-read.
+    /// Always quoting makes the output safe both for dotenv readers and for developers who
+    /// load the file with `source`. Dollar signs and backticks must be escaped as well as
+    /// ordinary string escapes; otherwise a value restored from a backup could trigger shell
+    /// expansion or command substitution when the linked file is sourced.
     static func envQuoted(_ value: String) -> String {
-        let needsQuoting = value.isEmpty
-            || value.contains(where: { $0 == " " || $0 == "\t" || $0.isNewline })
-            || value.contains("#")
-            || value.contains("\"")
-            || value.contains("'")
-            || value.contains("\\")
-            || value.hasPrefix(" ")
-            || value.hasSuffix(" ")
-        guard needsQuoting else { return value }
         let escaped = value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\t", with: "\\t")
         return "\"\(escaped)\""
+    }
+
+    /// Field keys are user-editable and can arrive from an imported backup. Keep normal
+    /// dotenv identifiers unchanged, but replace line breaks, `=` and other syntax so a field
+    /// key can never inject an additional assignment or shell statement into a linked file.
+    private static func safeEnvKey(_ raw: String) -> String {
+        let scalars = raw.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "." {
+                return Character(String(scalar))
+            }
+            return "_"
+        }
+        let key = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return key.isEmpty ? "FIELD" : key
     }
 
     static func jsonString(for item: SecretItemEntity, fields: [FieldResolvedValue]) throws -> String {
@@ -204,7 +244,7 @@ struct CopyFormatter {
     }
 }
 
-struct EnvImportService: Sendable {
+nonisolated struct EnvImportService: Sendable {
     /// Parses `.env` text.
     ///
     /// The original parser split on `=` and trimmed, which meant `KEY="hello world"` was
@@ -270,38 +310,64 @@ struct EnvImportService: Sendable {
     static func unquote(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard let quote = trimmed.first, quote == "\"" || quote == "'" else {
-            // `FOO=bar # note` — the comment is not part of the value.
-            guard let hashIndex = trimmed.firstIndex(of: "#") else { return trimmed }
-            return String(trimmed[trimmed.startIndex..<hashIndex]).trimmingCharacters(in: .whitespaces)
+            // `FOO=bar # note` has a comment, while `COLOR=#fff` and URL fragments do not.
+            var previousWasWhitespace = false
+            for index in trimmed.indices {
+                let character = trimmed[index]
+                if character == "#", previousWasWhitespace {
+                    return String(trimmed[..<index]).trimmingCharacters(in: .whitespaces)
+                }
+                previousWasWhitespace = character.isWhitespace
+            }
+            return trimmed
         }
 
         var body = String(trimmed.dropFirst())
-        if let closing = body.lastIndex(of: quote) {
-            body = String(body[body.startIndex..<closing])
+        var isEscaped = false
+        var closing: String.Index?
+        for index in body.indices {
+            let character = body[index]
+            if isEscaped {
+                isEscaped = false
+                continue
+            }
+            if quote == "\"", character == "\\" {
+                isEscaped = true
+                continue
+            }
+            if character == quote {
+                closing = index
+                break
+            }
+        }
+        if let closing {
+            body = String(body[..<closing])
         }
         // Single quotes are literal in shell semantics; only double quotes take escapes.
         guard quote == "\"" else { return body }
         var result = ""
-        var isEscaped = false
+        var isEscapePending = false
         for character in body {
-            if isEscaped {
+            if isEscapePending {
                 switch character {
                 case "n": result.append("\n")
                 case "r": result.append("\r")
                 case "t": result.append("\t")
                 case "\\": result.append("\\")
                 case "\"": result.append("\"")
+                case "$": result.append("$")
+                case "`": result.append("`")
                 default:
                     result.append("\\")
                     result.append(character)
                 }
-                isEscaped = false
+                isEscapePending = false
                 continue
             }
-            if character == "\\" { isEscaped = true; continue }
+            if character == "\\" { isEscapePending = true; continue }
             result.append(character)
         }
-        if isEscaped { result.append("\\") }
+        if isEscapePending { result.append("\\") }
         return result
     }
 
@@ -319,42 +385,110 @@ struct EnvImportService: Sendable {
     }
 }
 
-enum ImportedPayload {
+nonisolated enum ImportedPayload: Sendable {
     case legacyItems([ExportedItemPayload])
     case fullBackup(ExportedBackupPayload)
 }
 
-struct ExportService: Sendable {
+nonisolated struct ExportKeyMaterial: Sendable {
+    fileprivate var vaultKey: Data
+    fileprivate let wrappedKey: WrappedVaultKey
+
+    mutating func securelyClear() {
+        Self.overwrite(&vaultKey)
+    }
+
+    fileprivate static func overwrite(_ data: inout Data) {
+        data.withUnsafeMutableBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            memset(base, 0, buffer.count)
+        }
+        data.removeAll(keepingCapacity: false)
+    }
+}
+
+nonisolated struct ExportService: Sendable {
+    static let maximumImportFileSize = 128 * 1_024 * 1_024
+
     private let cryptoService: VaultCryptoService
 
     init(cryptoService: VaultCryptoService) {
         self.cryptoService = cryptoService
     }
 
-    /// Exports a full vault backup (v3) including all vault data and app settings.
-    ///
-    /// Runs the Argon2id wrap off the main actor: it is the same ~1s cost as an unlock, and
-    /// on the main actor it froze the export sheet with no spinner.
-    func exportFullBackup(backup: ExportedBackupPayload, password: String) async throws -> Data {
+    static func readImportFile(at url: URL) throws -> Data {
+        let gotAccess = url.startAccessingSecurityScopedResource()
+        defer { if gotAccess { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: maximumImportFileSize + 1) ?? Data()
+            guard data.count <= maximumImportFileSize else {
+                throw TransferError.importFileTooLarge
+            }
+            return data
+        } catch let error as TransferError {
+            throw error
+        } catch {
+            throw TransferError.importFileUnreadable
+        }
+    }
+
+    /// Performs only the expensive password wrapping off-main. The caller intentionally does
+    /// not capture a plaintext vault snapshot until this finishes, so locking during Argon2id
+    /// cannot leave the whole vault retained by a background task.
+    func prepareFullBackup(password: String) async throws -> ExportKeyMaterial {
         try await Task.detached(priority: .userInitiated) { [self] in
-            try exportFullBackupSynchronously(backup: backup, password: password)
+            try makeKeyMaterialSynchronously(password: password)
         }.value
     }
 
     func exportFullBackupSynchronously(backup: ExportedBackupPayload, password: String) throws -> Data {
+        var material = try makeKeyMaterialSynchronously(password: password)
+        defer { material.securelyClear() }
+        return try finishFullBackupSynchronously(backup: backup, material: material)
+    }
+
+    /// Returns the sole live owner of the generated export key. Keeping construction in a
+    /// helper avoids retaining a second copy while the outer synchronous path clears it.
+    private func makeKeyMaterialSynchronously(password: String) throws -> ExportKeyMaterial {
+        guard password.count >= VaultSessionManager.minimumPasswordLength else {
+            throw TransferError.exportPasswordTooShort(VaultSessionManager.minimumPasswordLength)
+        }
+        var vaultKey = cryptoService.generateVaultKey()
+        do {
+            let wrappedKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
+            return ExportKeyMaterial(vaultKey: vaultKey, wrappedKey: wrappedKey)
+        } catch {
+            ExportKeyMaterial.overwrite(&vaultKey)
+            throw error
+        }
+    }
+
+    /// Encodes and encrypts after the KDF has completed. This portion is intentionally
+    /// synchronous and contains no suspension point at which a lock could interleave.
+    func finishFullBackupSynchronously(backup: ExportedBackupPayload, material: ExportKeyMaterial) throws -> Data {
+        do {
+            try backup.vault.validateResourceLimits()
+        } catch VaultCryptoError.vaultContentsTooLarge {
+            throw TransferError.exportFileTooLarge
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let payload = try encoder.encode(backup)
-        let vaultKey = cryptoService.generateVaultKey()
-        let wrappedKey = try cryptoService.wrapVaultKey(vaultKey, password: password)
-        let envelope = try encryptPayload(payload, using: vaultKey)
+        var payload = try encoder.encode(backup)
+        defer { ExportKeyMaterial.overwrite(&payload) }
+        let envelope = try encryptPayload(payload, using: material.vaultKey)
         let exportEnvelope = EncryptedExportEnvelope(
             version: 3,
-            kdf: wrappedKey,
+            kdf: material.wrappedKey,
             payload: envelope,
             createdAt: .now
         )
-        return try encoder.encode(exportEnvelope)
+        let result = try encoder.encode(exportEnvelope)
+        guard result.count <= Self.maximumImportFileSize else {
+            throw TransferError.exportFileTooLarge
+        }
+        return result
     }
 
     func importPayload(from fileData: Data, password: String) async throws -> ImportedPayload {
@@ -365,6 +499,9 @@ struct ExportService: Sendable {
 
     /// Decrypts a `.pstore` file and returns either a full backup (v3) or legacy items (v1/v2).
     func importPayloadSynchronously(from fileData: Data, password: String) throws -> ImportedPayload {
+        guard fileData.count <= Self.maximumImportFileSize else {
+            throw TransferError.importFileTooLarge
+        }
         let decoder = JSONDecoder()
         let envelope: EncryptedExportEnvelope
         do {
@@ -372,30 +509,39 @@ struct ExportService: Sendable {
         } catch {
             throw TransferError.invalidExportFile
         }
-        guard envelope.version <= 3 else { throw TransferError.unsupportedExportVersion }
-        let vaultKey: Data
+        guard (1...3).contains(envelope.version) else { throw TransferError.unsupportedExportVersion }
+        guard envelope.payload.version == 1 else { throw TransferError.unsupportedExportVersion }
+        var vaultKey: Data
         do {
             vaultKey = try cryptoService.unwrapVaultKey(envelope.kdf, password: password)
         } catch {
             throw TransferError.wrongExportPassword
         }
-        let plaintext: Data
+        defer { ExportKeyMaterial.overwrite(&vaultKey) }
+        var plaintext: Data
         do {
             plaintext = try cryptoService.decryptEnvelopePayload(envelope.payload, using: vaultKey)
         } catch {
             throw TransferError.wrongExportPassword
         }
+        defer { ExportKeyMaterial.overwrite(&plaintext) }
         if envelope.version >= 3 {
             do {
                 let backup = try decoder.decode(ExportedBackupPayload.self, from: plaintext)
+                try backup.vault.validateResourceLimits()
                 return .fullBackup(backup)
+            } catch VaultCryptoError.vaultContentsTooLarge {
+                throw TransferError.importFileTooLarge
             } catch {
                 throw TransferError.invalidExportFile
             }
         } else {
             do {
                 let items = try decoder.decode([ExportedItemPayload].self, from: plaintext)
+                try Self.validateLegacyItems(items)
                 return .legacyItems(items)
+            } catch VaultCryptoError.vaultContentsTooLarge {
+                throw TransferError.importFileTooLarge
             } catch {
                 throw TransferError.invalidExportFile
             }
@@ -403,6 +549,7 @@ struct ExportService: Sendable {
     }
 
     private func encryptPayload(_ payload: Data, using vaultKey: Data) throws -> VaultEnvelope {
+        guard vaultKey.count == 32 else { throw VaultCryptoError.invalidEnvelope }
         let key = SymmetricKey(data: vaultKey)
         let sealed = try AES.GCM.seal(payload, using: key)
         return VaultEnvelope(
@@ -412,5 +559,17 @@ struct ExportService: Sendable {
             tag: sealed.tag.base64EncodedString(),
             createdAt: .now
         )
+    }
+
+    private static func validateLegacyItems(_ items: [ExportedItemPayload]) throws {
+        guard items.count <= 100_000 else { throw VaultCryptoError.vaultContentsTooLarge }
+        var totalFields = 0
+        for item in items {
+            guard item.fields.count <= 2_000,
+                  item.fields.count <= 1_000_000 - totalFields else {
+                throw VaultCryptoError.vaultContentsTooLarge
+            }
+            totalFields += item.fields.count
+        }
     }
 }
