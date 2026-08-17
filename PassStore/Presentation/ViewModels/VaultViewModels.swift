@@ -779,6 +779,9 @@ final class VaultViewModel {
                     var link = prepared.fileLink
                     link.syncedDigest = LinkedFileService.digest(prepared.contents)
                     link.syncedVaultDigest = LinkedFileService.digest(envContents(for: item))
+                    // Without the per-variable baseline every later difference in these items
+                    // would read as "both sides changed" instead of naming the side that moved.
+                    link.syncedFieldDigests = EnvImportService.fieldDigests(of: resolvedFields(for: item))
                     link.syncedAt = .now
                     link.requiresInitialSync = false
                     var linkDraft = makeDraft(from: item)
@@ -1796,14 +1799,18 @@ final class VaultViewModel {
         }
     }
 
+    /// Several items as one `.env` document: the same text a single-item copy produces for each,
+    /// with the item's name over it so files pasted together can still be told apart.
+    func bulkEnvDocument(for items: [SecretItemEntity]) -> String {
+        items
+            .map { CopyFormatter.envTitleComment($0.title) + "\n" + envDocumentContents(for: $0) }
+            .joined(separator: "\n\n")
+    }
+
     func bulkCopyEnv() {
         let selected = multiSelectedItems
         guard !selected.isEmpty else { return }
-        let parts = selected.map { item in
-            let fields = Self.visibleFields(in: resolvedFields(for: item))
-            return CopyFormatter.envString(for: item, fields: fields)
-        }
-        let combined = parts.joined(separator: "\n\n")
+        let combined = bulkEnvDocument(for: selected)
         let hasSensitive = selected.contains { item in
             Self.visibleFields(in: resolvedFields(for: item)).contains(where: \.isSensitive)
         }

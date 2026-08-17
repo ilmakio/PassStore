@@ -327,3 +327,34 @@ struct EnvLayoutIntegrationTests {
         #expect(duplicate.envLayout == item.envLayout)
     }
 }
+
+@MainActor
+struct EnvBulkCopyTests {
+    /// Copying several `.env` items at once has to give back the same documents copying them one
+    /// at a time does — with each item's name over its own, so they can be told apart.
+    @Test func copyingSeveralItemsKeepsEachFileAsItWasWritten() throws {
+        let container = AppContainer(
+            inMemory: true,
+            defaults: UserDefaults(suiteName: "EnvBulkCopy-\(UUID().uuidString)")!,
+            keyStore: InMemoryVaultKeyStore(isBiometricHardwareAvailable: false),
+            encryptedVaultStore: InMemoryEncryptedVaultStore()
+        )
+        container.sessionManager.createVaultSynchronously(password: "test-password")
+        let viewModel = VaultViewModel(container: container)
+
+        let first = "# first file\nTOKEN=one\n"
+        let second = "# second file\n\n# what this is for\nOTHER=two\n"
+        var items: [SecretItemEntity] = []
+        for (title, contents) in [("First env", first), ("Second env", second)] {
+            var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(contents), parseIntoEntries: true))
+            draft.title = title
+            items.append(try #require(viewModel.saveNewItem(draft, linkingTo: nil, parsedIntoFields: true)))
+        }
+
+        let combined = viewModel.bulkEnvDocument(for: items)
+
+        #expect(combined == "# First env\n\(first)\n\n# Second env\n\(second)")
+        // The comments survive, which is the whole point of the faithful copy.
+        #expect(combined.contains("# what this is for"))
+    }
+}

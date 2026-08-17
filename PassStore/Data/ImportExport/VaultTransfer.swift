@@ -45,13 +45,18 @@ enum TransferError: LocalizedError, Equatable {
 
 struct CopyFormatter {
     static func envString(for item: SecretItemEntity, fields: [FieldResolvedValue]) -> String {
-        // Titles are encrypted user/imported data too. Prefix every physical line so a title
-        // containing a newline cannot escape the comment and inject a sourced assignment.
-        let titleComment = item.title
+        envTitleComment(item.title) + "\n" + envFileContents(fields: fields)
+    }
+
+    /// An item's title as a comment safe to put at the head of a `.env`.
+    ///
+    /// Titles are encrypted user/imported data too. Every physical line is prefixed, so a title
+    /// containing a newline cannot escape the comment and inject a sourced assignment.
+    static func envTitleComment(_ title: String) -> String {
+        title
             .components(separatedBy: .newlines)
             .map { "# \($0)" }
             .joined(separator: "\n")
-        return titleComment + "\n" + envFileContents(fields: fields)
     }
 
     /// Serialises fields as `.env` text.
