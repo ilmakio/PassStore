@@ -249,6 +249,38 @@ enum LinkedFileStatus: Equatable {
     }
 }
 
+/// What happened to one variable since an item and its `.env` were last in sync.
+///
+/// `LinkedFileStatus` answers "has something changed?" for the whole file, which leaves the owner
+/// with one decision covering everything in it. This answers "what changed" per variable, so a
+/// value can be pulled or pushed on its own without touching anything else.
+///
+/// Deliberately carries no values: the state is cached per item while the vault is unlocked, and
+/// a cache of every linked file's secrets is not something to keep around. The value is read from
+/// the file at the moment it is applied.
+nonisolated enum EnvFieldDrift: String, Equatable, Sendable {
+    /// The file holds a different value; the item's has not moved since the last sync.
+    case fileChanged
+    /// The item's value has moved; the file's has not.
+    case vaultChanged
+    /// Both moved, or the link predates per-variable tracking and which side moved is unknown.
+    case diverged
+    /// The item has this variable and the file does not.
+    case onlyInVault
+    /// The file has this variable and the item does not.
+    case onlyInFile
+
+    /// Whether the file has a value that could be pulled in.
+    var canPull: Bool {
+        self != .onlyInVault
+    }
+
+    /// Whether the item has a value that could be written out.
+    var canPush: Bool {
+        self != .onlyInFile
+    }
+}
+
 enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
     case allItems
     case favorites

@@ -72,6 +72,20 @@ final class VaultViewModel {
         Self.visibleFields(in: selectedFields)
     }
 
+    /// What the detail pane lists: every field with a value, plus any field that differs from the
+    /// linked file.
+    ///
+    /// A variable whose value has been emptied is normally hidden, but if the file still sets it
+    /// then hiding it is what makes the difference unresolvable — there is nothing to click.
+    var detailSelectedFields: [FieldResolvedValue] {
+        guard let selectedItemID, let drift = envFieldDrift[selectedItemID], !drift.isEmpty else {
+            return visibleSelectedFields
+        }
+        return selectedFields.filter {
+            !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || drift[$0.key] != nil
+        }
+    }
+
     var selectedNotes: String? {
         guard let notes = selectedItem?.notes.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty else {
             return nil
@@ -379,6 +393,7 @@ final class VaultViewModel {
         commandPaletteQuery = ""
         itemsWithOutdatedLinks = []
         linkedFileStatuses = [:]
+        envFieldDrift = [:]
         linkedStatusRefreshGeneration &+= 1
         statusMessageDismissal?.cancel()
         statusMessageDismissal = nil
@@ -1061,6 +1076,27 @@ final class VaultViewModel {
     private(set) var linkedFileStatuses: [UUID: LinkedFileStatus] = [:]
     @ObservationIgnored private var linkedStatusRefreshGeneration: UInt64 = 0
 
+    /// Which variables differ from the file, per item, so the detail pane can mark the one entry
+    /// that moved instead of only saying that the file as a whole did.
+    ///
+    /// States only — never the file's values. See `EnvFieldDrift`.
+    private(set) var envFieldDrift: [UUID: [String: EnvFieldDrift]] = [:]
+
+    /// The variables in the file that this item does not hold, in the file's own order.
+    func envFieldsOnlyInFile(for item: SecretItemEntity) -> [String] {
+        let drift = envFieldDrift[item.id] ?? [:]
+        guard let keys = item.envLayout?.keys else {
+            return drift.filter { $0.value == .onlyInFile }.keys.sorted()
+        }
+        let onlyInFile = Set(drift.filter { $0.value == .onlyInFile }.keys)
+        let ordered = keys.filter { onlyInFile.contains($0) }
+        return ordered + onlyInFile.subtracting(ordered).sorted()
+    }
+
+    func envFieldDrift(for item: SecretItemEntity, key: String) -> EnvFieldDrift? {
+        envFieldDrift[item.id]?[key]
+    }
+
     /// Both sides are digested at the last successful sync, so a change can be attributed to
     /// the file, to the vault, or to both. A stale bookmark is renewed and persisted here.
     func linkedFileStatus(for item: SecretItemEntity) async -> LinkedFileStatus {
@@ -1094,6 +1130,16 @@ final class VaultViewModel {
                 }
             }
 
+            if currentLink.parsedIntoFields {
+                envFieldDrift[itemID] = EnvImportService.drift(
+                    between: result.contents,
+                    and: resolvedFields(for: current),
+                    baseline: currentLink.requiresInitialSync ? nil : currentLink.syncedFieldDigests
+                )
+            } else {
+                envFieldDrift[itemID] = [:]
+            }
+
             let status: LinkedFileStatus
             if currentLink.requiresInitialSync {
                 status = .needsInitialSync
@@ -1114,6 +1160,7 @@ final class VaultViewModel {
         } catch {
             guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return .unavailable }
             linkedFileStatuses[itemID] = .unavailable
+            envFieldDrift[itemID] = nil
             return .unavailable
         }
     }
@@ -1201,6 +1248,7 @@ final class VaultViewModel {
                 let saved = try container.itemRepository.saveItem(draft)
                 // Digest the result rather than the draft: normalisation can change it.
                 updatedLink.syncedVaultDigest = LinkedFileService.digest(envContents(for: saved))
+                updatedLink.syncedFieldDigests = EnvImportService.fieldDigests(of: resolvedFields(for: saved))
                 saved.linkedFile = updatedLink
                 try container.memoryStore.persist()
                 return saved.id
@@ -1210,6 +1258,7 @@ final class VaultViewModel {
             selectedItemID = savedID
             selectionAnchorID = savedID
             linkedFileStatuses[savedID] = .upToDate
+            envFieldDrift[savedID] = [:]
             let savedTitle = items.first(where: { $0.id == savedID })?.title ?? current.title
             lastActionMessage = "Updated “\(savedTitle)” from \(link.fileName)."
             return true
@@ -1278,6 +1327,7 @@ final class VaultViewModel {
         }
 
         let vaultDigest = LinkedFileService.digest(vaultContents)
+        let fieldDigests = EnvImportService.fieldDigests(of: resolvedFields(for: item))
 
         // Nothing to change: writing anyway would move the file's modification date — and
         // rewrite its inode — for a byte-identical result.
@@ -1288,6 +1338,7 @@ final class VaultViewModel {
                     expecting: link,
                     fileDigest: existingDigest,
                     vaultDigest: vaultDigest,
+                    fieldDigests: fieldDigests,
                     refreshedBookmark: nil,
                     resolvedPath: link.displayPath,
                     message: "\(link.fileName) is already up to date.",
@@ -1326,6 +1377,7 @@ final class VaultViewModel {
                 // The exact vault state written, not necessarily the current one: an edit can
                 // complete while the file operation is suspended off-main.
                 vaultDigest: vaultDigest,
+                fieldDigests: fieldDigests,
                 refreshedBookmark: writeResult.refreshedBookmark,
                 resolvedPath: writeResult.resolvedPath,
                 message: "Wrote \(link.fileName).",
@@ -1343,6 +1395,167 @@ final class VaultViewModel {
         }
     }
 
+    // MARK: One variable at a time
+    //
+    // Pulling or pushing a whole file is the wrong size of decision when one variable moved. The
+    // detail pane marks the entry that differs, and these apply that single entry: the rest of the
+    // item, and every other line in the file, are left exactly as they are.
+
+    /// Takes the file's value for one variable.
+    @discardableResult
+    func updateFieldFromLinkedFile(key: String, in item: SecretItemEntity) async -> Bool {
+        guard let link = item.linkedFile, link.parsedIntoFields else {
+            alertMessage = LinkedFileError.noLink.localizedDescription
+            return false
+        }
+        let itemID = item.id
+        let sessionGeneration = container.sessionManager.captureSecurityGeneration()
+        let service = container.linkedFiles
+
+        let contents: String
+        do {
+            contents = try await Task.detached(priority: .userInitiated) {
+                try service.read(link).contents
+            }.value
+        } catch {
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return false }
+            handleMutationFailure(error)
+            return false
+        }
+        guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration),
+              let current = items.first(where: { $0.id == itemID }),
+              current.linkedFile == link else { return false }
+        guard let fileValue = EnvImportService.value(forKey: key, in: contents) else {
+            alertMessage = "\(link.fileName) no longer sets \(key)."
+            return false
+        }
+
+        var draft = makeDraft(from: current)
+        draft.id = current.id
+        if let index = draft.fieldDrafts.firstIndex(where: { $0.key == key }) {
+            guard draft.fieldDrafts[index].value != fileValue else {
+                // Already the same value: nothing to save, but the baseline may still be behind.
+                recordFieldSync(on: current, expecting: link, key: key, syncedValue: fileValue, fileContents: contents)
+                return true
+            }
+            draft.fieldDrafts[index].value = fileValue
+        } else {
+            // A variable the file has and the item does not. It arrives with the same treatment an
+            // import would give it, rather than as a plain text field.
+            let isSensitive = EnvImportService.looksSensitive(key: key)
+            draft.fieldDrafts.append(
+                FieldDraft(
+                    key: key,
+                    label: key,
+                    value: fileValue,
+                    kind: .text,
+                    isSensitive: isSensitive,
+                    isCopyable: true,
+                    isMasked: isSensitive,
+                    sortOrder: (draft.fieldDrafts.map(\.sortOrder).max() ?? -1) + 1
+                )
+            )
+        }
+
+        let previousUndo = undoStep
+        captureUndo("Update \(key) from file")
+        guard let saved = saveItemReturningResult(draft) else {
+            undoStep = previousUndo
+            return false
+        }
+
+        recordFieldSync(on: saved, expecting: link, key: key, syncedValue: fileValue, fileContents: contents)
+        lastActionMessage = "Updated \(key) from \(link.fileName)."
+        return true
+    }
+
+    /// Writes one variable out to the file, leaving every other line in it as it is.
+    @discardableResult
+    func writeFieldToLinkedFile(key: String, from item: SecretItemEntity) async -> Bool {
+        guard let link = item.linkedFile, link.parsedIntoFields else {
+            alertMessage = LinkedFileError.noLink.localizedDescription
+            return false
+        }
+        guard let field = resolvedFields(for: item).first(where: { $0.key == key }) else {
+            alertMessage = "This item no longer holds \(key)."
+            return false
+        }
+        let itemID = item.id
+        let sessionGeneration = container.sessionManager.captureSecurityGeneration()
+        let service = container.linkedFiles
+
+        do {
+            // Read, merge and write with the text just read as the precondition. Only this one
+            // assignment is touched, so a change made elsewhere in the file is kept — and a change
+            // arriving between the read and the write makes this fail rather than overwrite it.
+            let written = try await Task.detached(priority: .userInitiated) { () -> String in
+                let existing = try service.read(link).contents
+                let updated = CopyFormatter.envFileByUpdating(existing, with: [field])
+                guard updated != existing else { return existing }
+                _ = try service.write(
+                    updated,
+                    to: link,
+                    requiringCurrentDigest: LinkedFileService.digest(existing)
+                )
+                return updated
+            }.value
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration),
+                  let current = items.first(where: { $0.id == itemID }),
+                  current.linkedFile == link else { return false }
+
+            recordFieldSync(on: current, expecting: link, key: key, syncedValue: field.value, fileContents: written)
+            lastActionMessage = "Wrote \(key) to \(link.fileName)."
+            return true
+        } catch {
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return false }
+            handleMutationFailure(error)
+            return false
+        }
+    }
+
+    /// Updates the link after one variable was synced.
+    ///
+    /// Only that variable's baseline moves. The whole-file digests are accepted as seen solely when
+    /// nothing is left differing — otherwise recording the file as synced would quietly swallow the
+    /// changes the owner has not looked at yet.
+    private func recordFieldSync(
+        on item: SecretItemEntity,
+        expecting link: LinkedFileReference,
+        key: String,
+        syncedValue: String,
+        fileContents: String
+    ) {
+        guard var updatedLink = item.linkedFile, updatedLink == link else { return }
+        let fields = resolvedFields(for: item)
+        var baseline = updatedLink.syncedFieldDigests ?? [:]
+        // The value the two sides actually agreed on, not whatever the field holds by the time
+        // this runs: an edit can land while the file operation is suspended off-main, and it is
+        // the item that moved then, not the file.
+        baseline[key] = LinkedFileService.digest(syncedValue)
+        updatedLink.syncedFieldDigests = baseline
+
+        let drift = EnvImportService.drift(between: fileContents, and: fields, baseline: baseline)
+        if drift.isEmpty {
+            updatedLink.syncedDigest = LinkedFileService.digest(fileContents)
+            updatedLink.syncedVaultDigest = LinkedFileService.digest(envContents(for: item))
+            updatedLink.syncedAt = .now
+            updatedLink.requiresInitialSync = false
+        }
+
+        let previousLink = item.linkedFile
+        item.linkedFile = updatedLink
+        do {
+            try container.memoryStore.persist()
+        } catch {
+            item.linkedFile = previousLink
+            handleMutationFailure(error)
+            return
+        }
+        invalidateFilteredCache()
+        envFieldDrift[item.id] = drift
+        if drift.isEmpty { linkedFileStatuses[item.id] = .upToDate }
+    }
+
     /// Records a completed push on the item's link.
     ///
     /// Throws only when the vault cannot be persisted, in which case the link is rolled back to
@@ -1354,6 +1567,7 @@ final class VaultViewModel {
         expecting link: LinkedFileReference,
         fileDigest: String,
         vaultDigest: String,
+        fieldDigests: [String: String],
         refreshedBookmark: Data?,
         resolvedPath: String,
         message: String,
@@ -1372,6 +1586,7 @@ final class VaultViewModel {
         }
         updatedLink.syncedDigest = fileDigest
         updatedLink.syncedVaultDigest = vaultDigest
+        updatedLink.syncedFieldDigests = fieldDigests
         updatedLink.syncedAt = .now
         updatedLink.requiresInitialSync = false
         let previousLink = current.linkedFile
@@ -1386,7 +1601,9 @@ final class VaultViewModel {
         // Compare the vault against the vault. Measuring it against the file digest instead
         // marked every successful write as "this item has changed", because a merged file holds
         // comments and untracked variables the item does not render.
-        linkedFileStatuses[itemID] = currentVaultDigest == vaultDigest ? .upToDate : .vaultChanged
+        let isInSync = currentVaultDigest == vaultDigest
+        linkedFileStatuses[itemID] = isInSync ? .upToDate : .vaultChanged
+        if isInSync { envFieldDrift[itemID] = [:] }
         lastActionMessage = message
         return true
     }
@@ -1421,6 +1638,12 @@ final class VaultViewModel {
             link.syncedAt = .now
             link.requiresInitialSync = !acceptCurrentContentsAsSynced
                 && link.syncedDigest != link.syncedVaultDigest
+            // A baseline is only meaningful where the two sides agree. When they do not, saying
+            // "unknown" is what makes the per-variable state read as "pick a side" rather than as
+            // an invented direction.
+            link.syncedFieldDigests = link.requiresInitialSync
+                ? nil
+                : EnvImportService.fieldDigests(of: resolvedFields(for: current))
             var draft = makeDraft(from: current)
             draft.linkedFile = link
             // Linking is also how an item imported before layouts existed picks up the formatting
