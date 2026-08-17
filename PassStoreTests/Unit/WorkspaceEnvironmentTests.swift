@@ -92,15 +92,15 @@ struct WorkspaceEnvironmentTests {
         #expect(WorkspaceEnvironment.sanitizedFileName(".env.production") == ".env.production")
     }
 
-    @Test func colorIsOnlyKeptWhenItIsAHexTriplet() {
-        let sanitized = WorkspaceEnvironment.sanitizedList([
-            WorkspaceEnvironment(name: "Local", kind: .local, colorHex: "not-a-color", sortOrder: 0),
-            WorkspaceEnvironment(name: "QA", kind: .custom, colorHex: "#aabbcc", sortOrder: 1)
-        ])
+    /// Environments are told apart by glyph, not by colour: colour is what says which workspace a
+    /// row belongs to, and one signal cannot mean two things.
+    @Test func eachEnvironmentHasItsOwnGlyphAndNoColourOfItsOwn() {
+        let kinds = EnvironmentKind.allCases
+        let glyphs = kinds.map(\.systemImage)
 
-        #expect(sanitized[0].colorHex == nil)
-        #expect(sanitized[0].effectiveColorHex == EnvironmentKind.local.defaultColorHex)
-        #expect(sanitized[1].colorHex == "#AABBCC")
+        #expect(Set(glyphs).count == kinds.count)
+        #expect(WorkspaceEnvironment(name: "Prod", kind: .prod).systemImage == EnvironmentKind.prod.systemImage)
+        #expect(WorkspaceEnvironment(name: "QA", kind: .custom).systemImage == EnvironmentKind.custom.systemImage)
     }
 
     // MARK: - Resolution
@@ -177,7 +177,7 @@ struct WorkspaceEnvironmentTests {
                 notes: "",
                 environments: [
                     WorkspaceEnvironment(name: "Local", kind: .local, sortOrder: 0),
-                    WorkspaceEnvironment(name: "Prod", kind: .prod, colorHex: "#FF453A", isEnabled: false, sortOrder: 1)
+                    WorkspaceEnvironment(name: "Prod", kind: .prod, isEnabled: false, sortOrder: 1, envFileName: ".env.production")
                 ]
             )
         )
@@ -197,7 +197,7 @@ struct WorkspaceEnvironmentTests {
         )
         #expect(restored.environments.map(\.title) == ["Local", "Prod"])
         #expect(restored.environments[1].isEnabled == false)
-        #expect(restored.environments[1].colorHex == "#FF453A")
+        #expect(restored.environments[1].envFileName == ".env.production")
     }
 
     /// A backup is attacker-controlled data even once its password has been accepted.
@@ -209,7 +209,6 @@ struct WorkspaceEnvironmentTests {
                 // name once clamped, and would collapse before the count limit was reached.
                 name: "\($0)-" + String(repeating: "x", count: 500),
                 kind: .custom,
-                colorHex: "javascript:alert(1)",
                 sortOrder: $0
             )
         } + [WorkspaceEnvironment(name: "Prod", kind: .custom, sortOrder: 999, envFileName: "../../../etc/passwd")]
@@ -235,12 +234,10 @@ struct WorkspaceEnvironmentTests {
 
         let loaded = try #require(try container.workspaceRepository.fetchAll().first)
         let longestName = loaded.environments.map(\.name.count).max() ?? 0
-        let keptColors = loaded.environments.compactMap(\.colorHex)
         let fileNamesWithSeparators = loaded.environments.compactMap(\.envFileName).filter { $0.contains("/") }
 
         #expect(loaded.environments.count == WorkspaceEnvironment.maximumPerWorkspace)
         #expect(longestName <= WorkspaceEnvironment.maximumNameLength)
-        #expect(keptColors.isEmpty)
         #expect(fileNamesWithSeparators.isEmpty)
     }
 

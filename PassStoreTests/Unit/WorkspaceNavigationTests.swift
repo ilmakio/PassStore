@@ -231,6 +231,67 @@ struct WorkspaceNavigationTests {
         #expect(viewModel.filteredItems.map(\.title) == ["Prod Env File"])
     }
 
+    /// A row should not repeat the scope you are standing in: the workspace chip is noise on
+    /// every row of that workspace, and so is the environment chip inside that environment.
+    @Test func rowsNameOnlyWhatIsNotAlreadyImplied() throws {
+        let fixture = try makeFixture("RowScope")
+        let viewModel = fixture.viewModel
+
+        viewModel.selectDestination(.library(.allItems))
+        #expect(viewModel.itemRowScope == .workspace)
+
+        viewModel.selectDestination(.tag("anything"))
+        #expect(viewModel.itemRowScope == .workspace)
+
+        viewModel.selectDestination(.workspace(fixture.workspaceID))
+        #expect(viewModel.itemRowScope == .environment)
+
+        viewModel.selectDestination(.workspaceEnvironment(fixture.workspaceID, "Prod"))
+        #expect(viewModel.itemRowScope == .none)
+    }
+
+    /// Asking the sidebar about a workspace is a question about the workspace, so the detail pane
+    /// stops describing whichever secret happened to be selected.
+    @Test func enteringAProjectShowsTheProject() throws {
+        let fixture = try makeFixture("ClearsSelection")
+        let viewModel = fixture.viewModel
+
+        viewModel.selectDestination(.library(.allItems))
+        let item = try #require(viewModel.filteredItems.first)
+        viewModel.select(item)
+        #expect(viewModel.selectedItemID == item.id)
+
+        viewModel.selectDestination(.workspace(fixture.workspaceID))
+        #expect(viewModel.selectedItemID == nil)
+
+        // Selecting a row still works normally from there, and switching environment lets go
+        // again.
+        let inWorkspace = try #require(viewModel.filteredItems.first)
+        viewModel.select(inWorkspace)
+        #expect(viewModel.selectedItemID == inWorkspace.id)
+        viewModel.selectEnvironment(matchKey: "prod")
+        #expect(viewModel.selectedItemID == nil)
+
+        // Library destinations are unaffected: they have no scope to describe.
+        viewModel.selectDestination(.library(.allItems))
+        let again = try #require(viewModel.filteredItems.first)
+        viewModel.select(again)
+        viewModel.selectDestination(.library(.favorites))
+        #expect(viewModel.selectedItemID == nil || viewModel.selectedItemID == again.id)
+    }
+
+    /// Reaching an item from the palette must still land on the item, even though the hop goes
+    /// through its workspace.
+    @Test func thePaletteStillLandsOnTheItemItWasAskedFor() throws {
+        let fixture = try makeFixture("PaletteReveal")
+        let viewModel = fixture.viewModel
+        let item = try #require(viewModel.items.first(where: { $0.title == "Prod DB" }))
+
+        viewModel.revealAndSelectItemFromPalette(item)
+
+        #expect(viewModel.selectedItemID == item.id)
+    }
+
     // MARK: - Overview
 
     /// The overview describes one project, so its figures must not count the whole vault.

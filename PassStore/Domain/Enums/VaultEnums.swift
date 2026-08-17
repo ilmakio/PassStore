@@ -77,15 +77,19 @@ enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    /// Colour used when an environment carries none of its own, so production reads as
-    /// production without anyone having to configure it.
-    var defaultColorHex: String {
+    /// How an environment is told apart from its siblings.
+    ///
+    /// Deliberately a glyph rather than a colour: colour already means "which workspace this
+    /// belongs to" everywhere else in the app, and giving environments their own palette made
+    /// two different things compete for the same signal. Every environment of a project is
+    /// drawn in the project's colour, and these tell them apart.
+    var systemImage: String {
         switch self {
-        case .local: "#5AC8FA"
-        case .dev: "#4A7AFF"
-        case .staging: "#FF9F0A"
-        case .prod: "#FF453A"
-        case .custom: "#8E8E93"
+        case .local: "laptopcomputer"
+        case .dev: "hammer.fill"
+        case .staging: "testtube.2"
+        case .prod: "globe.americas.fill"
+        case .custom: "circle.hexagongrid"
         }
     }
 }

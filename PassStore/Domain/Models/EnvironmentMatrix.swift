@@ -10,7 +10,7 @@ nonisolated struct EnvironmentMatrix: Sendable {
     struct Column: Identifiable, Sendable {
         let matchKey: String
         let title: String
-        let colorHex: String
+        let systemImage: String
         let itemCount: Int
 
         var id: String { matchKey }
@@ -92,14 +92,14 @@ nonisolated struct EnvironmentMatrixInput: Sendable {
     struct Column: Sendable {
         let matchKey: String
         let title: String
-        let colorHex: String
+        let systemImage: String
         let itemCount: Int
         let entries: [Entry]
 
-        init(matchKey: String, title: String, colorHex: String, itemCount: Int, entries: [Entry]) {
+        init(matchKey: String, title: String, systemImage: String, itemCount: Int, entries: [Entry]) {
             self.matchKey = matchKey
             self.title = title
-            self.colorHex = colorHex
+            self.systemImage = systemImage
             self.itemCount = itemCount
             self.entries = entries
         }
@@ -120,7 +120,7 @@ extension EnvironmentMatrix {
     /// key with a typo, not two keys.
     init(_ input: EnvironmentMatrixInput) {
         let columns = input.columns.map {
-            Column(matchKey: $0.matchKey, title: $0.title, colorHex: $0.colorHex, itemCount: $0.itemCount)
+            Column(matchKey: $0.matchKey, title: $0.title, systemImage: $0.systemImage, itemCount: $0.itemCount)
         }
 
         // First appearance, in column order, decides both the display spelling and the row order:

@@ -21,9 +21,6 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
     /// matches the titles items carry.
     var name: String
     var kindRawValue: String
-    /// Nil means "use the colour the kind suggests", so a vault does not have to store a
-    /// palette to get a red production chip.
-    var colorHex: String?
     /// Whether this environment is offered in the sidebar, the chip bar and new-item defaults.
     ///
     /// It is deliberately **not** a filter on what exists. An environment that still holds
@@ -40,7 +37,6 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
         id: UUID = UUID(),
         name: String,
         kind: EnvironmentKind,
-        colorHex: String? = nil,
         isEnabled: Bool = true,
         sortOrder: Int = 0,
         envFileName: String? = nil
@@ -48,7 +44,6 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
         self.id = id
         self.name = name
         self.kindRawValue = kind.rawValue
-        self.colorHex = colorHex
         self.isEnabled = isEnabled
         self.sortOrder = sortOrder
         self.envFileName = envFileName
@@ -62,7 +57,6 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
         kindRawValue = try container.decodeIfPresent(String.self, forKey: .kindRawValue)
             ?? EnvironmentKind.custom.rawValue
-        colorHex = try container.decodeIfPresent(String.self, forKey: .colorHex)
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         envFileName = try container.decodeIfPresent(String.self, forKey: .envFileName)
@@ -92,7 +86,9 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
         title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    var effectiveColorHex: String { colorHex ?? kind.defaultColorHex }
+    /// The glyph that tells this environment apart from its siblings. Colour is not used for
+    /// that job: it belongs to the workspace.
+    var systemImage: String { kind.systemImage }
 
     // MARK: - Building
 
@@ -170,7 +166,6 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
                 sanitized = WorkspaceEnvironment(
                     name: sanitized.name,
                     kind: sanitized.kind,
-                    colorHex: sanitized.colorHex,
                     isEnabled: sanitized.isEnabled,
                     sortOrder: sanitized.sortOrder,
                     envFileName: sanitized.envFileName
@@ -198,18 +193,8 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
             result.name = kind.title
         }
 
-        result.colorHex = sanitizedColorHex(environment.colorHex)
         result.envFileName = sanitizedFileName(environment.envFileName)
         return result
-    }
-
-    private static func sanitizedColorHex(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("#"), trimmed.count == 7 else { return nil }
-        let digits = trimmed.dropFirst()
-        guard digits.allSatisfy(\.isHexDigit) else { return nil }
-        return "#\(digits.uppercased())"
     }
 
     /// Reduces anything to a bare file name.
@@ -282,7 +267,7 @@ nonisolated struct ResolvedWorkspaceEnvironment: Identifiable, Hashable, Sendabl
     var title: String { declaration.title }
     var kind: EnvironmentKind { declaration.kind }
     var isEnabled: Bool { declaration.isEnabled }
-    var colorHex: String { declaration.effectiveColorHex }
+    var systemImage: String { declaration.systemImage }
     var envFileName: String? { declaration.envFileName }
     var environmentValue: EnvironmentValue { declaration.environmentValue }
 }

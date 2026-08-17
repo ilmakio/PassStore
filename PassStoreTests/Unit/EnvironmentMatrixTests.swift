@@ -30,7 +30,7 @@ struct EnvironmentMatrixTests {
         EnvironmentMatrixInput.Column(
             matchKey: title.lowercased(),
             title: title,
-            colorHex: "#4A7AFF",
+            systemImage: WorkspaceEnvironment.value(forTitle: title).kind.systemImage,
             itemCount: itemCount,
             entries: entries
         )

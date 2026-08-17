@@ -604,7 +604,7 @@ final class VaultViewModel {
             return EnvironmentMatrixInput.Column(
                 matchKey: environment.matchKey,
                 title: environment.title,
-                colorHex: environment.colorHex,
+                systemImage: environment.systemImage,
                 itemCount: environmentItems.count,
                 entries: entries
             )
@@ -916,10 +916,39 @@ final class VaultViewModel {
     }
 
     func selectDestination(_ destination: VaultDestination) {
+        let showsWorkspace = destination.workspaceID != nil
         selectedDestination = destination
         multiSelectedIDs.removeAll()
         selectionAnchorID = nil
+        // Asking for a project shows the project. Keeping whichever secret happened to be
+        // selected meant the detail pane described one item while the sidebar had just been
+        // asked about a whole workspace — or about one of its environments.
+        if showsWorkspace {
+            selectedItemID = nil
+        }
         syncSelectedItem()
+    }
+
+    /// What a row in the item list should say about where its secret lives.
+    ///
+    /// Repeating the scope you are already inside is noise: in a workspace the workspace chip is
+    /// on every row, and inside one of its environments so is the environment.
+    enum ItemRowScope {
+        /// Outside any workspace view — name the workspace.
+        case workspace
+        /// Inside a workspace, across all of its environments — name the environment, which is
+        /// what actually distinguishes one row from the next here.
+        case environment
+        /// Inside one environment of one workspace — neither; both are in the title above.
+        case none
+    }
+
+    var itemRowScope: ItemRowScope {
+        switch selectedDestination {
+        case .workspaceEnvironment: .none
+        case .workspace: .environment
+        case .library, .tag, .environment: .workspace
+        }
     }
 
     /// Updates the sidebar type filter and keeps the list selection consistent with `filteredItems`.

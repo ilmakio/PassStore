@@ -1089,10 +1089,13 @@ struct WorkspaceEditorSheet: View {
     private func environmentRow(at index: Int, environment: WorkspaceEnvironment) -> some View {
         let count = itemCount(for: environment)
         HStack(spacing: VaultSpacing.s) {
-            Circle()
-                .fill(Color(hex: environment.effectiveColorHex))
-                .frame(width: 10, height: 10)
-                .opacity(environment.isEnabled ? 1 : 0.3)
+            // The workspace's own colour, with the glyph doing the distinguishing: an
+            // environment does not get a palette of its own.
+            Image(systemName: environment.systemImage)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color(hex: draft.colorHex))
+                .opacity(environment.isEnabled ? 1 : 0.4)
+                .frame(width: 14)
                 .accessibilityHidden(true)
 
             if environment.kind == .custom {
@@ -1143,17 +1146,6 @@ struct WorkspaceEditorSheet: View {
                 draft.environments[index].kind = .custom
             }
         }
-
-        Menu("Color") {
-            Button("Default for \(environment.kind == .custom ? "Custom" : environment.kind.title)") {
-                draft.environments[index].colorHex = nil
-            }
-            ForEach(WorkspaceStylePresets.colors) { preset in
-                Button(preset.name) { draft.environments[index].colorHex = preset.hex }
-            }
-        }
-
-        Divider()
 
         Button("Move Up") { moveEnvironment(from: index, to: index - 1) }
             .disabled(index == 0)
@@ -1435,6 +1427,10 @@ struct EnvironmentMatrixSheet: View {
         viewModel.workspace(for: workspaceID)?.name ?? "Workspace"
     }
 
+    private var accent: Color {
+        viewModel.workspace(for: workspaceID).map { Color(hex: $0.colorHex) } ?? .accentColor
+    }
+
     var body: some View {
         let matrix = matrix
         let rows = showsOnlyProblems ? matrix.rowsNeedingAttention : matrix.rows
@@ -1443,6 +1439,9 @@ struct EnvironmentMatrixSheet: View {
             title: "Compare Environments",
             subtitle: workspaceName,
             systemImage: "tablecells",
+            tint: accent,
+            // The grid scrolls in both directions on its own, so the scaffold must not wrap it
+            // in a scroll view — which also means the padding is this sheet's job.
             scrolls: false
         ) {
             Toggle("Only what needs attention", isOn: $showsOnlyProblems)
@@ -1474,7 +1473,8 @@ struct EnvironmentMatrixSheet: View {
 
                 legend
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(VaultSpacing.xl)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(width: 780, height: 620)
     }
@@ -1519,16 +1519,19 @@ struct EnvironmentMatrixSheet: View {
                 .frame(width: Self.keyColumnWidth, alignment: .leading)
 
             ForEach(matrix.columns) { column in
-                VStack(spacing: 1) {
+                VStack(spacing: 2) {
+                    Image(systemName: column.systemImage)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(accent)
+                        .accessibilityHidden(true)
                     Text(column.title)
                         .font(.vaultBadge)
-                        .foregroundStyle(Color(hex: column.colorHex))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    Text("\(column.itemCount)")
-                        .font(.vaultBadge)
-                        .foregroundStyle(.tertiary)
                 }
                 .frame(width: Self.cellWidth)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(column.title), \(column.itemCount) items")
             }
         }
         .padding(.vertical, VaultSpacing.xs)

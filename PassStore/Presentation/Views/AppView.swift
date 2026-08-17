@@ -431,10 +431,10 @@ private struct SidebarView: View {
                 return SidebarReorderItem(
                     id: WorkspaceRowID.environment(workspace.id, environment.title).raw,
                     title: environment.title,
-                    // Dashed rather than merely paler, so a switched-off environment reads as
-                    // switched off without depending on colour.
-                    systemImage: environment.isEnabled ? "circle.fill" : "circle.dashed",
-                    tintColor: NSColor(hex: environment.colorHex),
+                    systemImage: environment.systemImage,
+                    // The workspace's colour, not one of its own: colour says which project a
+                    // row belongs to, and the glyph says which environment.
+                    tintColor: NSColor(hex: workspace.colorHex),
                     badge: environmentCount > 0 ? "\(environmentCount)" : nil,
                     accessibilityIdentifier: "sidebar-workspace-\(slug)-environment-\(uiIdentifierSlug(environment.title))",
                     indentationLevel: 1,
@@ -896,13 +896,18 @@ private struct EnvironmentTabBar: View {
     @Bindable var viewModel: VaultViewModel
     let workspaceID: UUID
 
+    /// Every tab of a project is drawn in the project's colour; the glyph is what separates them.
+    private var accent: Color {
+        viewModel.workspace(for: workspaceID).map { Color(hex: $0.colorHex) } ?? .accentColor
+    }
+
     var body: some View {
         ScrollView(.horizontal) {
             HStack(spacing: VaultSpacing.xs) {
                 tab(
                     title: "All",
+                    systemImage: nil,
                     count: viewModel.itemCount(inWorkspace: workspaceID),
-                    color: .secondary,
                     isSelected: viewModel.selectedEnvironmentMatchKey == nil,
                     isDimmed: false,
                     identifier: "environment-tab-all"
@@ -913,11 +918,11 @@ private struct EnvironmentTabBar: View {
                 ForEach(viewModel.environmentBarItems) { environment in
                     tab(
                         title: environment.title,
+                        systemImage: environment.systemImage,
                         count: viewModel.itemCount(
                             inWorkspace: workspaceID,
                             environmentMatchKey: environment.matchKey
                         ),
-                        color: Color(hex: environment.colorHex),
                         isSelected: viewModel.selectedEnvironmentMatchKey == environment.matchKey,
                         isDimmed: !environment.isEnabled,
                         identifier: "environment-tab-\(uiIdentifierSlug(environment.title))"
@@ -934,15 +939,21 @@ private struct EnvironmentTabBar: View {
 
     private func tab(
         title: String,
+        systemImage: String?,
         count: Int,
-        color: Color,
         isSelected: Bool,
         isDimmed: Bool,
         identifier: String,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        let color = accent
+        return Button(action: action) {
             HStack(spacing: VaultSpacing.xs) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 9))
+                        .accessibilityHidden(true)
+                }
                 Text(title)
                     .font(.caption)
                     .fontWeight(isSelected ? .semibold : .medium)
@@ -1054,9 +1065,7 @@ private struct ItemRow: View {
                         .foregroundStyle(.secondary)
                         .labelStyle(.titleAndIcon)
 
-                    if let workspace = item.workspace {
-                        VaultChip(title: workspace.name, systemImage: workspace.icon, color: Color(hex: workspace.colorHex))
-                    }
+                    scopeChip
                 }
             }
 
@@ -1079,6 +1088,32 @@ private struct ItemRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
+    }
+
+    /// Names whichever of workspace / environment is not already implied by where you are
+    /// standing. Inside one environment of one workspace, both are, and the row says neither.
+    @ViewBuilder
+    private var scopeChip: some View {
+        switch viewModel.itemRowScope {
+        case .workspace:
+            if let workspace = item.workspace {
+                VaultChip(
+                    title: workspace.name,
+                    systemImage: workspace.icon,
+                    color: Color(hex: workspace.colorHex)
+                )
+            }
+        case .environment:
+            VaultChip(
+                title: item.environmentValue.title,
+                systemImage: item.environmentValue.kind.systemImage,
+                // The project's own colour: inside one workspace every row belongs to it, and
+                // the glyph is what tells one environment from another.
+                color: item.workspace.map { Color(hex: $0.colorHex) } ?? .secondary
+            )
+        case .none:
+            EmptyView()
+        }
     }
 
     private func flashCopied() {
@@ -1598,7 +1633,8 @@ private struct WorkspaceOverviewView: View {
     }
 
     private func environmentCard(_ environment: ResolvedWorkspaceEnvironment) -> some View {
-        let color = Color(hex: environment.colorHex)
+        // The project's colour throughout; the glyph is what distinguishes one card from another.
+        let color = accent
         let count = viewModel.itemCount(inWorkspace: workspace.id, environmentMatchKey: environment.matchKey)
         let isCurrent = viewModel.selectedEnvironmentMatchKey == environment.matchKey
 
@@ -1607,10 +1643,12 @@ private struct WorkspaceOverviewView: View {
         } label: {
             VStack(alignment: .leading, spacing: VaultSpacing.xs) {
                 HStack(spacing: VaultSpacing.s) {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 9, height: 9)
-                        .opacity(environment.isEnabled ? 1 : 0.35)
+                    Image(systemName: environment.systemImage)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(color)
+                        .opacity(environment.isEnabled ? 1 : 0.4)
+                        .frame(width: 14)
+                        .accessibilityHidden(true)
                     Text(environment.title)
                         .font(.vaultRowTitle)
                         .foregroundStyle(.primary)
