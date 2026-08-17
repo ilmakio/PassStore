@@ -1435,7 +1435,7 @@ final class VaultViewModel {
         if let index = draft.fieldDrafts.firstIndex(where: { $0.key == key }) {
             guard draft.fieldDrafts[index].value != fileValue else {
                 // Already the same value: nothing to save, but the baseline may still be behind.
-                recordFieldSync(on: current, expecting: link, key: key, fileContents: contents)
+                recordFieldSync(on: current, expecting: link, key: key, syncedValue: fileValue, fileContents: contents)
                 return true
             }
             draft.fieldDrafts[index].value = fileValue
@@ -1464,7 +1464,7 @@ final class VaultViewModel {
             return false
         }
 
-        recordFieldSync(on: saved, expecting: link, key: key, fileContents: contents)
+        recordFieldSync(on: saved, expecting: link, key: key, syncedValue: fileValue, fileContents: contents)
         lastActionMessage = "Updated \(key) from \(link.fileName)."
         return true
     }
@@ -1503,7 +1503,7 @@ final class VaultViewModel {
                   let current = items.first(where: { $0.id == itemID }),
                   current.linkedFile == link else { return false }
 
-            recordFieldSync(on: current, expecting: link, key: key, fileContents: written)
+            recordFieldSync(on: current, expecting: link, key: key, syncedValue: field.value, fileContents: written)
             lastActionMessage = "Wrote \(key) to \(link.fileName)."
             return true
         } catch {
@@ -1522,16 +1522,16 @@ final class VaultViewModel {
         on item: SecretItemEntity,
         expecting link: LinkedFileReference,
         key: String,
+        syncedValue: String,
         fileContents: String
     ) {
         guard var updatedLink = item.linkedFile, updatedLink == link else { return }
         let fields = resolvedFields(for: item)
         var baseline = updatedLink.syncedFieldDigests ?? [:]
-        if let value = fields.first(where: { $0.key == key })?.value {
-            baseline[key] = LinkedFileService.digest(value)
-        } else {
-            baseline.removeValue(forKey: key)
-        }
+        // The value the two sides actually agreed on, not whatever the field holds by the time
+        // this runs: an edit can land while the file operation is suspended off-main, and it is
+        // the item that moved then, not the file.
+        baseline[key] = LinkedFileService.digest(syncedValue)
         updatedLink.syncedFieldDigests = baseline
 
         let drift = EnvImportService.drift(between: fileContents, and: fields, baseline: baseline)
