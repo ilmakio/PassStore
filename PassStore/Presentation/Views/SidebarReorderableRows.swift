@@ -11,6 +11,21 @@ struct SidebarReorderItem {
     /// Trailing count shown right-aligned in the row; nil hides it.
     let badge: String?
     let accessibilityIdentifier: String?
+    /// 0 for a top-level row, 1 for a child. The list itself stays flat — children are ordinary
+    /// rows drawn further in — so drag-to-reorder keeps working exactly as it did.
+    let indentationLevel: Int
+    /// Whether this row draws a disclosure triangle. Nil for rows that have nothing under them.
+    let isExpanded: Bool?
+    /// Rows a drag can pick up. Children are never draggable: only their parent has an order.
+    let isDraggable: Bool
+    /// Leaves room for a disclosure triangle whether or not this row has one.
+    ///
+    /// Set for every row of a list where *some* row can expand, so labels line up instead of
+    /// shuffling sideways as workspaces gain and lose environments. Lists that never nest — the
+    /// Library, Types, Tags — leave it off and keep their original alignment.
+    let reservesDisclosureSpace: Bool
+    /// Drawn dimmed, for an environment that has been switched off but still holds items.
+    let isDimmed: Bool
 
     init(
         id: String,
@@ -18,7 +33,12 @@ struct SidebarReorderItem {
         systemImage: String,
         tintColor: NSColor = .controlAccentColor,
         badge: String? = nil,
-        accessibilityIdentifier: String? = nil
+        accessibilityIdentifier: String? = nil,
+        indentationLevel: Int = 0,
+        isExpanded: Bool? = nil,
+        isDraggable: Bool = true,
+        isDimmed: Bool = false,
+        reservesDisclosureSpace: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -26,6 +46,11 @@ struct SidebarReorderItem {
         self.tintColor = tintColor
         self.badge = badge
         self.accessibilityIdentifier = accessibilityIdentifier
+        self.indentationLevel = indentationLevel
+        self.isExpanded = isExpanded
+        self.isDraggable = isDraggable
+        self.isDimmed = isDimmed
+        self.reservesDisclosureSpace = reservesDisclosureSpace
     }
 }
 
@@ -61,10 +86,13 @@ struct ReorderableRows: NSViewRepresentable {
     var reorderable: Bool = true
     /// Called with the selected item id, or nil when deselected.
     let onSelect: (String?) -> Void
-    /// Called with the new ordered list of ids after a drag-and-drop reorder. No-op by default.
+    /// Called with the new ordered list of ids after a drag-and-drop reorder. Children are left
+    /// out: only top-level rows carry an order. No-op by default.
     var onReorder: ([String]) -> Void = { _ in }
     /// Right-click menu entries for the row with the given id. Returning `[]` shows no menu.
     var contextActions: (String) -> [SidebarRowAction] = { _ in [] }
+    /// Called when a disclosure triangle is clicked. Toggling never changes the selection.
+    var onToggleExpansion: (String) -> Void = { _ in }
 
     func makeNSView(context: Context) -> NSTableView {
         let table = SidebarTableView()
@@ -108,6 +136,7 @@ struct ReorderableRows: NSViewRepresentable {
         c.onSelect = onSelect
         c.onReorder = onReorder
         c.contextActions = contextActions
+        c.onToggleExpansion = onToggleExpansion
 
         table.reloadData()
 
@@ -126,7 +155,7 @@ struct ReorderableRows: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(items: items, selectedID: selectedID, allowsDeselection: allowsDeselection,
                     reorderable: reorderable, onSelect: onSelect, onReorder: onReorder,
-                    contextActions: contextActions)
+                    contextActions: contextActions, onToggleExpansion: onToggleExpansion)
     }
 
     // MARK: - Coordinator
@@ -139,6 +168,7 @@ struct ReorderableRows: NSViewRepresentable {
         var onSelect: (String?) -> Void
         var onReorder: ([String]) -> Void
         var contextActions: (String) -> [SidebarRowAction]
+        var onToggleExpansion: (String) -> Void
         var isUpdating = false
         weak var tableView: NSTableView?
 
@@ -147,7 +177,8 @@ struct ReorderableRows: NSViewRepresentable {
 
         init(items: [SidebarReorderItem], selectedID: String?, allowsDeselection: Bool,
              reorderable: Bool, onSelect: @escaping (String?) -> Void, onReorder: @escaping ([String]) -> Void,
-             contextActions: @escaping (String) -> [SidebarRowAction]) {
+             contextActions: @escaping (String) -> [SidebarRowAction],
+             onToggleExpansion: @escaping (String) -> Void) {
             self.items = items
             self.selectedID = selectedID
             self.allowsDeselection = allowsDeselection
@@ -155,6 +186,7 @@ struct ReorderableRows: NSViewRepresentable {
             self.onSelect = onSelect
             self.onReorder = onReorder
             self.contextActions = contextActions
+            self.onToggleExpansion = onToggleExpansion
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { items.count }
@@ -195,6 +227,7 @@ struct ReorderableRows: NSViewRepresentable {
         // MARK: Drag source — enables drag from any point on the row
 
         func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+            guard items[row].isDraggable else { return nil }
             let pb = NSPasteboardItem()
             pb.setString(items[row].id, forType: ReorderableRows.pasteType)
             return pb
@@ -210,11 +243,18 @@ struct ReorderableRows: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo,
                        row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
-            guard let srcID = info.draggingPasteboard.string(forType: ReorderableRows.pasteType),
-                  let fromIndex = items.firstIndex(where: { $0.id == srcID }) else { return false }
-            var ids = items.map(\.id)
-            ids.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: row)
-            onReorder(ids)
+            guard let srcID = info.draggingPasteboard.string(forType: ReorderableRows.pasteType) else {
+                return false
+            }
+            // Only top-level rows have an order. With children on screen a visible row index is
+            // not an index into that order, so the drop point is counted in parents instead:
+            // every parent above the drop line keeps its place, which means a drop anywhere
+            // inside a workspace's expanded environments lands just after that workspace.
+            var parentIDs = items.filter { $0.indentationLevel == 0 }.map(\.id)
+            let parentsBeforeDrop = items.prefix(row).count { $0.indentationLevel == 0 }
+            guard let fromIndex = parentIDs.firstIndex(of: srcID) else { return false }
+            parentIDs.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: parentsBeforeDrop)
+            onReorder(parentIDs)
             return true
         }
 
@@ -224,6 +264,7 @@ struct ReorderableRows: NSViewRepresentable {
             let item = items[row]
             let cell = tableView.makeView(withIdentifier: SidebarCell.reuseIdentifier, owner: self) as? SidebarCell
                 ?? SidebarCell()
+            cell.onToggleExpansion = { [weak self] in self?.onToggleExpansion(item.id) }
             cell.configure(with: item, isSelected: item.id == selectedID) { [weak self, weak tableView] in
                 guard let self, let tableView else { return }
                 if self.allowsDeselection, tableView.selectedRow == row {
@@ -284,12 +325,20 @@ private final class SidebarTableView: NSTableView {
 
 private final class SidebarCell: NSView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("SidebarCell")
+    /// How far one level of nesting moves a row in. Narrow on purpose: the sidebar column is
+    /// 220pt at its widest and a workspace name still has to fit next to its badge.
+    private static let indentationWidth: CGFloat = 13
+    /// Room for the disclosure triangle to the left of the icon.
+    private static let disclosureGutter: CGFloat = 13
 
     private let bg = NSView()
+    private let disclosureButton = NSButton()
     private let imageView = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let badgeLabel = NSTextField(labelWithString: "")
     private var onPress: (() -> Void)?
+    private var leadingConstraint: NSLayoutConstraint?
+    var onToggleExpansion: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -298,6 +347,15 @@ private final class SidebarCell: NSView {
         bg.layer?.cornerRadius = 6
         bg.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bg)
+
+        disclosureButton.translatesAutoresizingMaskIntoConstraints = false
+        disclosureButton.isBordered = false
+        disclosureButton.bezelStyle = .inline
+        disclosureButton.imagePosition = .imageOnly
+        disclosureButton.target = self
+        disclosureButton.action = #selector(toggleExpansion)
+        disclosureButton.contentTintColor = .secondaryLabelColor
+        addSubview(disclosureButton)
 
         imageView.translatesAutoresizingMaskIntoConstraints = false
         imageView.imageScaling = .scaleProportionallyDown
@@ -315,13 +373,21 @@ private final class SidebarCell: NSView {
         badgeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         addSubview(badgeLabel)
 
+        let leading = imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7)
+        leadingConstraint = leading
+
         NSLayoutConstraint.activate([
             bg.leadingAnchor.constraint(equalTo: leadingAnchor),
             bg.trailingAnchor.constraint(equalTo: trailingAnchor),
             bg.topAnchor.constraint(equalTo: topAnchor, constant: 1),
             bg.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
 
-            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+            disclosureButton.trailingAnchor.constraint(equalTo: imageView.leadingAnchor, constant: -1),
+            disclosureButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            disclosureButton.widthAnchor.constraint(equalToConstant: 12),
+            disclosureButton.heightAnchor.constraint(equalToConstant: 14),
+
+            leading,
             imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
             imageView.widthAnchor.constraint(equalToConstant: 17),
             imageView.heightAnchor.constraint(equalToConstant: 17),
@@ -337,17 +403,53 @@ private final class SidebarCell: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    @objc private func toggleExpansion() {
+        onToggleExpansion?()
+    }
+
     func configure(with item: SidebarReorderItem, isSelected: Bool, onPress: @escaping () -> Void) {
         self.onPress = onPress
+        // The triangle lives in the gutter that `reservesDisclosureSpace` opens up to the left
+        // of the icon; indentation moves the whole row in from there.
+        leadingConstraint?.constant = 7
+            + (item.reservesDisclosureSpace ? Self.disclosureGutter : 0)
+            + CGFloat(item.indentationLevel) * Self.indentationWidth
+
+        if let isExpanded = item.isExpanded {
+            disclosureButton.isHidden = false
+            disclosureButton.image = NSImage(
+                systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
+                accessibilityDescription: isExpanded ? "Collapse" : "Expand"
+            )
+            disclosureButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+            disclosureButton.setAccessibilityElement(true)
+            disclosureButton.setAccessibilityRole(.button)
+            disclosureButton.setAccessibilityLabel(
+                isExpanded ? "Collapse \(item.title)" : "Expand \(item.title)"
+            )
+            disclosureButton.setAccessibilityIdentifier(
+                item.accessibilityIdentifier.map { "\($0)-disclosure" }
+            )
+        } else {
+            disclosureButton.isHidden = true
+            disclosureButton.image = nil
+        }
+
         label.stringValue = item.title
         // Matches a real macOS sidebar: full label colour at the standard sidebar size.
         // 11pt in `secondaryLabelColor` made every row look disabled next to Finder or Mail,
         // and it ignored the system text-size setting entirely.
-        label.textColor = isSelected ? item.tintColor : .labelColor
-        label.font = .preferredFont(forTextStyle: .body)
-        imageView.symbolConfiguration = NSImage.SymbolConfiguration(textStyle: .body, scale: .medium)
+        label.textColor = isSelected ? item.tintColor : (item.isDimmed ? .tertiaryLabelColor : .labelColor)
+        // Children sit at the smaller sidebar size, the way Finder draws a nested folder.
+        label.font = .preferredFont(forTextStyle: item.indentationLevel > 0 ? .subheadline : .body)
+        imageView.symbolConfiguration = NSImage.SymbolConfiguration(
+            textStyle: item.indentationLevel > 0 ? .subheadline : .body,
+            scale: .medium
+        )
         imageView.image = NSImage(systemSymbolName: item.systemImage, accessibilityDescription: item.title)
-        imageView.contentTintColor = isSelected ? item.tintColor : .secondaryLabelColor
+        imageView.contentTintColor = isSelected
+            ? item.tintColor
+            : (item.isDimmed ? .tertiaryLabelColor : .secondaryLabelColor)
         badgeLabel.stringValue = item.badge ?? ""
         badgeLabel.isHidden = item.badge == nil
         bg.layer?.backgroundColor = isSelected
@@ -357,6 +459,11 @@ private final class SidebarCell: NSView {
         setAccessibilityRole(.button)
         setAccessibilityLabel(item.badge.map { "\(item.title), \($0)" } ?? item.title)
         setAccessibilityIdentifier(item.accessibilityIdentifier)
+        // The cell is its own accessibility element, which by default makes it a leaf and hides
+        // everything inside it. The triangle has to stay reachable: it is the only way to open a
+        // workspace's environments, and with it hidden there is no keyboard or VoiceOver route in
+        // at all.
+        setAccessibilityChildren(item.isExpanded == nil ? [] : [disclosureButton])
     }
 
     override func accessibilityPerformPress() -> Bool {

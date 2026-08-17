@@ -8,6 +8,7 @@ final class AppContainer {
     let envImport: EnvImportService
     let exportService: ExportService
     let linkedFiles: LinkedFileService
+    let envDiscovery: EnvFileDiscoveryService
     let memoryStore: VaultMemoryStore
 
     let workspaceRepository: WorkspaceRepository
@@ -41,6 +42,7 @@ final class AppContainer {
         self.envImport = EnvImportService()
         self.exportService = ExportService(cryptoService: cryptoService)
         self.linkedFiles = LinkedFileService()
+        self.envDiscovery = EnvFileDiscoveryService()
         self.workspaceRepository = WorkspaceRepository(store: memoryStore)
         self.itemRepository = SecretItemRepository(store: memoryStore, settings: settings)
         self.templateRepository = TemplateRepository(store: memoryStore)

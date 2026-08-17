@@ -100,6 +100,17 @@ final class AppSettingsStore {
         didSet { defaults.set(sidebarTypesOrder, forKey: Keys.sidebarTypesOrder) }
     }
 
+    /// Workspaces whose environments are showing in the sidebar.
+    ///
+    /// Unlike tag and environment *names*, an id names nothing: it is safe in plain
+    /// `UserDefaults` alongside the rest of the sidebar's layout state. It is deliberately not
+    /// part of a backup either — it points at ids that a restored vault may not even contain.
+    var expandedWorkspaceIDs: Set<UUID> {
+        didSet {
+            defaults.set(expandedWorkspaceIDs.map(\.uuidString), forKey: Keys.expandedWorkspaceIDs)
+        }
+    }
+
     /// These two arrays may contain client, project or infrastructure names. They are kept in
     /// memory only while unlocked and injected into the encrypted VaultSnapshot on each save.
     var sidebarTagsOrder: [String]
@@ -120,6 +131,7 @@ final class AppSettingsStore {
         static let sidebarTagsExpanded = "settings.sidebar.tagsExpanded"
         static let sidebarEnvironmentsExpanded = "settings.sidebar.environmentsExpanded"
         static let sidebarTypesOrder = "settings.sidebar.typesOrder"
+        static let expandedWorkspaceIDs = "settings.sidebar.expandedWorkspaceIDs"
         static let sidebarTagsOrder = "settings.sidebar.tagsOrder"
         static let sidebarEnvironmentsOrder = "settings.sidebar.environmentsOrder"
         static let hasShownSensitiveCopyWarning = "settings.hasShownSensitiveCopyWarning"
@@ -140,6 +152,7 @@ final class AppSettingsStore {
             sidebarTagsExpanded,
             sidebarEnvironmentsExpanded,
             sidebarTypesOrder,
+            expandedWorkspaceIDs,
             sidebarTagsOrder,
             sidebarEnvironmentsOrder,
             hasShownSensitiveCopyWarning,
@@ -172,6 +185,11 @@ final class AppSettingsStore {
         self.sidebarTypesOrder = Self.sanitizedOrder(
             defaults.stringArray(forKey: Keys.sidebarTypesOrder) ?? []
         ).filter { validTypes.contains($0) }
+        self.expandedWorkspaceIDs = Set(
+            (defaults.stringArray(forKey: Keys.expandedWorkspaceIDs) ?? [])
+                .prefix(500)
+                .compactMap(UUID.init(uuidString:))
+        )
         // Early 1.2 builds persisted these potentially identifying labels in plaintext.
         // Do not materialize them while the vault is locked; `activate` reads them only after
         // successful authentication and immediately migrates them into the encrypted snapshot.
@@ -320,6 +338,7 @@ final class AppSettingsStore {
         sidebarTagsExpanded = true
         sidebarEnvironmentsExpanded = true
         sidebarTypesOrder = []
+        expandedWorkspaceIDs = []
         sidebarTagsOrder = []
         sidebarEnvironmentsOrder = []
         hasShownSensitiveCopyWarning = false

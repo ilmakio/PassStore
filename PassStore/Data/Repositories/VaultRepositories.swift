@@ -46,9 +46,48 @@ final class WorkspaceRepository: WorkspaceRepositoryProtocol {
         workspace.icon = draft.icon
         workspace.colorHex = draft.colorHex
         workspace.notes = draft.notes
+        workspace.environments = WorkspaceEnvironment.sanitizedList(draft.environments)
         workspace.updatedAt = .now
         try store.persist()
         return workspace
+    }
+
+    /// Links, re-links or unlinks the folder this workspace belongs to.
+    ///
+    /// Separate from `saveWorkspace` because linking a folder is its own decision — and because
+    /// unlinking has to be a single, obvious gesture: it is how the owner takes the folder
+    /// permission back.
+    func setLinkedFolder(_ folder: LinkedFolderReference?, onWorkspaceWithID id: UUID) throws {
+        try store.performTransaction {
+            try store.requireUnlocked()
+            guard let workspace = store.workspaces.first(where: { $0.id == id }) else { return }
+            workspace.linkedFolder = folder
+            workspace.updatedAt = .now
+            try store.persist()
+        }
+    }
+
+    /// Replaces the declared environments without touching anything else on the workspace.
+    ///
+    /// The editor round-trips the whole draft, but adopting an environment, reordering the list
+    /// or switching one off are single gestures made from the sidebar and the overview — they
+    /// have no business rewriting the workspace's name and notes on the way.
+    @discardableResult
+    func setEnvironments(
+        _ environments: [WorkspaceEnvironment],
+        onWorkspaceWithID id: UUID
+    ) throws -> [WorkspaceEnvironment] {
+        try store.performTransaction {
+            try store.requireUnlocked()
+            guard let workspace = store.workspaces.first(where: { $0.id == id }) else {
+                return []
+            }
+            let sanitized = WorkspaceEnvironment.sanitizedList(environments)
+            workspace.environments = sanitized
+            workspace.updatedAt = .now
+            try store.persist()
+            return sanitized
+        }
     }
 
     func reorderWorkspaces(_ ids: [UUID]) throws {
