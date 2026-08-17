@@ -275,8 +275,24 @@ enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
 enum VaultDestination: Hashable {
     case library(LibrarySection)
     case workspace(UUID)
+    /// One environment of one workspace — "Acme API › Prod".
+    ///
+    /// Identified by environment *title* rather than by a declaration id, because an
+    /// environment can be in use without ever having been declared: every vault written before
+    /// 1.3 is in exactly that state, and navigation has to reach those items too.
+    case workspaceEnvironment(UUID, String)
     case tag(String)
+    /// The same environment across every workspace. Kept alongside the scoped case: "show me
+    /// everything in production" is a different and still useful question.
     case environment(String)
+
+    var workspaceID: UUID? {
+        switch self {
+        case let .workspace(id): id
+        case let .workspaceEnvironment(id, _): id
+        case .library, .tag, .environment: nil
+        }
+    }
 }
 
 enum VaultSheet: Identifiable {

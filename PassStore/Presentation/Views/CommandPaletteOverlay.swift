@@ -383,6 +383,25 @@ extension VaultViewModel {
                     }
                 )
             )
+
+            // One entry per environment, so "acme prod" reaches that project's production
+            // secrets directly instead of the workspace and then a second gesture.
+            for environment in offeredEnvironments(inWorkspace: workspaceID) {
+                let title = environment.title
+                dynamic.append(
+                    .init(
+                        id: "go.workspace.\(id).environment.\(environment.matchKey)",
+                        title: "Go to \(workspace.name) › \(title)",
+                        subtitle: "Environment",
+                        keywords: ["workspace", "environment", workspace.name, title],
+                        isEnabled: true,
+                        perform: wrap {
+                            self.selectDestination(.workspaceEnvironment(workspaceID, title))
+                            self.setSelectedType(nil)
+                        }
+                    )
+                )
+            }
         }
 
         for item in items.sorted(by: { lhs, rhs in

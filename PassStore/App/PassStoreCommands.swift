@@ -268,6 +268,26 @@ struct PassStoreCommands: Commands {
 
             Divider()
 
+            // Moves along the environment tabs of the workspace being viewed, "All" included.
+            // Disabled outside a project view, where there are no tabs to move between.
+            Button {
+                viewModel.cycleEnvironment(by: -1)
+            } label: {
+                Label("Previous Environment", systemImage: "chevron.left")
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .disabled(isLocked || viewModel.environmentBarWorkspaceID == nil)
+
+            Button {
+                viewModel.cycleEnvironment(by: 1)
+            } label: {
+                Label("Next Environment", systemImage: "chevron.right")
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .disabled(isLocked || viewModel.environmentBarWorkspaceID == nil)
+
+            Divider()
+
             Picker("Sort By", selection: $viewModel.sortOrder) {
                 ForEach(ItemSortOrder.allCases) { order in
                     Label(order.title, systemImage: order.systemImage).tag(order)

@@ -152,10 +152,8 @@ final class VaultViewModel {
     func confirmWorkspaceDeletion() {
         guard let workspace = workspacePendingDeletion else { return }
         workspacePendingDeletion = nil
-        let wasSelected: Bool = {
-            if case let .workspace(id) = selectedDestination { return id == workspace.id }
-            return false
-        }()
+        // Covers both the workspace itself and any of its environments.
+        let wasSelected = selectedDestination.workspaceID == workspace.id
         do {
             try container.workspaceRepository.deleteWorkspace(workspace)
             if wasSelected {
@@ -314,6 +312,49 @@ final class VaultViewModel {
         }
     }
 
+    // MARK: - Environment bar
+
+    /// The workspace whose environments the item list should offer as tabs, or nil when the
+    /// current destination is not a project view. A workspace with nothing to divide gets no bar.
+    var environmentBarWorkspaceID: UUID? {
+        guard let id = selectedDestination.workspaceID,
+              hasEnvironmentStructure(inWorkspace: id) else { return nil }
+        return id
+    }
+
+    var environmentBarItems: [ResolvedWorkspaceEnvironment] {
+        guard let id = environmentBarWorkspaceID else { return [] }
+        return offeredEnvironments(inWorkspace: id)
+    }
+
+    /// Nil means the workspace as a whole — the "All" tab.
+    var selectedEnvironmentMatchKey: String? {
+        guard case let .workspaceEnvironment(_, environment) = selectedDestination else { return nil }
+        return WorkspaceEnvironment.matchKey(for: environment)
+    }
+
+    /// Switches tab. Passing nil goes back to the whole workspace.
+    func selectEnvironment(matchKey: String?) {
+        guard let id = selectedDestination.workspaceID else { return }
+        guard let matchKey,
+              let environment = environments(inWorkspace: id).first(where: { $0.matchKey == matchKey }) else {
+            selectDestination(.workspace(id))
+            return
+        }
+        selectDestination(.workspaceEnvironment(id, environment.title))
+    }
+
+    /// Moves along the bar, wrapping. "All" is part of the cycle: it is where you go to see the
+    /// whole project again.
+    func cycleEnvironment(by offset: Int) {
+        guard let id = environmentBarWorkspaceID else { return }
+        let keys: [String?] = [nil] + environmentBarItems.map { $0.matchKey }
+        guard keys.count > 1 else { return }
+        let current = keys.firstIndex(of: selectedEnvironmentMatchKey) ?? 0
+        let next = (current + offset % keys.count + keys.count) % keys.count
+        selectEnvironment(matchKey: keys[next])
+    }
+
     func requestSearchFocus() {
         searchFocusRequests += 1
     }
@@ -405,6 +446,8 @@ final class VaultViewModel {
             section.title
         case let .workspace(id):
             workspace(for: id)?.name ?? "Workspace"
+        case let .workspaceEnvironment(id, environment):
+            workspace(for: id).map { "\($0.name) › \(environment)" } ?? environment
         case let .tag(tag):
             "#\(tag)"
         case let .environment(environment):
@@ -434,6 +477,8 @@ final class VaultViewModel {
             "Nothing is archived. Archived items stay recoverable."
         case .workspace:
             "This workspace has no items yet."
+        case let .workspaceEnvironment(_, environment):
+            "Nothing in \(environment) yet. Add a secret here, or copy one over from another environment."
         case .tag:
             "No items carry this tag anymore."
         case .environment:
@@ -447,6 +492,8 @@ final class VaultViewModel {
             section.systemImage
         case let .workspace(id):
             workspace(for: id)?.icon ?? "folder"
+        case let .workspaceEnvironment(id, _):
+            workspace(for: id)?.icon ?? "circle.hexagongrid"
         case .tag:
             "tag"
         case .environment:
@@ -2963,20 +3010,27 @@ final class VaultViewModel {
     }
 
     private var preferredWorkspaceID: UUID? {
-        switch selectedDestination {
-        case let .workspace(id):
-            id
-        default:
-            selectedItem?.workspace?.id ?? workspaces.first?.id
-        }
+        selectedDestination.workspaceID ?? selectedItem?.workspace?.id ?? workspaces.first?.id
     }
 
+    /// What a new item's environment starts as.
+    ///
+    /// Inside one environment of a workspace, that environment. Inside a workspace as a whole,
+    /// the first environment the project offers — a new secret in a project that has declared
+    /// Local, Dev and Prod belongs in one of those, not in whatever the global default is.
     private var preferredEnvironment: EnvironmentValue {
         switch selectedDestination {
+        case let .workspaceEnvironment(_, environment):
+            return WorkspaceEnvironment.value(forTitle: environment)
         case let .environment(environment):
-            Self.environmentValue(from: environment)
-        default:
-            selectedItem?.environmentValue ?? .preset(.dev)
+            return Self.environmentValue(from: environment)
+        case let .workspace(id):
+            if let first = offeredEnvironments(inWorkspace: id).first(where: \.isEnabled) {
+                return first.environmentValue
+            }
+            return selectedItem?.environmentValue ?? .preset(.dev)
+        case .library, .tag:
+            return selectedItem?.environmentValue ?? .preset(.dev)
         }
     }
 
@@ -3018,8 +3072,17 @@ final class VaultViewModel {
     }
 
     private func normalizeSelection() {
-        if case let .workspace(id) = selectedDestination, workspace(for: id) == nil {
+        if let workspaceID = selectedDestination.workspaceID, workspace(for: workspaceID) == nil {
             selectedDestination = .library(.allItems)
+        }
+        // An environment can stop existing — its last item moved away and it was never
+        // declared. Fall back to the workspace rather than to the whole vault: that is the
+        // scope the owner was actually looking at.
+        if case let .workspaceEnvironment(id, environment) = selectedDestination {
+            let key = WorkspaceEnvironment.matchKey(for: environment)
+            if !environments(inWorkspace: id).contains(where: { $0.matchKey == key }) {
+                selectedDestination = .workspace(id)
+            }
         }
         syncSelectedItem()
     }
@@ -3213,6 +3276,11 @@ final class VaultViewModel {
             // vault while the header still named the workspace, so the title described a
             // scope the list was not showing.
             return item.workspace?.id == id && !item.isArchived
+        case let .workspaceEnvironment(id, environment):
+            return item.workspace?.id == id
+                && !item.isArchived
+                && WorkspaceEnvironment.matchKey(for: item.environmentValue.title)
+                    == WorkspaceEnvironment.matchKey(for: environment)
         case let .tag(tag):
             return item.tags.contains(tag) && !item.isArchived
         case let .environment(environment):

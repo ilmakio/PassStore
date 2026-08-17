@@ -253,51 +253,37 @@ private struct SidebarView: View {
                         get: { settings.sidebarWorkspacesExpanded },
                         set: { settings.sidebarWorkspacesExpanded = $0 }
                     )) {
-                        let wsSelectedID: String? = {
-                            if case .workspace(let id) = viewModel.selectedDestination, viewModel.selectedType == nil {
-                                return id.uuidString
-                            }
-                            return nil
-                        }()
+                        let rows = workspaceRows
                         ReorderableRows(
-                            items: viewModel.workspaces.map { workspace in
-                                let count = viewModel.itemCount(inWorkspace: workspace.id)
-                                return SidebarReorderItem(
-                                    id: workspace.id.uuidString,
-                                    title: workspace.name,
-                                    systemImage: workspace.icon,
-                                    tintColor: NSColor(hex: workspace.colorHex),
-                                    badge: count > 0 ? "\(count)" : nil,
-                                    accessibilityIdentifier: "sidebar-workspace-\(uiIdentifierSlug(workspace.name))"
-                                )
-                            },
-                            selectedID: wsSelectedID,
-                            onSelect: { idStr in
-                                guard let idStr, let id = UUID(uuidString: idStr) else { return }
-                                viewModel.selectDestination(.workspace(id))
+                            items: rows,
+                            selectedID: selectedWorkspaceRowID,
+                            onSelect: { rowID in
+                                guard let rowID, let route = WorkspaceRowID(rowID) else { return }
+                                switch route {
+                                case let .workspace(id):
+                                    viewModel.selectDestination(.workspace(id))
+                                case let .environment(id, title):
+                                    viewModel.selectDestination(.workspaceEnvironment(id, title))
+                                }
                                 viewModel.setSelectedType(nil)
                             },
                             onReorder: { ids in
-                                viewModel.reorderWorkspaces(newIDs: ids.compactMap(UUID.init(uuidString:)))
+                                viewModel.reorderWorkspaces(newIDs: ids.compactMap {
+                                    if case let .workspace(id) = WorkspaceRowID($0) { return id }
+                                    return nil
+                                })
                             },
-                            contextActions: { idStr in
-                                guard let id = UUID(uuidString: idStr) else { return [] }
-                                return [
-                                    SidebarRowAction(title: "Edit Workspace…") {
-                                        viewModel.activeSheet = .editWorkspace(id)
-                                    },
-                                    SidebarRowAction(title: "New Secret Item Here…") {
-                                        viewModel.selectDestination(.workspace(id))
-                                        viewModel.setSelectedType(nil)
-                                        viewModel.activeSheet = .newItemFlow
-                                    },
-                                    SidebarRowAction(title: "Delete Workspace…", isDestructive: true) {
-                                        viewModel.requestWorkspaceDeletion(id: id)
-                                    }
-                                ]
+                            contextActions: { rowID in workspaceRowActions(for: rowID) },
+                            onToggleExpansion: { rowID in
+                                guard case let .workspace(id) = WorkspaceRowID(rowID) else { return }
+                                if settings.expandedWorkspaceIDs.contains(id) {
+                                    settings.expandedWorkspaceIDs.remove(id)
+                                } else {
+                                    settings.expandedWorkspaceIDs.insert(id)
+                                }
                             }
                         )
-                    .sidebarSectionRows(count: viewModel.workspaces.count)
+                    .sidebarSectionRows(count: rows.count)
                     }
                 }
 
@@ -403,6 +389,127 @@ private struct SidebarView: View {
     }
 
 
+    // MARK: Workspace rows
+
+    /// Workspaces, each optionally followed by its environments.
+    ///
+    /// The list stays flat and the children are ordinary rows drawn one indent in, which is what
+    /// keeps drag-to-reorder working: only top-level rows can be picked up, and only they have
+    /// an order to change.
+    private var workspaceRows: [SidebarReorderItem] {
+        // Reserved for the whole section as soon as one workspace can expand, so names do not
+        // shift sideways as projects gain and lose environments.
+        let reservesDisclosureSpace = viewModel.workspaces.contains {
+            viewModel.hasEnvironmentStructure(inWorkspace: $0.id)
+        }
+        return viewModel.workspaces.flatMap { workspace -> [SidebarReorderItem] in
+            let count = viewModel.itemCount(inWorkspace: workspace.id)
+            let slug = uiIdentifierSlug(workspace.name)
+            let hasEnvironments = viewModel.hasEnvironmentStructure(inWorkspace: workspace.id)
+            let isExpanded = settings.expandedWorkspaceIDs.contains(workspace.id)
+            let parent = SidebarReorderItem(
+                id: WorkspaceRowID.workspace(workspace.id).raw,
+                title: workspace.name,
+                systemImage: workspace.icon,
+                tintColor: NSColor(hex: workspace.colorHex),
+                badge: count > 0 ? "\(count)" : nil,
+                accessibilityIdentifier: "sidebar-workspace-\(slug)",
+                isExpanded: hasEnvironments ? isExpanded : nil,
+                reservesDisclosureSpace: reservesDisclosureSpace
+            )
+            guard hasEnvironments, isExpanded else { return [parent] }
+
+            return [parent] + viewModel.offeredEnvironments(inWorkspace: workspace.id).map { environment in
+                let environmentCount = viewModel.itemCount(
+                    inWorkspace: workspace.id,
+                    environmentMatchKey: environment.matchKey
+                )
+                return SidebarReorderItem(
+                    id: WorkspaceRowID.environment(workspace.id, environment.title).raw,
+                    title: environment.title,
+                    // Dashed rather than merely paler, so a switched-off environment reads as
+                    // switched off without depending on colour.
+                    systemImage: environment.isEnabled ? "circle.fill" : "circle.dashed",
+                    tintColor: NSColor(hex: environment.colorHex),
+                    badge: environmentCount > 0 ? "\(environmentCount)" : nil,
+                    accessibilityIdentifier: "sidebar-workspace-\(slug)-environment-\(uiIdentifierSlug(environment.title))",
+                    indentationLevel: 1,
+                    isDraggable: false,
+                    isDimmed: !environment.isEnabled,
+                    reservesDisclosureSpace: reservesDisclosureSpace
+                )
+            }
+        }
+    }
+
+    private var selectedWorkspaceRowID: String? {
+        guard viewModel.selectedType == nil else { return nil }
+        switch viewModel.selectedDestination {
+        case let .workspace(id):
+            return WorkspaceRowID.workspace(id).raw
+        case let .workspaceEnvironment(id, title):
+            // Resolved through the workspace's own list so a destination that names the
+            // environment slightly differently still highlights its row.
+            let key = WorkspaceEnvironment.matchKey(for: title)
+            let resolved = viewModel.environments(inWorkspace: id).first { $0.matchKey == key }
+            return WorkspaceRowID.environment(id, resolved?.title ?? title).raw
+        case .library, .tag, .environment:
+            return nil
+        }
+    }
+
+    private func workspaceRowActions(for rowID: String) -> [SidebarRowAction] {
+        switch WorkspaceRowID(rowID) {
+        case let .workspace(id):
+            return [
+                SidebarRowAction(title: "Edit Workspace…") {
+                    viewModel.activeSheet = .editWorkspace(id)
+                },
+                SidebarRowAction(title: "New Secret Item Here…") {
+                    viewModel.selectDestination(.workspace(id))
+                    viewModel.setSelectedType(nil)
+                    viewModel.activeSheet = .newItemFlow
+                },
+                SidebarRowAction(title: "Delete Workspace…", isDestructive: true) {
+                    viewModel.requestWorkspaceDeletion(id: id)
+                }
+            ]
+        case let .environment(id, title):
+            let key = WorkspaceEnvironment.matchKey(for: title)
+            let environment = viewModel.environments(inWorkspace: id).first { $0.matchKey == key }
+            var actions = [
+                SidebarRowAction(title: "New Secret Item Here…") {
+                    viewModel.selectDestination(.workspaceEnvironment(id, title))
+                    viewModel.setSelectedType(nil)
+                    viewModel.activeSheet = .newItemFlow
+                }
+            ]
+            if let environment {
+                if environment.isDeclared {
+                    actions.append(
+                        SidebarRowAction(title: environment.isEnabled ? "Switch Off" : "Switch On") {
+                            viewModel.setEnvironmentEnabled(!environment.isEnabled, matchKey: key, inWorkspace: id)
+                        }
+                    )
+                } else {
+                    actions.append(
+                        SidebarRowAction(title: "Add to Project") {
+                            viewModel.declareEnvironment(environment, inWorkspace: id)
+                        }
+                    )
+                }
+            }
+            actions.append(
+                SidebarRowAction(title: "Edit Workspace…") {
+                    viewModel.activeSheet = .editWorkspace(id)
+                }
+            )
+            return actions
+        case nil:
+            return []
+        }
+    }
+
     @ViewBuilder
 
     private var sidebarFooter: some View {
@@ -427,6 +534,40 @@ private struct SidebarView: View {
         }
         .frame(maxWidth: .infinity)
         .background(.bar)
+    }
+}
+
+/// Identity of a row in the Workspaces section: the workspace itself, or one of its
+/// environments.
+///
+/// Encoded as a string because the underlying list is a flat AppKit table keyed by string ids.
+/// The workspace id occupies a fixed 36 characters, so an environment name is free to contain
+/// anything at all — including the separator.
+private enum WorkspaceRowID {
+    case workspace(UUID)
+    case environment(UUID, String)
+
+    private static let environmentMarker = "|env|"
+
+    init?(_ raw: String) {
+        guard raw.count >= 36, let id = UUID(uuidString: String(raw.prefix(36))) else { return nil }
+        let remainder = String(raw.dropFirst(36))
+        if remainder.isEmpty {
+            self = .workspace(id)
+        } else if remainder.hasPrefix(Self.environmentMarker) {
+            self = .environment(id, String(remainder.dropFirst(Self.environmentMarker.count)))
+        } else {
+            return nil
+        }
+    }
+
+    var raw: String {
+        switch self {
+        case let .workspace(id):
+            id.uuidString
+        case let .environment(id, title):
+            "\(id.uuidString)\(Self.environmentMarker)\(title)"
+        }
     }
 }
 
@@ -603,6 +744,10 @@ private struct ItemListView: View {
         VStack(alignment: .leading, spacing: VaultSpacing.s) {
             searchField
 
+            if let workspaceID = viewModel.environmentBarWorkspaceID {
+                EnvironmentTabBar(viewModel: viewModel, workspaceID: workspaceID)
+            }
+
             if viewModel.hasActiveFilters {
                 activeFilters
             }
@@ -737,6 +882,94 @@ private struct ItemListView: View {
 }
 
 // MARK: - Item Row
+
+/// The environment tabs shown above a workspace's item list.
+///
+/// The sidebar tree can already reach every environment; this exists because switching between
+/// them is the thing you do constantly once a workspace is a project, and a row of tabs is one
+/// click away wherever the sidebar happens to be scrolled — or hidden.
+private struct EnvironmentTabBar: View {
+    @Bindable var viewModel: VaultViewModel
+    let workspaceID: UUID
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: VaultSpacing.xs) {
+                tab(
+                    title: "All",
+                    count: viewModel.itemCount(inWorkspace: workspaceID),
+                    color: .secondary,
+                    isSelected: viewModel.selectedEnvironmentMatchKey == nil,
+                    isDimmed: false,
+                    identifier: "environment-tab-all"
+                ) {
+                    viewModel.selectEnvironment(matchKey: nil)
+                }
+
+                ForEach(viewModel.environmentBarItems) { environment in
+                    tab(
+                        title: environment.title,
+                        count: viewModel.itemCount(
+                            inWorkspace: workspaceID,
+                            environmentMatchKey: environment.matchKey
+                        ),
+                        color: Color(hex: environment.colorHex),
+                        isSelected: viewModel.selectedEnvironmentMatchKey == environment.matchKey,
+                        isDimmed: !environment.isEnabled,
+                        identifier: "environment-tab-\(uiIdentifierSlug(environment.title))"
+                    ) {
+                        viewModel.selectEnvironment(matchKey: environment.matchKey)
+                    }
+                }
+            }
+            .padding(.vertical, 1)
+        }
+        .scrollIndicators(.never)
+        .accessibilityIdentifier("environment-tab-bar")
+    }
+
+    private func tab(
+        title: String,
+        count: Int,
+        color: Color,
+        isSelected: Bool,
+        isDimmed: Bool,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: VaultSpacing.xs) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(isSelected ? .semibold : .medium)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.vaultBadge)
+                        .foregroundStyle(isSelected ? AnyShapeStyle(color) : AnyShapeStyle(.tertiary))
+                }
+            }
+            .foregroundStyle(isSelected ? AnyShapeStyle(color) : AnyShapeStyle(isDimmed ? .tertiary : .secondary))
+            .padding(.horizontal, VaultSpacing.s)
+            .padding(.vertical, VaultSpacing.xs)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isSelected ? color.opacity(0.14) : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        isSelected ? color.opacity(0.35) : Color.primary.opacity(0.08),
+                        // Dashed for a switched-off environment that is still shown because it
+                        // holds items, so "off" does not rely on colour alone.
+                        style: StrokeStyle(lineWidth: 0.6, dash: isDimmed ? [3, 2] : [])
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(isDimmed ? "\(title) — switched off, still holds items" : "Show \(title)")
+        .accessibilityIdentifier(identifier)
+    }
+}
 
 private struct ItemRow: View {
     @Bindable var viewModel: VaultViewModel
@@ -1963,13 +2196,30 @@ private struct ItemDetailHeader: View {
                 viewModel.setSelectedType(item.type)
             }
 
-            DetailHeaderLink(
-                title: item.environmentValue.title,
-                systemImage: "circle.hexagongrid",
-                hint: "Show everything in \(item.environmentValue.title)"
-            ) {
-                viewModel.selectDestination(.environment(item.environmentValue.title))
-                viewModel.setSelectedType(nil)
+            // Inside a workspace the environment link stays inside it: from a secret in
+            // "Acme API › Prod", the useful neighbours are the rest of that project's
+            // production secrets, not every production secret you own. The vault-wide list is
+            // still one click away in the sidebar's Environments section.
+            if let workspace = item.workspace {
+                DetailHeaderLink(
+                    title: item.environmentValue.title,
+                    systemImage: "circle.hexagongrid",
+                    hint: "Show \(workspace.name) › \(item.environmentValue.title)"
+                ) {
+                    viewModel.selectDestination(
+                        .workspaceEnvironment(workspace.id, item.environmentValue.title)
+                    )
+                    viewModel.setSelectedType(nil)
+                }
+            } else {
+                DetailHeaderLink(
+                    title: item.environmentValue.title,
+                    systemImage: "circle.hexagongrid",
+                    hint: "Show everything in \(item.environmentValue.title)"
+                ) {
+                    viewModel.selectDestination(.environment(item.environmentValue.title))
+                    viewModel.setSelectedType(nil)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
