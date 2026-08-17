@@ -55,6 +55,9 @@ enum FieldKind: String, CaseIterable, Codable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
+/// The declared order is the lifecycle order — local, dev, staging, prod — and code relies on
+/// it: `WorkspaceEnvironment.canonicalRank(of:)` orders a workspace's environments by it, so
+/// reordering these cases reorders the UI.
 enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
     case local
     case dev
@@ -71,6 +74,18 @@ enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
         case .staging: "Staging"
         case .prod: "Prod"
         case .custom: "Custom"
+        }
+    }
+
+    /// Colour used when an environment carries none of its own, so production reads as
+    /// production without anyone having to configure it.
+    var defaultColorHex: String {
+        switch self {
+        case .local: "#5AC8FA"
+        case .dev: "#4A7AFF"
+        case .staging: "#FF9F0A"
+        case .prod: "#FF453A"
+        case .custom: "#8E8E93"
         }
     }
 }

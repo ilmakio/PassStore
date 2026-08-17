@@ -607,7 +607,10 @@ final class VaultMemoryStore {
                 isArchived: $0.isArchived,
                 createdAt: $0.createdAt,
                 updatedAt: $0.updatedAt,
-                sortOrder: $0.sortOrder
+                sortOrder: $0.sortOrder,
+                // Nil rather than [] so a workspace that declares no environment encodes
+                // exactly as it did before 1.3.
+                environments: $0.environments.isEmpty ? nil : $0.environments
             )
         }
 
@@ -705,7 +708,10 @@ final class VaultMemoryStore {
                 isArchived: workspaceSnapshot.isArchived,
                 createdAt: workspaceSnapshot.createdAt,
                 updatedAt: workspaceSnapshot.updatedAt,
-                sortOrder: workspaceSnapshot.sortOrder
+                sortOrder: workspaceSnapshot.sortOrder,
+                // Snapshots also arrive from imported backups, which are untrusted input even
+                // after their password is accepted: clamp the list rather than store it as-is.
+                environments: WorkspaceEnvironment.sanitizedList(workspaceSnapshot.environments ?? [])
             )
             if workspaceMap[workspaceSnapshot.id] == nil {
                 workspaceMap[workspaceSnapshot.id] = workspace

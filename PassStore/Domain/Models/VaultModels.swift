@@ -13,6 +13,12 @@ final class WorkspaceEntity: Identifiable, Hashable {
     var updatedAt: Date
     var sortOrder: Int
     var items: [SecretItemEntity]
+    /// Environments this workspace declares, in the order they should be offered.
+    ///
+    /// Empty is the normal state for a workspace that is just a folder of secrets, and for
+    /// every workspace in a vault written before 1.3 — in both cases the environments actually
+    /// in use are derived from the items. See `WorkspaceEnvironment.resolvedList`.
+    var environments: [WorkspaceEnvironment]
 
     init(
         id: UUID = UUID(),
@@ -24,7 +30,8 @@ final class WorkspaceEntity: Identifiable, Hashable {
         createdAt: Date = .now,
         updatedAt: Date = .now,
         sortOrder: Int = 0,
-        items: [SecretItemEntity] = []
+        items: [SecretItemEntity] = [],
+        environments: [WorkspaceEnvironment] = []
     ) {
         self.id = id
         self.name = name
@@ -36,6 +43,7 @@ final class WorkspaceEntity: Identifiable, Hashable {
         self.updatedAt = updatedAt
         self.sortOrder = sortOrder
         self.items = items
+        self.environments = environments
     }
 
     static func == (lhs: WorkspaceEntity, rhs: WorkspaceEntity) -> Bool {
@@ -345,6 +353,9 @@ struct WorkspaceDraft {
     var icon: String
     var colorHex: String
     var notes: String
+    /// Declared environments, carried through the editor. Renaming one here moves the items
+    /// that were in it — see `VaultViewModel.saveWorkspace(_:)`.
+    var environments: [WorkspaceEnvironment] = []
 
     static let empty = WorkspaceDraft(name: "", icon: "shippingbox", colorHex: "#4A7AFF", notes: "")
 }
@@ -923,8 +934,23 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
     let createdAt: Date
     let updatedAt: Date
     let sortOrder: Int
+    /// Added in 1.3.0. Nil — not an empty array — when the workspace declares nothing, so the
+    /// key is absent from the encoded snapshot and a vault that uses no environments encodes
+    /// byte-for-byte as it did in 1.2. Backup identity digests depend on that.
+    let environments: [WorkspaceEnvironment]?
 
-    init(id: UUID, name: String, icon: String, colorHex: String, notes: String, isArchived: Bool, createdAt: Date, updatedAt: Date, sortOrder: Int = 0) {
+    init(
+        id: UUID,
+        name: String,
+        icon: String,
+        colorHex: String,
+        notes: String,
+        isArchived: Bool,
+        createdAt: Date,
+        updatedAt: Date,
+        sortOrder: Int = 0,
+        environments: [WorkspaceEnvironment]? = nil
+    ) {
         self.id = id
         self.name = name
         self.icon = icon
@@ -934,6 +960,7 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.sortOrder = sortOrder
+        self.environments = environments
     }
 
     init(from decoder: Decoder) throws {
@@ -947,6 +974,7 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        environments = try container.decodeIfPresent([WorkspaceEnvironment].self, forKey: .environments)
     }
 }
 

@@ -36,6 +36,10 @@ protocol EncryptedVaultStore: AnyObject {
 protocol WorkspaceRepositoryProtocol: AnyObject {
     func fetchAll(includeArchived: Bool) throws -> [WorkspaceEntity]
     @discardableResult func saveWorkspace(_ draft: WorkspaceDraft) throws -> WorkspaceEntity
+    @discardableResult func setEnvironments(
+        _ environments: [WorkspaceEnvironment],
+        onWorkspaceWithID id: UUID
+    ) throws -> [WorkspaceEnvironment]
     func reorderWorkspaces(_ ids: [UUID]) throws
     func deleteWorkspace(_ workspace: WorkspaceEntity) throws
 }

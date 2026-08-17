@@ -175,6 +175,145 @@ final class VaultViewModel {
         items.filter { $0.workspace?.id == id && !$0.isArchived }.count
     }
 
+    // MARK: - Workspace environments
+
+    /// One pass over the vault, keyed by workspace and then by environment.
+    ///
+    /// The sidebar asks for a badge per environment per workspace on every render; filtering the
+    /// whole item list once per badge turned that into a quadratic walk of the vault.
+    @ObservationIgnored private var environmentCountsCache: (generation: Int, value: [UUID: [String: Int]])?
+
+    private var environmentCounts: [UUID: [String: Int]] {
+        if let cached = environmentCountsCache, cached.generation == vaultGeneration {
+            return cached.value
+        }
+        var counts: [UUID: [String: Int]] = [:]
+        for item in items where !item.isArchived {
+            guard let workspaceID = item.workspace?.id else { continue }
+            let key = WorkspaceEnvironment.matchKey(for: item.environmentValue.title)
+            counts[workspaceID, default: [:]][key, default: 0] += 1
+        }
+        environmentCountsCache = (vaultGeneration, counts)
+        return counts
+    }
+
+    /// Environment titles the workspace's items actually use.
+    func presentEnvironmentTitles(inWorkspace id: UUID) -> [String] {
+        items
+            .filter { $0.workspace?.id == id && !$0.isArchived }
+            .map { $0.environmentValue.title }
+    }
+
+    /// Every environment of a workspace: what it declares, plus what its items already use.
+    func environments(inWorkspace id: UUID) -> [ResolvedWorkspaceEnvironment] {
+        guard let workspace = workspace(for: id) else { return [] }
+        return WorkspaceEnvironment.resolvedList(
+            declared: workspace.environments,
+            presentTitles: presentEnvironmentTitles(inWorkspace: id)
+        )
+    }
+
+    /// The environments the sidebar and the chip bar offer.
+    ///
+    /// A switched-off environment that still holds items stays in the list. Hiding it would hide
+    /// working credentials behind a layout preference, which is not a trade a password manager
+    /// gets to make; it is shown as switched off instead.
+    func offeredEnvironments(inWorkspace id: UUID) -> [ResolvedWorkspaceEnvironment] {
+        environments(inWorkspace: id).filter {
+            $0.isEnabled || itemCount(inWorkspace: id, environmentMatchKey: $0.matchKey) > 0
+        }
+    }
+
+    func itemCount(inWorkspace id: UUID, environmentMatchKey key: String) -> Int {
+        environmentCounts[id]?[key] ?? 0
+    }
+
+    func itemCount(inWorkspace id: UUID, environmentTitle title: String) -> Int {
+        itemCount(inWorkspace: id, environmentMatchKey: WorkspaceEnvironment.matchKey(for: title))
+    }
+
+    /// Whether this workspace has enough of an environment structure to be worth expanding.
+    ///
+    /// One environment is not a structure: a workspace whose secrets all live in the same place
+    /// keeps the plain row it had in 1.2 instead of growing a disclosure triangle that reveals a
+    /// single child.
+    func hasEnvironmentStructure(inWorkspace id: UUID) -> Bool {
+        guard let workspace = workspace(for: id) else { return false }
+        if !workspace.environments.isEmpty { return true }
+        return environments(inWorkspace: id).count > 1
+    }
+
+    /// Adopts an environment the items already use into the workspace's declared list.
+    func declareEnvironment(_ environment: ResolvedWorkspaceEnvironment, inWorkspace id: UUID) {
+        guard let workspace = workspace(for: id) else { return }
+        guard !workspace.environments.contains(where: { $0.matchKey == environment.matchKey }) else { return }
+        var updated = workspace.environments
+        updated.append(
+            WorkspaceEnvironment.declaration(
+                for: environment.environmentValue,
+                sortOrder: updated.count
+            )
+        )
+        applyEnvironments(updated, inWorkspace: id)
+    }
+
+    /// Adopts every environment the items use, for a workspace that has declared none.
+    func declareEnvironmentsInUse(inWorkspace id: UUID) {
+        guard let workspace = workspace(for: id) else { return }
+        var updated = workspace.environments
+        for environment in environments(inWorkspace: id) where !environment.isDeclared {
+            updated.append(
+                WorkspaceEnvironment.declaration(
+                    for: environment.environmentValue,
+                    sortOrder: updated.count
+                )
+            )
+        }
+        guard updated.count != workspace.environments.count else { return }
+        applyEnvironments(updated, inWorkspace: id)
+    }
+
+    func setEnvironmentEnabled(_ isEnabled: Bool, matchKey: String, inWorkspace id: UUID) {
+        guard let workspace = workspace(for: id) else { return }
+        var updated = workspace.environments
+        guard let index = updated.firstIndex(where: { $0.matchKey == matchKey }) else { return }
+        updated[index].isEnabled = isEnabled
+        applyEnvironments(updated, inWorkspace: id)
+    }
+
+    /// Reorders the declared environments to the given match keys. Keys that are not declared
+    /// are ignored, so dropping an in-use-but-undeclared row on the list cannot reorder nothing.
+    func reorderEnvironments(matchKeys: [String], inWorkspace id: UUID) {
+        guard let workspace = workspace(for: id) else { return }
+        var remaining = workspace.environments
+        var reordered: [WorkspaceEnvironment] = []
+        for key in matchKeys {
+            guard let index = remaining.firstIndex(where: { $0.matchKey == key }) else { continue }
+            reordered.append(remaining.remove(at: index))
+        }
+        reordered.append(contentsOf: remaining)
+        applyEnvironments(reordered, inWorkspace: id)
+    }
+
+    /// Removes a declaration. The items stay exactly where they are: the environment simply
+    /// stops being one the project claims, and reappears as in-use-but-undeclared if it still
+    /// holds anything.
+    func undeclareEnvironment(matchKey: String, inWorkspace id: UUID) {
+        guard let workspace = workspace(for: id) else { return }
+        let updated = workspace.environments.filter { $0.matchKey != matchKey }
+        guard updated.count != workspace.environments.count else { return }
+        applyEnvironments(updated, inWorkspace: id)
+    }
+
+    private func applyEnvironments(_ environments: [WorkspaceEnvironment], inWorkspace id: UUID) {
+        do {
+            try container.workspaceRepository.setEnvironments(environments, onWorkspaceWithID: id)
+            reload()
+        } catch {
+            handleMutationFailure(error)
+        }
+    }
+
     func requestSearchFocus() {
         searchFocusRequests += 1
     }
@@ -748,12 +887,60 @@ final class VaultViewModel {
     @discardableResult
     func createWorkspace(_ draft: WorkspaceDraft) -> WorkspaceEntity? {
         do {
-            let workspace = try container.workspaceRepository.saveWorkspace(draft)
+            // Renaming a declared environment has to take its items with it, or the old name
+            // would survive as an undeclared environment and the list would appear to have
+            // split in two. Both halves go in one transaction: a failure rolls the rename back
+            // rather than leaving the items behind.
+            let renames = environmentRenames(in: draft)
+            let workspace = try container.memoryStore.performTransaction { () -> WorkspaceEntity in
+                let saved = try container.workspaceRepository.saveWorkspace(draft)
+                if !renames.isEmpty {
+                    try migrateItems(inWorkspaceWithID: saved.id, applying: renames)
+                }
+                return saved
+            }
             reload()
             return workspace
         } catch {
             handleMutationFailure(error)
             return nil
+        }
+    }
+
+    /// Declarations the draft keeps by id but renames, as the environment values to move from
+    /// and to. Matched on the declaration's id: that is the only thing that survives a rename.
+    private func environmentRenames(in draft: WorkspaceDraft) -> [(from: EnvironmentValue, to: EnvironmentValue)] {
+        guard let id = draft.id, let workspace = workspace(for: id) else { return [] }
+        let updated = WorkspaceEnvironment.sanitizedList(draft.environments)
+        let existingByID = Dictionary(
+            workspace.environments.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return updated.compactMap { environment in
+            guard let previous = existingByID[environment.id],
+                  previous.matchKey != environment.matchKey else { return nil }
+            return (from: previous.environmentValue, to: environment.environmentValue)
+        }
+    }
+
+    /// Moves every item of one workspace from one environment to another, through the normal
+    /// item save path so each one gets its own audit entry.
+    private func migrateItems(
+        inWorkspaceWithID id: UUID,
+        applying renames: [(from: EnvironmentValue, to: EnvironmentValue)]
+    ) throws {
+        for rename in renames {
+            let sourceKey = WorkspaceEnvironment.matchKey(for: rename.from.title)
+            let targets = items.filter {
+                $0.workspace?.id == id
+                    && WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) == sourceKey
+            }
+            for item in targets {
+                var itemDraft = makeDraft(from: item)
+                itemDraft.id = item.id
+                itemDraft.environment = rename.to
+                try container.itemRepository.saveItem(itemDraft)
+            }
         }
     }
 
@@ -2133,7 +2320,8 @@ final class VaultViewModel {
             isArchived: workspace.isArchived,
             createdAt: workspace.createdAt,
             updatedAt: workspace.updatedAt,
-            sortOrder: workspace.sortOrder
+            sortOrder: workspace.sortOrder,
+            environments: workspace.environments
         )
     }
 
@@ -2141,6 +2329,11 @@ final class VaultViewModel {
         lhs.name == rhs.name && isSameWorkspaceBody(lhs, rhs)
     }
 
+    /// Declared environments are deliberately not part of a workspace's identity.
+    ///
+    /// A merge adds what the backup has and the vault does not, and overwrites nothing. If the
+    /// two sides describe the same workspace, the local declarations are the ones in use and the
+    /// backup's list is not a reason to import a second copy of the workspace.
     private static func isSameWorkspaceBody(_ lhs: WorkspaceSnapshot, _ rhs: WorkspaceSnapshot) -> Bool {
         lhs.icon == rhs.icon
             && lhs.colorHex == rhs.colorHex
@@ -2718,7 +2911,14 @@ final class VaultViewModel {
 
     func draftForWorkspace(_ workspace: WorkspaceEntity?) -> WorkspaceDraft {
         guard let workspace else { return .empty }
-        return WorkspaceDraft(id: workspace.id, name: workspace.name, icon: workspace.icon, colorHex: workspace.colorHex, notes: workspace.notes)
+        return WorkspaceDraft(
+            id: workspace.id,
+            name: workspace.name,
+            icon: workspace.icon,
+            colorHex: workspace.colorHex,
+            notes: workspace.notes,
+            environments: workspace.environments
+        )
     }
 
     func draftForTemplate(_ template: SecretFieldTemplateEntity?) -> TemplateDraft {

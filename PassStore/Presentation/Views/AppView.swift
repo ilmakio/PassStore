@@ -111,6 +111,7 @@ struct AppView: View {
                 WorkspaceEditorSheet(
                     title: "Edit Workspace",
                     draft: viewModel.draftForWorkspace(viewModel.workspace(for: workspaceID)),
+                    environmentTitlesInUse: viewModel.presentEnvironmentTitles(inWorkspace: workspaceID),
                     onSave: viewModel.saveWorkspace
                 )
             case .importEncryptedExport:

@@ -891,11 +891,20 @@ struct WorkspaceEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let onSave: (WorkspaceDraft) -> Void
+    /// One entry per item in the workspace, so the editor can both list the environments that
+    /// are already in use and say how much is in each of them. Empty for a new workspace.
+    let environmentTitlesInUse: [String]
     @State private var draft: WorkspaceDraft
 
-    init(title: String, draft: WorkspaceDraft, onSave: @escaping (WorkspaceDraft) -> Void) {
+    init(
+        title: String,
+        draft: WorkspaceDraft,
+        environmentTitlesInUse: [String] = [],
+        onSave: @escaping (WorkspaceDraft) -> Void
+    ) {
         self.title = title
         self.onSave = onSave
+        self.environmentTitlesInUse = environmentTitlesInUse
         _draft = State(initialValue: draft)
     }
 
@@ -916,7 +925,10 @@ struct WorkspaceEditorSheet: View {
             }
             .buttonStyle(VaultButtonStyle(.primary))
             .keyboardShortcut(.defaultAction)
-            .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(
+                draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || environmentProblem != nil
+            )
             .accessibilityIdentifier("workspace-save")
         } content: {
             legacyBody
@@ -968,6 +980,8 @@ struct WorkspaceEditorSheet: View {
                             )
                         }
                     }
+
+                    environmentsSection
 
                     VaultSection("Icon", systemImage: "app.badge") {
                         LazyVGrid(
@@ -1022,6 +1036,226 @@ struct WorkspaceEditorSheet: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - Environments
+
+    /// Declaring environments is what turns a workspace into a project with tabs. It stays
+    /// optional on purpose: a workspace that declares none behaves exactly as it did in 1.2.
+    private var environmentsSection: some View {
+        VaultSection("Environments", systemImage: "circle.hexagongrid") {
+            VStack(alignment: .leading, spacing: VaultSpacing.s) {
+                if draft.environments.isEmpty {
+                    VaultNote(
+                        text: "Declare the environments this project has — Local, Staging, Production — and its secrets get one tab each. Leave this empty to keep the workspace a plain folder."
+                    )
+                }
+
+                ForEach(Array(draft.environments.enumerated()), id: \.element.id) { index, environment in
+                    if index > 0 {
+                        Divider().opacity(0.4)
+                    }
+                    environmentRow(at: index, environment: environment)
+                }
+
+                if let environmentProblem {
+                    VaultNote(text: environmentProblem, tone: .warning)
+                }
+
+                if draft.environments.contains(where: { !$0.isEnabled }) {
+                    VaultNote(
+                        text: "A switched-off environment is not offered in the sidebar. Anything already in it stays in your vault, keeps working, and still shows up in All Items."
+                    )
+                }
+
+                if !undeclaredEnvironments.isEmpty {
+                    Divider().opacity(0.4)
+                    VaultNote(text: undeclaredSummary)
+                    Button(undeclaredEnvironments.count == 1 ? "Add It to the Project" : "Add Them to the Project") {
+                        adoptEnvironmentsInUse()
+                    }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("workspace-adopt-environments")
+                }
+
+                addEnvironmentMenu
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func environmentRow(at index: Int, environment: WorkspaceEnvironment) -> some View {
+        let count = itemCount(for: environment)
+        HStack(spacing: VaultSpacing.s) {
+            Circle()
+                .fill(Color(hex: environment.effectiveColorHex))
+                .frame(width: 10, height: 10)
+                .opacity(environment.isEnabled ? 1 : 0.3)
+                .accessibilityHidden(true)
+
+            if environment.kind == .custom {
+                TextField("", text: $draft.environments[index].name, prompt: Text("e.g. QA"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 180)
+                    .accessibilityIdentifier("workspace-environment-name-\(index)")
+            } else {
+                Text(environment.name)
+                    .font(.vaultRowTitle)
+            }
+
+            if count > 0 {
+                Text("\(count) \(count == 1 ? "item" : "items")")
+                    .font(.vaultBadge)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !environment.isEnabled {
+                VaultChip(title: "Off")
+            }
+
+            Spacer(minLength: 0)
+
+            Menu {
+                environmentRowMenu(at: index, environment: environment, itemCount: count)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityIdentifier("workspace-environment-menu-\(index)")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func environmentRowMenu(at index: Int, environment: WorkspaceEnvironment, itemCount: Int) -> some View {
+        Button(environment.isEnabled ? "Switch Off" : "Switch On") {
+            draft.environments[index].isEnabled.toggle()
+        }
+
+        if environment.kind != .custom {
+            // Presets are named by their kind, so renaming one means making it a custom
+            // environment. Saving then moves the items that were in it.
+            Button("Use a Custom Name…") {
+                draft.environments[index].kind = .custom
+            }
+        }
+
+        Menu("Color") {
+            Button("Default for \(environment.kind == .custom ? "Custom" : environment.kind.title)") {
+                draft.environments[index].colorHex = nil
+            }
+            ForEach(WorkspaceStylePresets.colors) { preset in
+                Button(preset.name) { draft.environments[index].colorHex = preset.hex }
+            }
+        }
+
+        Divider()
+
+        Button("Move Up") { moveEnvironment(from: index, to: index - 1) }
+            .disabled(index == 0)
+        Button("Move Down") { moveEnvironment(from: index, to: index + 1) }
+            .disabled(index >= draft.environments.count - 1)
+
+        Divider()
+
+        Button(itemCount > 0 ? "Remove from Project" : "Remove", role: .destructive) {
+            draft.environments.remove(at: index)
+            renumberEnvironments()
+        }
+    }
+
+    private var addEnvironmentMenu: some View {
+        Menu {
+            ForEach(EnvironmentKind.allCases.filter { $0 != .custom }) { kind in
+                Button(kind.title) { addEnvironment(kind: kind) }
+                    .disabled(draft.environments.contains {
+                        $0.matchKey == WorkspaceEnvironment.matchKey(for: kind.title)
+                    })
+            }
+            Divider()
+            Button("Custom…") { addEnvironment(kind: .custom) }
+        } label: {
+            Label("Add Environment", systemImage: "plus")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(draft.environments.count >= WorkspaceEnvironment.maximumPerWorkspace)
+        .accessibilityIdentifier("workspace-add-environment")
+    }
+
+    /// Environments the items already use that the project has not claimed. Shown rather than
+    /// hidden: they are where the secrets actually are.
+    private var undeclaredEnvironments: [ResolvedWorkspaceEnvironment] {
+        WorkspaceEnvironment
+            .resolvedList(declared: draft.environments, presentTitles: environmentTitlesInUse)
+            .filter { !$0.isDeclared }
+    }
+
+    private var undeclaredSummary: String {
+        let names = undeclaredEnvironments.map(\.title)
+        guard names.count > 1 else {
+            return "\(names[0]) is already in use here but is not part of the project yet."
+        }
+        return "Already in use here but not part of the project yet: \(names.joined(separator: ", "))."
+    }
+
+    /// Blocks a save that would silently lose a declaration, rather than letting the vault's own
+    /// de-duplication drop it without saying so.
+    private var environmentProblem: String? {
+        let named = draft.environments.filter {
+            $0.kind != .custom || !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if named.count != draft.environments.count {
+            return "Give every environment a name, or remove the empty one."
+        }
+        let keys = draft.environments.map(\.matchKey)
+        if Set(keys).count != keys.count {
+            return "Two environments have the same name."
+        }
+        return nil
+    }
+
+    private func itemCount(for environment: WorkspaceEnvironment) -> Int {
+        let key = environment.matchKey
+        return environmentTitlesInUse.count { WorkspaceEnvironment.matchKey(for: $0) == key }
+    }
+
+    private func addEnvironment(kind: EnvironmentKind) {
+        draft.environments.append(
+            WorkspaceEnvironment(
+                name: kind == .custom ? "" : kind.title,
+                kind: kind,
+                sortOrder: draft.environments.count
+            )
+        )
+    }
+
+    private func adoptEnvironmentsInUse() {
+        for environment in undeclaredEnvironments {
+            draft.environments.append(
+                WorkspaceEnvironment.declaration(
+                    for: environment.environmentValue,
+                    sortOrder: draft.environments.count
+                )
+            )
+        }
+    }
+
+    private func moveEnvironment(from source: Int, to destination: Int) {
+        guard draft.environments.indices.contains(source),
+              draft.environments.indices.contains(destination) else { return }
+        let environment = draft.environments.remove(at: source)
+        draft.environments.insert(environment, at: destination)
+        renumberEnvironments()
+    }
+
+    private func renumberEnvironments() {
+        for index in draft.environments.indices {
+            draft.environments[index].sortOrder = index
         }
     }
 }
