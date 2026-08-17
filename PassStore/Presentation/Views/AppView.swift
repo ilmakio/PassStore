@@ -1415,21 +1415,20 @@ private struct ItemDetailView: View {
     private func plainFieldsContent(for item: SecretItemEntity) -> some View {
         VStack(alignment: .leading, spacing: VaultSpacing.l) {
             ForEach(viewModel.detailSelectedFields) { field in
-                DetailFieldRow(
+                FieldRow(
                     field: field,
                     canRevealSecrets: viewModel.container.sessionManager.lockState == .unlocked,
                     isCopied: copiedFieldID == field.id,
-                    note: nil,
-                    drift: viewModel.envFieldDrift(for: item, key: field.key),
-                    linkedFileName: item.linkedFile?.fileName,
                     onCopy: {
                         viewModel.copyField(field)
                         flashCopiedField(field.id)
                     },
                     onOpenURL: { viewModel.openFieldURL(field) },
                     onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) },
-                    onPull: { Task { await viewModel.updateFieldFromLinkedFile(key: field.key, in: item) } },
-                    onPush: { Task { await viewModel.writeFieldToLinkedFile(key: field.key, from: item) } }
+                    drift: viewModel.envFieldDrift(for: item, key: field.key),
+                    linkedFileName: item.linkedFile?.fileName,
+                    onPullField: { Task { await viewModel.updateFieldFromLinkedFile(key: field.key, in: item) } },
+                    onPushField: { Task { await viewModel.writeFieldToLinkedFile(key: field.key, from: item) } }
                 )
 
                 if field.id != viewModel.detailSelectedFields.last?.id {
@@ -1483,15 +1482,20 @@ private struct EnvOutlinedFields: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+        VStack(alignment: .leading, spacing: VaultSpacing.xxl) {
             ForEach(visibleSections) { section in
                 sectionView(section)
             }
 
             if !unplacedFields.isEmpty {
-                VStack(alignment: .leading, spacing: VaultSpacing.l) {
+                VStack(alignment: .leading, spacing: VaultSpacing.m) {
+                    // Nothing in the file introduces these, so they are set off from what does.
+                    if !visibleSections.isEmpty {
+                        Divider()
+                    }
                     ForEach(unplacedFields) { field in
                         row(field)
+                            .padding(.leading, Self.gutterWidth + VaultSpacing.m)
                     }
                 }
             }
@@ -1515,102 +1519,90 @@ private struct EnvOutlinedFields: View {
 
     private func sectionView(_ section: EnvDocumentLayout.Outline.Section) -> some View {
         VStack(alignment: .leading, spacing: VaultSpacing.l) {
-            if !section.title.isEmpty {
-                Text(section.title)
-                    .font(.vaultSectionTitle)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+            if !section.title.isEmpty || !section.detail.isEmpty {
+                VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                    if !section.title.isEmpty {
+                        Text(section.title)
+                            .font(.vaultSectionTitle)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if !section.detail.isEmpty {
+                        commentText(section.detail)
+                    }
+                }
             }
 
-            if !section.detail.isEmpty {
-                commentText(section.detail)
-            }
-
-            ForEach(section.groups) { group in
+            // A rule between runs of variables. Where one comment block ends and the next begins
+            // cannot be left to whichever gap happens to look bigger.
+            ForEach(Array(section.groups.enumerated()), id: \.element.id) { index, group in
+                if index > 0 {
+                    Divider()
+                        .padding(.leading, Self.gutterWidth + VaultSpacing.m)
+                }
                 groupView(group)
             }
         }
     }
 
+    /// A group is its comment block and the variables that block introduces.
+    ///
+    /// They are bracketed by a rule down the left rather than only by spacing: in a file with a
+    /// note above every variable, "is this comment about the entry above or the one below?" is the
+    /// whole question, and proximity alone leaves it to be measured by eye.
     private func groupView(_ group: EnvDocumentLayout.Outline.Group) -> some View {
         let byKey = fieldsByKey
-        return VStack(alignment: .leading, spacing: VaultSpacing.s) {
-            if !group.comments.isEmpty {
-                commentText(group.comments)
-            }
+        return HStack(alignment: .top, spacing: VaultSpacing.m) {
+            Capsule(style: .continuous)
+                // Always laid out, so every variable in the section keeps the same left edge
+                // whether or not its group carries a comment.
+                .fill(group.comments.isEmpty ? Color.clear : VaultChrome.hairlineStrong)
+                .frame(width: Self.gutterWidth)
+                .accessibilityHidden(true)
 
-            ForEach(group.keys.compactMap { byKey[$0] }) { field in
-                row(field)
+            VStack(alignment: .leading, spacing: VaultSpacing.m) {
+                if !group.comments.isEmpty {
+                    commentText(group.comments)
+                }
+
+                ForEach(group.keys.compactMap { byKey[$0] }) { field in
+                    row(field)
+                }
             }
         }
     }
 
+    private static let gutterWidth: CGFloat = 2
+
+    /// The file's own words, set apart from the app's: monospaced like the values, because that is
+    /// what it is — text out of a `.env`, not a caption PassStore wrote.
     private func commentText(_ lines: [String]) -> some View {
         Text(lines.joined(separator: "\n"))
-            .font(.vaultFootnote)
+            .font(.vaultValueSmall)
             .foregroundStyle(.secondary)
             .textSelection(.enabled)
             .multilineTextAlignment(.leading)
+            .lineSpacing(2)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func row(_ field: FieldResolvedValue) -> some View {
-        DetailFieldRow(
+        FieldRow(
             field: field,
             canRevealSecrets: canRevealSecrets,
             isCopied: copiedFieldID == field.id,
-            note: outline.trailingComments[field.key],
-            drift: drift(field.key),
-            linkedFileName: linkedFileName,
             onCopy: { onCopy(field) },
             onOpenURL: { onOpenURL(field) },
             onShowHistory: onShowHistory,
-            onPull: { onPullField(field.key) },
-            onPush: { onPushField(field.key) }
+            note: outline.trailingComments[field.key],
+            drift: drift(field.key),
+            linkedFileName: linkedFileName,
+            onPullField: { onPullField(field.key) },
+            onPushField: { onPushField(field.key) }
         )
-    }
-}
-
-// MARK: - Detail field row
-
-/// One field in the detail pane, with whatever the linked file has to say about it.
-private struct DetailFieldRow: View {
-    let field: FieldResolvedValue
-    let canRevealSecrets: Bool
-    let isCopied: Bool
-    let note: String?
-    let drift: EnvFieldDrift?
-    let linkedFileName: String?
-    let onCopy: () -> Void
-    let onOpenURL: () -> Void
-    let onShowHistory: () -> Void
-    let onPull: () -> Void
-    let onPush: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: VaultSpacing.s) {
-            if let drift, let linkedFileName {
-                EnvFieldDriftBadge(
-                    key: field.key,
-                    drift: drift,
-                    fileName: linkedFileName,
-                    onPull: onPull,
-                    onPush: onPush
-                )
-            }
-
-            FieldRow(
-                field: field,
-                canRevealSecrets: canRevealSecrets,
-                isCopied: isCopied,
-                onCopy: onCopy,
-                onOpenURL: onOpenURL,
-                onShowHistory: onShowHistory,
-                note: note
-            )
-        }
     }
 }
 
@@ -1626,24 +1618,39 @@ private struct EnvFieldDriftBadge: View {
     let onPull: () -> Void
     let onPush: () -> Void
 
+    /// Built out rather than composed from `VaultNote` so the two choices line up under the
+    /// sentence they answer instead of under its icon.
     var body: some View {
-        VStack(alignment: .leading, spacing: VaultSpacing.xs) {
-            VaultNote(text: message, tone: .warning, systemImage: "arrow.triangle.2.circlepath")
+        HStack(alignment: .top, spacing: VaultSpacing.s) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.vaultFootnote)
+                .foregroundStyle(VaultNoteTone.warning.tint)
+                .accessibilityHidden(true)
 
-            HStack(spacing: VaultSpacing.m) {
-                if drift.canPull {
-                    Button(pullTitle, action: onPull)
-                        .accessibilityIdentifier("field-drift-pull-\(key)")
+            VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                Text(message)
+                    .font(.vaultFootnote)
+                    .foregroundStyle(VaultNoteTone.warning.tint)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: VaultSpacing.m) {
+                    if drift.canPull {
+                        Button(pullTitle, action: onPull)
+                            .accessibilityIdentifier("field-drift-pull-\(key)")
+                    }
+                    if drift.canPush {
+                        Button(pushTitle, action: onPush)
+                            .accessibilityIdentifier("field-drift-push-\(key)")
+                    }
+                    Spacer(minLength: 0)
                 }
-                if drift.canPush {
-                    Button(pushTitle, action: onPush)
-                        .accessibilityIdentifier("field-drift-push-\(key)")
-                }
-                Spacer(minLength: 0)
+                .buttonStyle(.link)
+                .font(.vaultFootnote)
             }
-            .buttonStyle(.link)
-            .font(.vaultFootnote)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("field-drift-\(key)")
     }
 
@@ -1892,6 +1899,11 @@ private struct FieldRow: View {
     var onShowHistory: (() -> Void)?
     /// The `# comment` written after this variable's value in the file it came from.
     var note: String?
+    /// How this variable differs from the linked file, if it does.
+    var drift: EnvFieldDrift?
+    var linkedFileName: String?
+    var onPullField: (() -> Void)?
+    var onPushField: (() -> Void)?
 
     /// Pinned reveal: stays shown after the pointer leaves.
     ///
@@ -1922,6 +1934,19 @@ private struct FieldRow: View {
             header
 
             valueBox
+
+            // Directly under the value it is about: this is a statement about that one value and
+            // what to do with it, not a banner over the whole entry.
+            if let drift, let linkedFileName, let onPullField, let onPushField {
+                EnvFieldDriftBadge(
+                    key: field.key,
+                    drift: drift,
+                    fileName: linkedFileName,
+                    onPull: onPullField,
+                    onPush: onPushField
+                )
+                .padding(.top, VaultSpacing.hair)
+            }
 
             if let note, !note.isEmpty {
                 Text(note)
