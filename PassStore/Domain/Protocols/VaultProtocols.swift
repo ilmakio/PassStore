@@ -40,6 +40,7 @@ protocol WorkspaceRepositoryProtocol: AnyObject {
         _ environments: [WorkspaceEnvironment],
         onWorkspaceWithID id: UUID
     ) throws -> [WorkspaceEnvironment]
+    func setLinkedFolder(_ folder: LinkedFolderReference?, onWorkspaceWithID id: UUID) throws
     func reorderWorkspaces(_ ids: [UUID]) throws
     func deleteWorkspace(_ workspace: WorkspaceEntity) throws
 }

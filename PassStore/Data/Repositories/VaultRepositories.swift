@@ -52,6 +52,21 @@ final class WorkspaceRepository: WorkspaceRepositoryProtocol {
         return workspace
     }
 
+    /// Links, re-links or unlinks the folder this workspace belongs to.
+    ///
+    /// Separate from `saveWorkspace` because linking a folder is its own decision — and because
+    /// unlinking has to be a single, obvious gesture: it is how the owner takes the folder
+    /// permission back.
+    func setLinkedFolder(_ folder: LinkedFolderReference?, onWorkspaceWithID id: UUID) throws {
+        try store.performTransaction {
+            try store.requireUnlocked()
+            guard let workspace = store.workspaces.first(where: { $0.id == id }) else { return }
+            workspace.linkedFolder = folder
+            workspace.updatedAt = .now
+            try store.persist()
+        }
+    }
+
     /// Replaces the declared environments without touching anything else on the workspace.
     ///
     /// The editor round-trips the whole draft, but adopting an environment, reordering the list

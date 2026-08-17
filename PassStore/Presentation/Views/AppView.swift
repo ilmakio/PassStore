@@ -128,6 +128,8 @@ struct AppView: View {
                 BulkEditSheet(viewModel: viewModel)
             case let .itemHistory(itemID):
                 ItemHistorySheet(viewModel: viewModel, itemID: itemID)
+            case let .envDiscovery(workspaceID):
+                EnvDiscoverySheet(viewModel: viewModel, workspaceID: workspaceID)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
@@ -1370,6 +1372,7 @@ private struct WorkspaceOverviewView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                    projectFolderSection
                     environmentsSection
                     linkedFilesSection
                     actionsSection
@@ -1480,6 +1483,64 @@ private struct WorkspaceOverviewView: View {
                     .foregroundStyle(accent.vaultContrastingGlyph)
             )
             .accessibilityHidden(true)
+    }
+
+    // MARK: Project folder
+
+    @ViewBuilder
+    private var projectFolderSection: some View {
+        VaultSection("Project Folder", systemImage: "folder", tint: accent) {
+            if let folder = workspace.linkedFolder {
+                VStack(alignment: .leading, spacing: VaultSpacing.s) {
+                    HStack(spacing: VaultSpacing.s) {
+                        Image(systemName: "folder.fill")
+                            .foregroundStyle(accent)
+                            .accessibilityHidden(true)
+                        Text(folder.abbreviatedPath)
+                            .font(.vaultValueSmall)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
+                    }
+
+                    Text(folder.lastScannedAt.map { "Last looked for .env files \(Self.relative($0))." }
+                        ?? "Not scanned yet.")
+                        .font(.vaultBadge)
+                        .foregroundStyle(.secondary)
+
+                    VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.s) {
+                        Button("Find .env Files…") {
+                            Task { await viewModel.scanProjectFolder(inWorkspace: workspace.id, presentingSheet: true) }
+                        }
+                        .buttonStyle(VaultButtonStyle(.secondary))
+                        .accessibilityIdentifier("workspace-overview-scan-folder")
+
+                        Button("Unlink Folder") {
+                            viewModel.unlinkProjectFolder(fromWorkspace: workspace.id)
+                        }
+                        .buttonStyle(VaultButtonStyle(.secondary))
+                        .accessibilityIdentifier("workspace-overview-unlink-folder")
+                    }
+
+                    VaultNote(
+                        text: "PassStore can read files in this folder, and only looks when you ask. Unlinking gives that back; secrets already imported keep their own file links."
+                    )
+                }
+            } else {
+                VStack(alignment: .leading, spacing: VaultSpacing.s) {
+                    VaultNote(
+                        text: "Link the folder this project lives in and PassStore can find its .env files for you — one secret per file, each linked to the file it came from."
+                    )
+                    Button("Link a Folder…") {
+                        viewModel.linkProjectFolder(toWorkspace: workspace.id)
+                    }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("workspace-overview-link-folder")
+                }
+            }
+        }
     }
 
     // MARK: Environments

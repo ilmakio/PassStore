@@ -1260,6 +1260,156 @@ struct WorkspaceEditorSheet: View {
     }
 }
 
+// MARK: - .env discovery
+
+/// The `.env` files found in a workspace's linked folder, listed before anything is imported.
+///
+/// Nothing here has been read yet: discovery looked at names and sizes only. Ticking a file is
+/// what gives PassStore permission to open it, which is why the whole list arrives unticked
+/// except for the files that plainly hold secrets — and why an example file never does.
+struct EnvDiscoverySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var viewModel: VaultViewModel
+    let workspaceID: UUID
+
+    private var state: VaultViewModel.EnvDiscoveryState? {
+        guard let state = viewModel.envDiscovery, state.workspaceID == workspaceID else { return nil }
+        return state
+    }
+
+    var body: some View {
+        VaultSheetScaffold(
+            title: "Import .env Files",
+            subtitle: state.map { ($0.folderPath as NSString).abbreviatingWithTildeInPath } ?? "",
+            systemImage: "folder.badge.gearshape"
+        ) {
+            Spacer(minLength: 0)
+            Button("Cancel") {
+                viewModel.envDiscovery = nil
+                dismiss()
+            }
+            .buttonStyle(VaultButtonStyle(.secondary))
+            .keyboardShortcut(.cancelAction)
+
+            Button(importLabel) {
+                Task {
+                    await viewModel.importDiscoveredEnvFiles()
+                    dismiss()
+                }
+            }
+            .buttonStyle(VaultButtonStyle(.primary))
+            .keyboardShortcut(.defaultAction)
+            .disabled((state?.selectedCount ?? 0) == 0 || state?.isWorking == true)
+            .accessibilityIdentifier("env-discovery-import")
+        } content: {
+            if let state {
+                VStack(alignment: .leading, spacing: VaultSpacing.l) {
+                    if state.plans.isEmpty {
+                        VaultNote(text: "No .env files in this folder. PassStore looked at file names only — nothing was opened.")
+                    } else {
+                        VaultNote(text: "Each file you tick becomes one secret, linked to that file so it can be pulled in again later. Nothing is read until you import.")
+                    }
+
+                    if state.didReachLimit {
+                        VaultNote(
+                            text: "This folder has more .env files than one scan lists. Import what you need, or link a folder further in.",
+                            tone: .warning
+                        )
+                    }
+
+                    ForEach(state.plans) { plan in
+                        row(plan)
+                        if plan.id != state.plans.last?.id {
+                            Divider().opacity(0.4)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(width: 640, height: 620)
+    }
+
+    private var importLabel: String {
+        let count = state?.selectedCount ?? 0
+        if state?.isWorking == true { return "Importing…" }
+        return count == 1 ? "Import 1 File" : "Import \(count) Files"
+    }
+
+    private func row(_ plan: EnvFileImportPlan) -> some View {
+        HStack(alignment: .top, spacing: VaultSpacing.m) {
+            Toggle("", isOn: Binding(
+                get: { plan.isSelected },
+                set: { viewModel.setEnvDiscoverySelection($0, forFileID: plan.id) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("env-discovery-select-\(plan.id)")
+            .accessibilityLabel("Import \(plan.file.relativePath)")
+
+            VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                Text(plan.file.relativePath)
+                    .font(.vaultValueSmall)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+
+                HStack(spacing: VaultSpacing.s) {
+                    Text(byteDescription(plan.file.byteCount))
+                        .font(.vaultBadge)
+                        .foregroundStyle(.secondary)
+                    if plan.file.isTemplate {
+                        VaultChip(title: "Example file", systemImage: "doc.plaintext")
+                    }
+                    if plan.file.isAlreadyLinked {
+                        VaultChip(title: "Already linked", systemImage: "link", color: .orange)
+                    }
+                }
+
+                if plan.isSelected {
+                    HStack(spacing: VaultSpacing.s) {
+                        Picker("", selection: Binding(
+                            get: { plan.environment },
+                            set: { viewModel.setEnvDiscoveryEnvironment($0, forFileID: plan.id) }
+                        )) {
+                            ForEach(environmentOptions(including: plan.environment), id: \.self) { option in
+                                Text(option.title).tag(option)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: 160)
+                        .accessibilityIdentifier("env-discovery-environment-\(plan.id)")
+
+                        Toggle("One field per key", isOn: Binding(
+                            get: { plan.parsesIntoFields },
+                            set: { viewModel.setEnvDiscoveryParsing($0, forFileID: plan.id) }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .font(.vaultFootnote)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Everything the project already has, plus the presets, plus whatever this file suggested —
+    /// so a `.env.qa` can keep "Qa" without forcing it into one of the four built-in names.
+    private func environmentOptions(including current: EnvironmentValue) -> [EnvironmentValue] {
+        var options: [EnvironmentValue] = viewModel.environments(inWorkspace: workspaceID).map(\.environmentValue)
+        for kind in EnvironmentKind.allCases where kind != .custom {
+            options.append(.preset(kind))
+        }
+        options.append(current)
+
+        var seen: Set<String> = []
+        return options.filter { seen.insert(WorkspaceEnvironment.matchKey(for: $0.title)).inserted }
+    }
+
+    private func byteDescription(_ count: Int) -> String {
+        count < 1_024 ? "\(count) bytes" : "\(count / 1_024) KB"
+    }
+}
+
 // MARK: - Settings
 
 private enum SettingsTab: String, CaseIterable, Hashable, Identifiable {

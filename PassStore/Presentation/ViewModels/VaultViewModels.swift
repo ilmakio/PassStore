@@ -312,6 +312,243 @@ final class VaultViewModel {
         }
     }
 
+    // MARK: - Project folder
+
+    /// What the discovery sheet is working with. Nil when no scan has been run.
+    var envDiscovery: EnvDiscoveryState?
+
+    struct EnvDiscoveryState {
+        let workspaceID: UUID
+        let folderPath: String
+        var plans: [EnvFileImportPlan]
+        /// True when the walk stopped at its cap, so the sheet can say the list is not
+        /// everything rather than implying it is.
+        var didReachLimit: Bool
+        var isWorking: Bool = false
+
+        var selectedCount: Int { plans.count { $0.isSelected } }
+    }
+
+    /// Asks for a folder and links it to the workspace.
+    ///
+    /// A folder grant reaches everything inside it, so it is deliberately a separate, explicit
+    /// act: the panel says what it is for, nothing is scanned until this returns, and
+    /// `unlinkProjectFolder` gives the permission back in one click.
+    func linkProjectFolder(toWorkspace id: UUID) {
+        guard container.sessionManager.lockState == .unlocked else {
+            alertMessage = "Unlock the vault before linking a folder."
+            return
+        }
+        guard let workspace = workspace(for: id) else { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.prompt = "Link Folder"
+        panel.message = "Choose the project folder for “\(workspace.name)”. PassStore will be able to read files inside it, and will only look when you ask it to."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let folder = try container.envDiscovery.makeLink(to: url)
+            try container.workspaceRepository.setLinkedFolder(folder, onWorkspaceWithID: id)
+            reload()
+            lastActionMessage = "Linked \(folder.folderName)."
+            Task { await scanProjectFolder(inWorkspace: id, presentingSheet: true) }
+        } catch {
+            handleMutationFailure(error)
+        }
+    }
+
+    /// Forgets the folder. Secrets already imported from it keep their own per-file links: they
+    /// were given bookmarks of their own precisely so unlinking the folder costs nothing.
+    func unlinkProjectFolder(fromWorkspace id: UUID) {
+        do {
+            try container.workspaceRepository.setLinkedFolder(nil, onWorkspaceWithID: id)
+            if envDiscovery?.workspaceID == id { envDiscovery = nil }
+            reload()
+            lastActionMessage = "Folder unlinked."
+        } catch {
+            handleMutationFailure(error)
+        }
+    }
+
+    /// Looks for `.env` files in the linked folder. Only ever runs from an explicit action —
+    /// never at unlock, and never on a timer.
+    func scanProjectFolder(inWorkspace id: UUID, presentingSheet: Bool = false) async {
+        guard container.sessionManager.lockState == .unlocked,
+              let folder = workspace(for: id)?.linkedFolder else { return }
+
+        let service = container.envDiscovery
+        let linkedPaths = Set(
+            items.compactMap { $0.linkedFile?.displayPath }
+                .filter { !$0.isEmpty }
+                .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        )
+        let sessionGeneration = container.sessionManager.captureSecurityGeneration()
+
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try service.discover(in: folder, alreadyLinkedPaths: linkedPaths)
+            }.value
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration),
+                  let current = workspace(for: id) else { return }
+
+            // A moved folder renews its own bookmark; record it so the next scan still works.
+            if result.refreshedBookmark != nil || current.linkedFolder?.lastScannedAt == nil {
+                var updated = current.linkedFolder ?? folder
+                updated.bookmark = result.refreshedBookmark ?? updated.bookmark
+                if result.refreshedBookmark != nil { updated.displayPath = result.resolvedPath }
+                updated.lastScannedAt = .now
+                try? container.workspaceRepository.setLinkedFolder(updated, onWorkspaceWithID: id)
+            } else {
+                var updated = current.linkedFolder
+                updated?.lastScannedAt = .now
+                if let updated {
+                    try? container.workspaceRepository.setLinkedFolder(updated, onWorkspaceWithID: id)
+                }
+            }
+            reload()
+
+            let declared = environments(inWorkspace: id)
+            envDiscovery = EnvDiscoveryState(
+                workspaceID: id,
+                folderPath: result.resolvedPath,
+                plans: result.files.map { file in
+                    EnvFileImportPlan(
+                        file: file,
+                        // Templates and files already mirrored are listed but not pre-selected:
+                        // an example file holds no secrets, and importing the same file twice
+                        // makes two records that disagree the moment one is edited.
+                        isSelected: !file.isTemplate && !file.isAlreadyLinked,
+                        environment: Self.environment(
+                            matching: file.suggestedEnvironment,
+                            declaredIn: declared
+                        ),
+                        parsesIntoFields: true
+                    )
+                },
+                didReachLimit: result.didReachLimit
+            )
+            if presentingSheet {
+                activeSheet = .envDiscovery(id)
+            }
+            if result.files.isEmpty {
+                lastActionMessage = "No .env files found in \(result.resolvedPath.isEmpty ? "that folder" : (result.resolvedPath as NSString).lastPathComponent)."
+            }
+        } catch {
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return }
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// Prefers an environment the project already knows about over a new one with the same name,
+    /// so `.env.production` lands in the declared "Production" rather than creating "Prod".
+    private static func environment(
+        matching suggestion: EnvironmentValue,
+        declaredIn environments: [ResolvedWorkspaceEnvironment]
+    ) -> EnvironmentValue {
+        let key = WorkspaceEnvironment.matchKey(for: suggestion.title)
+        if let existing = environments.first(where: { $0.matchKey == key }) {
+            return existing.environmentValue
+        }
+        if suggestion.kind != .custom,
+           let sameKind = environments.first(where: { $0.kind == suggestion.kind }) {
+            return sameKind.environmentValue
+        }
+        return suggestion
+    }
+
+    func setEnvDiscoverySelection(_ isSelected: Bool, forFileID id: String) {
+        guard let index = envDiscovery?.plans.firstIndex(where: { $0.id == id }) else { return }
+        envDiscovery?.plans[index].isSelected = isSelected
+    }
+
+    func setEnvDiscoveryEnvironment(_ environment: EnvironmentValue, forFileID id: String) {
+        guard let index = envDiscovery?.plans.firstIndex(where: { $0.id == id }) else { return }
+        envDiscovery?.plans[index].environment = environment
+    }
+
+    func setEnvDiscoveryParsing(_ parsesIntoFields: Bool, forFileID id: String) {
+        guard let index = envDiscovery?.plans.firstIndex(where: { $0.id == id }) else { return }
+        envDiscovery?.plans[index].parsesIntoFields = parsesIntoFields
+    }
+
+    /// Imports the files the owner ticked, one secret each, linked to the file it came from.
+    func importDiscoveredEnvFiles() async {
+        guard container.sessionManager.lockState == .unlocked,
+              let state = envDiscovery,
+              let workspace = workspace(for: state.workspaceID),
+              let folder = workspace.linkedFolder else { return }
+        let selected = state.plans.filter(\.isSelected)
+        guard !selected.isEmpty else { return }
+
+        envDiscovery?.isWorking = true
+        defer { envDiscovery?.isWorking = false }
+
+        let service = container.envDiscovery
+        let sessionGeneration = container.sessionManager.captureSecurityGeneration()
+        var imported = 0
+        var failures: [String] = []
+
+        for plan in selected {
+            let relativePath = plan.file.relativePath
+            let parsesIntoFields = plan.parsesIntoFields
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try service.prepare(
+                        relativePath: relativePath,
+                        in: folder,
+                        parsedIntoFields: parsesIntoFields
+                    )
+                }.value
+                guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return }
+
+                var draft = buildEnvImportDraft(
+                    from: prepared.contents,
+                    suggestedTitle: Self.importedTitle(for: plan.file),
+                    parseIntoEntries: parsesIntoFields
+                )
+                draft.workspaceID = state.workspaceID
+                draft.environment = plan.environment
+                let saved = try container.itemRepository.saveItem(draft)
+
+                // Linked in a second pass, the same way a hand-picked file is: the vault-side
+                // digest can only be taken once the item exists.
+                var link = prepared.fileLink
+                link.syncedDigest = LinkedFileService.digest(prepared.contents)
+                link.syncedVaultDigest = LinkedFileService.digest(envContents(for: saved))
+                link.syncedAt = .now
+                link.requiresInitialSync = false
+                var linkDraft = makeDraft(from: saved)
+                linkDraft.linkedFile = link
+                _ = try container.itemRepository.saveItem(linkDraft)
+                linkedFileStatuses[saved.id] = .upToDate
+                imported += 1
+            } catch {
+                failures.append(plan.file.fileName)
+            }
+        }
+
+        reload()
+        envDiscovery = nil
+        if imported > 0 {
+            lastActionMessage = failures.isEmpty
+                ? "Imported \(imported) \(imported == 1 ? "file" : "files") from \(folder.folderName)."
+                : "Imported \(imported) of \(selected.count). Could not read: \(failures.joined(separator: ", "))."
+        } else if !failures.isEmpty {
+            alertMessage = "None of the selected files could be read: \(failures.joined(separator: ", "))."
+        }
+    }
+
+    /// "Acme API — .env.production" rather than five secrets all called ".env".
+    private static func importedTitle(for file: DiscoveredEnvFile) -> String {
+        let directory = (file.relativePath as NSString).deletingLastPathComponent
+        guard !directory.isEmpty else { return file.fileName }
+        return "\(directory)/\(file.fileName)"
+    }
+
     // MARK: - Workspace overview
 
     /// Secrets in this workspace that mirror a file on disk.

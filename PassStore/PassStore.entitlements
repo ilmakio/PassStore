@@ -9,7 +9,7 @@
 	<!-- Read/write access to files explicitly chosen through Open/Save panels. -->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
-	<!-- Persist user-selected .env file access across launches. -->
+	<!-- Persist user-selected .env file and project folder access across launches. -->
 	<key>com.apple.security.files.bookmarks.app-scope</key>
 	<true/>
 	<!-- Required for Sparkle to launch the InstallerLauncher XPC (sandboxed apps). -->

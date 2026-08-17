@@ -19,6 +19,8 @@ final class WorkspaceEntity: Identifiable, Hashable {
     /// every workspace in a vault written before 1.3 — in both cases the environments actually
     /// in use are derived from the items. See `WorkspaceEnvironment.resolvedList`.
     var environments: [WorkspaceEnvironment]
+    /// The folder on disk this workspace belongs to, once the owner has linked one.
+    var linkedFolder: LinkedFolderReference?
 
     init(
         id: UUID = UUID(),
@@ -31,7 +33,8 @@ final class WorkspaceEntity: Identifiable, Hashable {
         updatedAt: Date = .now,
         sortOrder: Int = 0,
         items: [SecretItemEntity] = [],
-        environments: [WorkspaceEnvironment] = []
+        environments: [WorkspaceEnvironment] = [],
+        linkedFolder: LinkedFolderReference? = nil
     ) {
         self.id = id
         self.name = name
@@ -44,6 +47,7 @@ final class WorkspaceEntity: Identifiable, Hashable {
         self.sortOrder = sortOrder
         self.items = items
         self.environments = environments
+        self.linkedFolder = linkedFolder
     }
 
     static func == (lhs: WorkspaceEntity, rhs: WorkspaceEntity) -> Bool {
@@ -938,6 +942,8 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
     /// key is absent from the encoded snapshot and a vault that uses no environments encodes
     /// byte-for-byte as it did in 1.2. Backup identity digests depend on that.
     let environments: [WorkspaceEnvironment]?
+    /// Added in 1.3.0, and absent unless the owner linked a folder.
+    let linkedFolder: LinkedFolderReference?
 
     init(
         id: UUID,
@@ -949,7 +955,8 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
         createdAt: Date,
         updatedAt: Date,
         sortOrder: Int = 0,
-        environments: [WorkspaceEnvironment]? = nil
+        environments: [WorkspaceEnvironment]? = nil,
+        linkedFolder: LinkedFolderReference? = nil
     ) {
         self.id = id
         self.name = name
@@ -961,6 +968,7 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
         self.updatedAt = updatedAt
         self.sortOrder = sortOrder
         self.environments = environments
+        self.linkedFolder = linkedFolder
     }
 
     init(from decoder: Decoder) throws {
@@ -975,6 +983,7 @@ nonisolated struct WorkspaceSnapshot: Codable, Sendable {
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         environments = try container.decodeIfPresent([WorkspaceEnvironment].self, forKey: .environments)
+        linkedFolder = try container.decodeIfPresent(LinkedFolderReference.self, forKey: .linkedFolder)
     }
 }
 
