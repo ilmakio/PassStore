@@ -1214,61 +1214,97 @@ final class VaultViewModel {
         // top replaced the whole document, so every comment, blank line and untracked variable
         // in the owner's `.env` disappeared the first time they pressed Write.
         let vaultContents = envContents(for: item)
+        let existing: String?
+        do {
+            existing = try await Task.detached(priority: .userInitiated) {
+                try service.read(link).contents
+            }.value
+        } catch {
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return false }
+            // A parsed link updates the file it is about to write; with nothing to merge into,
+            // writing would put the regenerated document there instead and delete every comment
+            // and untracked variable in it. A file that cannot be read (non-UTF-8 byte, over
+            // the size limit, moved) is not a file this can safely overwrite.
+            guard !link.parsedIntoFields else {
+                alertMessage = "PassStore could not read \(link.fileName), so it left the file alone. \(error.localizedDescription)"
+                return false
+            }
+            existing = nil
+        }
+        guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return false }
+
         let contents: String
-        if link.parsedIntoFields, let existing = try? await Task.detached(priority: .userInitiated, operation: {
-            try service.read(link).contents
-        }).value {
+        if link.parsedIntoFields, let existing {
             contents = CopyFormatter.envFileByUpdating(existing, with: resolvedFields(for: item))
         } else {
             contents = vaultContents
         }
-        let contentsDigest = LinkedFileService.digest(contents)
+        let existingDigest = existing.map(LinkedFileService.digest)
+
+        // Unless the owner explicitly accepted the on-disk changes, a file that moved since the
+        // last sync is not something to write over.
+        if !allowingFileChanges {
+            guard let syncedDigest = link.syncedDigest,
+                  existingDigest == nil || existingDigest == syncedDigest else {
+                handleMutationFailure(LinkedFileError.fileChangedBeforeWrite)
+                return false
+            }
+        }
+
         let vaultDigest = LinkedFileService.digest(vaultContents)
+
+        // Nothing to change: writing anyway would move the file's modification date — and
+        // rewrite its inode — for a byte-identical result.
+        if let existing, let existingDigest, existing == contents {
+            do {
+                return try recordLinkedFileSync(
+                    itemID: itemID,
+                    expecting: link,
+                    fileDigest: existingDigest,
+                    vaultDigest: vaultDigest,
+                    refreshedBookmark: nil,
+                    resolvedPath: link.displayPath,
+                    message: "\(link.fileName) is already up to date.",
+                    conflictMessage: "This item's link changed while PassStore was reading the file. Review both versions before writing again."
+                )
+            } catch {
+                handleMutationFailure(error)
+                return false
+            }
+        }
+
+        let contentsDigest = LinkedFileService.digest(contents)
         var didWriteFile = false
         do {
             let writeResult = try await Task.detached(priority: .userInitiated) { () -> LinkedFileService.WriteResult in
-                guard allowingFileChanges || link.syncedDigest != nil else {
-                    throw LinkedFileError.fileChangedBeforeWrite
-                }
-                return try service.write(
+                // The precondition is the text that was merged into rather than the last synced
+                // text: it closes the window between reading the file above and replacing it
+                // here. Only an explicit overwrite of a file that could not be read at all is
+                // left unguarded — there is nothing to compare against in that case.
+                try service.write(
                     contents,
                     to: link,
-                    requiringCurrentDigest: allowingFileChanges ? nil : link.syncedDigest
+                    requiringCurrentDigest: existingDigest ?? (allowingFileChanges ? nil : link.syncedDigest)
                 )
             }.value
             didWriteFile = true
             guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else {
                 return false
             }
-            guard let current = items.first(where: { $0.id == itemID }),
-                  current.linkedFile == link else {
-                alertMessage = "The file was written, but this item's link changed while the write was in progress. Review both versions before writing again."
-                return false
-            }
-            let currentVaultDigest = LinkedFileService.digest(envContents(for: current))
-            var updatedLink = current.linkedFile ?? link
-            updatedLink.bookmark = writeResult.refreshedBookmark ?? link.bookmark
-            if writeResult.refreshedBookmark != nil { updatedLink.displayPath = writeResult.resolvedPath }
-            // The two digests are no longer the same string: the file keeps its comments and
-            // untracked variables, so what landed on disk is not what the item alone renders.
-            updatedLink.syncedDigest = contentsDigest
-            // The exact vault state written, not necessarily the current one: an edit can
-            // complete while the file operation is suspended off-main.
-            updatedLink.syncedVaultDigest = vaultDigest
-            updatedLink.syncedAt = .now
-            updatedLink.requiresInitialSync = false
-            let previousLink = current.linkedFile
-            current.linkedFile = updatedLink
-            do {
-                try container.memoryStore.persist()
-            } catch {
-                current.linkedFile = previousLink
-                throw error
-            }
-            invalidateFilteredCache()
-            linkedFileStatuses[itemID] = currentVaultDigest == contentsDigest ? .upToDate : .vaultChanged
-            lastActionMessage = "Wrote \(link.fileName)."
-            return true
+            return try recordLinkedFileSync(
+                itemID: itemID,
+                expecting: link,
+                // The two digests are no longer the same string: the file keeps its comments and
+                // untracked variables, so what landed on disk is not what the item alone renders.
+                fileDigest: contentsDigest,
+                // The exact vault state written, not necessarily the current one: an edit can
+                // complete while the file operation is suspended off-main.
+                vaultDigest: vaultDigest,
+                refreshedBookmark: writeResult.refreshedBookmark,
+                resolvedPath: writeResult.resolvedPath,
+                message: "Wrote \(link.fileName).",
+                conflictMessage: "The file was written, but this item's link changed while the write was in progress. Review both versions before writing again."
+            )
         } catch {
             guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else {
                 return false
@@ -1279,6 +1315,54 @@ final class VaultViewModel {
             }
             return false
         }
+    }
+
+    /// Records a completed push on the item's link.
+    ///
+    /// Throws only when the vault cannot be persisted, in which case the link is rolled back to
+    /// what it was — the caller knows whether the file itself was already written and frames the
+    /// message accordingly.
+    @discardableResult
+    private func recordLinkedFileSync(
+        itemID: UUID,
+        expecting link: LinkedFileReference,
+        fileDigest: String,
+        vaultDigest: String,
+        refreshedBookmark: Data?,
+        resolvedPath: String,
+        message: String,
+        conflictMessage: String
+    ) throws -> Bool {
+        guard let current = items.first(where: { $0.id == itemID }),
+              current.linkedFile == link else {
+            alertMessage = conflictMessage
+            return false
+        }
+        let currentVaultDigest = LinkedFileService.digest(envContents(for: current))
+        var updatedLink = link
+        if let refreshedBookmark {
+            updatedLink.bookmark = refreshedBookmark
+            updatedLink.displayPath = resolvedPath
+        }
+        updatedLink.syncedDigest = fileDigest
+        updatedLink.syncedVaultDigest = vaultDigest
+        updatedLink.syncedAt = .now
+        updatedLink.requiresInitialSync = false
+        let previousLink = current.linkedFile
+        current.linkedFile = updatedLink
+        do {
+            try container.memoryStore.persist()
+        } catch {
+            current.linkedFile = previousLink
+            throw error
+        }
+        invalidateFilteredCache()
+        // Compare the vault against the vault. Measuring it against the file digest instead
+        // marked every successful write as "this item has changed", because a merged file holds
+        // comments and untracked variables the item does not render.
+        linkedFileStatuses[itemID] = currentVaultDigest == vaultDigest ? .upToDate : .vaultChanged
+        lastActionMessage = message
+        return true
     }
 
     /// Attaches a file to an item, or replaces the existing link.
