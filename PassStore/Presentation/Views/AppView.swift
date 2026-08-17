@@ -1930,14 +1930,14 @@ private struct FieldRow: View {
     }
 
     /// Spaced by hand rather than by one stack spacing: a name and the value under it are one
-    /// thing and sit close enough to read as one, while what follows the value — a note, a
-    /// difference to resolve — is a separate statement and needs the room to say so.
+    /// thing and sit all but touching, while what follows the value — a note, a difference to
+    /// resolve — is a separate statement and needs the room to say so.
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
             valueBox
-                .padding(.top, VaultSpacing.xs)
+                .padding(.top, VaultSpacing.hair)
 
             // Directly under the value it is about: this is a statement about that one value and
             // what to do with it, not a banner over the whole entry.
