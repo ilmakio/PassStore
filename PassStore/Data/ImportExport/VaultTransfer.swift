@@ -97,7 +97,12 @@ struct CopyFormatter {
         // Rewrite back-to-front so earlier line indices stay valid as multi-line spans shrink.
         for assignment in assignments.reversed() {
             guard let field = pending.removeValue(forKey: assignment.key) else { continue }
-            let rebuilt = "\(assignment.prefix)\(assignment.key)=\(envQuoted(field.value))\(assignment.trailingComment)"
+            // A value the item did not change keeps the exact line the owner wrote. Rebuilding
+            // every tracked assignment re-quoted the whole file — `LOG_LEVEL=info` came back as
+            // `LOG_LEVEL="info"` — so one Write showed up as a diff on every line.
+            guard assignment.currentValue != field.value else { continue }
+            let literal = envValueLiteral(field.value, preferring: assignment.quote)
+            let rebuilt = "\(assignment.prefix)\(assignment.key)=\(literal)\(assignment.trailingComment)"
             lines.replaceSubrange(assignment.lineRange, with: [rebuilt])
         }
 
@@ -110,6 +115,43 @@ struct CopyFormatter {
             lines.removeLast()
         }
         return (lines + additions).joined(separator: "\n") + "\n"
+    }
+
+    /// Writes a value using the quoting the file already used, when that quoting is still safe
+    /// for the new value.
+    ///
+    /// Double quotes remain the fallback and the default for generated output. They are just
+    /// not something to impose on a file somebody else maintains: turning `PORT=5432` into
+    /// `PORT="5432"` is a change to their repository for a value that did not change.
+    static func envValueLiteral(_ value: String, preferring style: EnvQuoteStyle) -> String {
+        switch style {
+        case .none where isSafeUnquoted(value):
+            return value
+        case .single where isSafeSingleQuoted(value):
+            return "'\(value)'"
+        default:
+            return envQuoted(value)
+        }
+    }
+
+    /// Deliberately conservative: anything a shell or a dotenv reader could interpret —
+    /// whitespace, quotes, `#`, `$`, backticks, escapes, globs, line breaks — falls through to
+    /// the quoted form. Only characters that mean themselves in every reader stay bare.
+    private static func isSafeUnquoted(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.alphanumerics.contains(scalar) && scalar.isASCII
+                || unquotedSafePunctuation.contains(Character(scalar))
+        }
+    }
+
+    private static let unquotedSafePunctuation: Set<Character> = ["_", ".", "-", "/", ":", "@", "%", "+", ",", "="]
+
+    /// Single quotes are literal in shell semantics, so they carry `$`, backticks and `#`
+    /// safely. They cannot carry a single quote — there is no escape for one inside them — and
+    /// a wrapped literal newline is read back inconsistently across dotenv libraries.
+    private static func isSafeSingleQuoted(_ value: String) -> Bool {
+        !value.contains("'") && !value.contains("\n") && !value.contains("\r")
     }
 
     /// Always quoting makes the output safe both for dotenv readers and for developers who
@@ -333,12 +375,20 @@ nonisolated struct EnvImportService: Sendable {
         /// Whitespace and any `export ` that preceded the key, reproduced verbatim.
         let prefix: String
         let key: String
+        /// The value exactly as the file writes it — quotes included, spanning every physical
+        /// line it occupies — so an update can tell "same value" from "same text" and can put a
+        /// new value back in the same shape.
+        let rawValue: String
+        let quote: EnvQuoteStyle
         /// A trailing `# comment` on a single-line unquoted value, kept so updating a value
         /// does not throw away the note explaining it.
         let trailingComment: String
         /// The physical lines this assignment occupies — more than one for a quoted value
         /// that wraps.
         let lineRange: Range<Int>
+
+        /// The value the file currently holds, decoded exactly as `parse` decodes it.
+        var currentValue: String { EnvImportService.unquote(rawValue) }
     }
 
     /// Locates every assignment, using the same rules as `parse`.
@@ -374,10 +424,18 @@ nonisolated struct EnvImportService: Sendable {
                 }
             } else if let hash = remainder.range(of: " #") {
                 trailingComment = String(remainder[hash.lowerBound...])
+                remainder = String(remainder[..<hash.lowerBound])
             }
 
             result.append(
-                Assignment(prefix: prefix, key: key, trailingComment: trailingComment, lineRange: start..<index)
+                Assignment(
+                    prefix: prefix,
+                    key: key,
+                    rawValue: remainder,
+                    quote: EnvQuoteStyle(leadingCharacter: remainder.first),
+                    trailingComment: trailingComment,
+                    lineRange: start..<index
+                )
             )
         }
         return result

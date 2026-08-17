@@ -1501,7 +1501,13 @@ private struct LinkedFileSection: View {
             Button("Overwrite File", role: .destructive) { write(allowingFileChanges: true) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("That file has changed since the last sync. Writing replaces its contents with what this item holds.")
+            // What a write does depends on how the item stores the file, and the difference is
+            // exactly what somebody is deciding about here.
+            Text(
+                link.parsedIntoFields
+                    ? "That file has changed since the last sync. Writing replaces the values this item tracks and keeps the rest of the file — comments, blank lines and variables this item does not hold — as it is."
+                    : "That file has changed since the last sync. Writing replaces its contents with what this item holds."
+            )
         }
     }
 

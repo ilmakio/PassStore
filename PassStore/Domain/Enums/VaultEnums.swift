@@ -55,6 +55,25 @@ enum FieldKind: String, CaseIterable, Codable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
+/// How a value was quoted in a `.env` file.
+///
+/// Kept per assignment so writing a new value back can use the quoting the owner already had.
+/// Double quotes are the safe default when a value needs escaping; they should not be imposed
+/// on a file that did without them.
+nonisolated enum EnvQuoteStyle: String, Codable, Hashable, Sendable {
+    case none
+    case single
+    case double
+
+    init(leadingCharacter: Character?) {
+        switch leadingCharacter {
+        case "\"": self = .double
+        case "'": self = .single
+        default: self = .none
+        }
+    }
+}
+
 enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
     case local
     case dev
