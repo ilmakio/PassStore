@@ -61,10 +61,7 @@ struct CopyFormatter {
     /// were never quoted, so anything containing a space, a newline, a quote or a `#` came
     /// back out as an invalid or truncated line.
     static func envFileContents(fields: [FieldResolvedValue]) -> String {
-        let ordered = fields.sorted {
-                if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
-                return $0.id.uuidString < $1.id.uuidString
-            }
+        let ordered = orderedForEnvOutput(fields)
         var usedKeys: Set<String> = []
         return ordered.map { field in
             let base = safeEnvKey(field.key)
@@ -101,7 +98,11 @@ struct CopyFormatter {
             // every tracked assignment re-quoted the whole file — `LOG_LEVEL=info` came back as
             // `LOG_LEVEL="info"` — so one Write showed up as a diff on every line.
             guard assignment.currentValue != field.value else { continue }
-            let literal = envValueLiteral(field.value, preferring: assignment.quote)
+            let literal = envValueLiteral(
+                field.value,
+                preferring: assignment.quote,
+                allowingLiteralNewlines: assignment.lineRange.count > 1
+            )
             let rebuilt = "\(assignment.prefix)\(assignment.key)=\(literal)\(assignment.trailingComment)"
             lines.replaceSubrange(assignment.lineRange, with: [rebuilt])
         }
@@ -117,18 +118,69 @@ struct CopyFormatter {
         return (lines + additions).joined(separator: "\n") + "\n"
     }
 
+    /// Renders the item's fields back into the layout of the file they came from.
+    ///
+    /// This is what makes "copy my `.env`" mean the file the owner wrote — comments, section
+    /// banners, blank lines, ordering, `export` prefixes and quoting included — rather than a
+    /// document regenerated from a list of keys. It needs no access to the file, so it works
+    /// from a backup, on another Mac, and when the original is nowhere to be found.
+    static func envFileFromLayout(_ layout: EnvDocumentLayout, with fields: [FieldResolvedValue]) -> String {
+        let byKey = Dictionary(fields.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        var rendered: [String] = []
+
+        for line in layout.lines {
+            switch line {
+            case let .text(text):
+                rendered.append(text)
+            case let .assignment(assignment):
+                // A variable the item no longer holds has no value to write, and the layout
+                // deliberately does not remember what it used to be. Leaving the line out is the
+                // only truthful option; inventing `KEY=` would read as "deliberately empty".
+                guard let field = byKey[assignment.key] else { continue }
+                let literal = envValueLiteral(
+                    field.value,
+                    preferring: assignment.quote,
+                    allowingLiteralNewlines: assignment.wraps
+                )
+                rendered.append("\(assignment.prefix)\(assignment.key)=\(literal)\(assignment.trailingComment)")
+            }
+        }
+
+        // A variable added in PassStore after the layout was captured still belongs in the copy.
+        let known = Set(layout.keys)
+        let additions = orderedForEnvOutput(fields.filter { !known.contains($0.key) })
+            .map { "\(safeEnvKey($0.key))=\(envQuoted($0.value))" }
+        guard !additions.isEmpty else { return rendered.joined(separator: "\n") }
+
+        if rendered.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            rendered.removeLast()
+        }
+        return (rendered + additions).joined(separator: "\n") + "\n"
+    }
+
     /// Writes a value using the quoting the file already used, when that quoting is still safe
     /// for the new value.
     ///
     /// Double quotes remain the fallback and the default for generated output. They are just
     /// not something to impose on a file somebody else maintains: turning `PORT=5432` into
     /// `PORT="5432"` is a change to their repository for a value that did not change.
-    static func envValueLiteral(_ value: String, preferring style: EnvQuoteStyle) -> String {
+    /// `allowingLiteralNewlines` covers the value that was written across several lines inside
+    /// its quotes — a PEM key, almost always. Escaping it onto one line parses back to the same
+    /// value, but it is not the file the owner had.
+    static func envValueLiteral(
+        _ value: String,
+        preferring style: EnvQuoteStyle,
+        allowingLiteralNewlines: Bool = false
+    ) -> String {
         switch style {
-        case .none where isSafeUnquoted(value):
+        // `KEY=` is how a file that does without quotes writes an empty value, and it reads back
+        // as empty everywhere. Quoting it would be a change to a line for no reason.
+        case .none where value.isEmpty || isSafeUnquoted(value):
             return value
-        case .single where isSafeSingleQuoted(value):
+        case .single where isSafeSingleQuoted(value, allowingLineBreaks: allowingLiteralNewlines):
             return "'\(value)'"
+        case .double where allowingLiteralNewlines && value.contains("\n"):
+            return envQuotedKeepingLineBreaks(value)
         default:
             return envQuoted(value)
         }
@@ -148,10 +200,23 @@ struct CopyFormatter {
     private static let unquotedSafePunctuation: Set<Character> = ["_", ".", "-", "/", ":", "@", "%", "+", ",", "="]
 
     /// Single quotes are literal in shell semantics, so they carry `$`, backticks and `#`
-    /// safely. They cannot carry a single quote — there is no escape for one inside them — and
-    /// a wrapped literal newline is read back inconsistently across dotenv libraries.
-    private static func isSafeSingleQuoted(_ value: String) -> Bool {
-        !value.contains("'") && !value.contains("\n") && !value.contains("\r")
+    /// safely. They cannot carry a single quote — there is no escape for one inside them.
+    private static func isSafeSingleQuoted(_ value: String, allowingLineBreaks: Bool) -> Bool {
+        guard !value.contains("'"), !value.contains("\r") else { return false }
+        return allowingLineBreaks || !value.contains("\n")
+    }
+
+    /// Double quotes, escaped as usual, except that line breaks stay line breaks. `$` and
+    /// backticks are still escaped: the value has to be safe to `source` however it is laid out.
+    private static func envQuotedKeepingLineBreaks(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        return "\"\(escaped)\""
     }
 
     /// Always quoting makes the output safe both for dotenv readers and for developers who
@@ -168,6 +233,14 @@ struct CopyFormatter {
             .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\t", with: "\\t")
         return "\"\(escaped)\""
+    }
+
+    /// The item's own order, made total so the same fields always serialise the same way.
+    private static func orderedForEnvOutput(_ fields: [FieldResolvedValue]) -> [FieldResolvedValue] {
+        fields.sorted {
+            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+            return $0.id.uuidString < $1.id.uuidString
+        }
     }
 
     /// Field keys are user-editable and can arrive from an imported backup. Keep normal
@@ -389,6 +462,36 @@ nonisolated struct EnvImportService: Sendable {
 
         /// The value the file currently holds, decoded exactly as `parse` decodes it.
         var currentValue: String { EnvImportService.unquote(rawValue) }
+    }
+
+    /// Captures the file's shape — everything about it the item's fields cannot carry.
+    ///
+    /// Values are not part of it: see `EnvDocumentLayout`.
+    static func layout(of text: String) -> EnvDocumentLayout {
+        let lines = text.components(separatedBy: "\n")
+        let byStartLine = Dictionary(
+            assignments(in: text).map { ($0.lineRange.lowerBound, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var result: [EnvDocumentLayout.Line] = []
+        var index = 0
+        while index < lines.count {
+            if let assignment = byStartLine[index] {
+                result.append(.assignment(EnvAssignmentLayout(
+                    prefix: assignment.prefix,
+                    key: assignment.key,
+                    quote: assignment.quote,
+                    wraps: assignment.lineRange.count > 1,
+                    trailingComment: assignment.trailingComment
+                )))
+                index = assignment.lineRange.upperBound
+            } else {
+                result.append(.text(lines[index]))
+                index += 1
+            }
+        }
+        return EnvDocumentLayout(lines: result)
     }
 
     /// Locates every assignment, using the same rules as `parse`.

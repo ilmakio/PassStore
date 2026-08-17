@@ -71,6 +71,9 @@ final class SecretItemEntity: Identifiable, Hashable {
     var ignoredHealthIssues: [IgnoredHealthIssue]
     /// The `.env` (or other text file) this item was imported from, if any.
     var linkedFile: LinkedFileReference?
+    /// The shape of the `.env` this item holds — comments, ordering, blank lines, quoting — with
+    /// no values in it. Nil for items that were never imported from one.
+    var envLayout: EnvDocumentLayout?
 
     init(
         id: UUID = UUID(),
@@ -89,7 +92,8 @@ final class SecretItemEntity: Identifiable, Hashable {
         fields: [SecretFieldValueEntity] = [],
         changeHistory: [SecretItemChangeEntry] = [],
         ignoredHealthIssues: [IgnoredHealthIssue] = [],
-        linkedFile: LinkedFileReference? = nil
+        linkedFile: LinkedFileReference? = nil,
+        envLayout: EnvDocumentLayout? = nil
     ) {
         self.id = id
         self.title = title
@@ -109,6 +113,7 @@ final class SecretItemEntity: Identifiable, Hashable {
         self.changeHistory = changeHistory
         self.ignoredHealthIssues = ignoredHealthIssues
         self.linkedFile = linkedFile
+        self.envLayout = envLayout
     }
 
     static func == (lhs: SecretItemEntity, rhs: SecretItemEntity) -> Bool {
@@ -326,6 +331,9 @@ struct SecretItemDraft: Identifiable {
     var templateID: UUID?
     /// Carried through the editor so saving does not drop an existing file link.
     var linkedFile: LinkedFileReference?
+    /// Carried through for the same reason: an edit must not cost the item the formatting of the
+    /// `.env` it came from.
+    var envLayout: EnvDocumentLayout?
 
     static let empty = SecretItemDraft(
         title: "",
@@ -971,6 +979,8 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
     let ignoredHealthIssues: [IgnoredHealthIssue]
     /// Added in 1.2.0.
     let linkedFile: LinkedFileReference?
+    /// Added in 1.2.1. Absent in vaults written earlier, and in items never imported from a file.
+    let envLayout: EnvDocumentLayout?
 
     init(
         id: UUID,
@@ -990,7 +1000,8 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
         fields: [FieldValueSnapshot],
         changeHistory: [SecretItemChangeEntry] = [],
         ignoredHealthIssues: [IgnoredHealthIssue] = [],
-        linkedFile: LinkedFileReference? = nil
+        linkedFile: LinkedFileReference? = nil,
+        envLayout: EnvDocumentLayout? = nil
     ) {
         self.id = id
         self.title = title
@@ -1010,6 +1021,7 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
         self.changeHistory = changeHistory
         self.ignoredHealthIssues = ignoredHealthIssues
         self.linkedFile = linkedFile
+        self.envLayout = envLayout
     }
 
     init(from decoder: Decoder) throws {
@@ -1032,6 +1044,7 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
         changeHistory = try container.decodeIfPresent([SecretItemChangeEntry].self, forKey: .changeHistory) ?? []
         ignoredHealthIssues = try container.decodeIfPresent([IgnoredHealthIssue].self, forKey: .ignoredHealthIssues) ?? []
         linkedFile = try container.decodeIfPresent(LinkedFileReference.self, forKey: .linkedFile)
+        envLayout = try container.decodeIfPresent(EnvDocumentLayout.self, forKey: .envLayout)
     }
 }
 

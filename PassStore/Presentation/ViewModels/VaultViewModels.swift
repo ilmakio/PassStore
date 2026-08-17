@@ -1129,6 +1129,32 @@ final class VaultViewModel {
         return CopyFormatter.envFileContents(fields: fields)
     }
 
+    /// The `.env` document this item represents, in the shape of the file it came from.
+    ///
+    /// Deliberately separate from `envContents`, which stays values-only: that one is what the
+    /// sync digests are computed from, and a document whose text depends on stored formatting
+    /// would have made every already-linked item look like it had changed after an update.
+    func envDocumentContents(for item: SecretItemEntity) -> String {
+        let fields = resolvedFields(for: item)
+        if item.linkedFile?.parsedIntoFields == false, let blob = fields.first(where: { $0.key == "env" }) {
+            return blob.value
+        }
+        if let layout = item.envLayout, !layout.keys.isEmpty {
+            // Every field, including the ones whose value is empty: `KEY=` is a line the owner
+            // wrote on purpose, and the UI's habit of hiding empty values must not edit their file.
+            return CopyFormatter.envFileFromLayout(layout, with: fields)
+        }
+        return CopyFormatter.envString(for: item, fields: Self.visibleFields(in: fields))
+    }
+
+    /// How this item's `.env` comments read, for showing each one beside the variable it is
+    /// about. Nil when the item has no stored formatting.
+    func envOutline(for item: SecretItemEntity) -> EnvDocumentLayout.Outline? {
+        guard let layout = item.envLayout, !layout.keys.isEmpty else { return nil }
+        let outline = layout.outline
+        return outline.isEmpty ? nil : outline
+    }
+
     /// Pulls the current file contents into the item.
     @discardableResult
     func updateItemFromLinkedFile(_ item: SecretItemEntity) async -> Bool {
@@ -1397,6 +1423,15 @@ final class VaultViewModel {
                 && link.syncedDigest != link.syncedVaultDigest
             var draft = makeDraft(from: current)
             draft.linkedFile = link
+            // Linking is also how an item imported before layouts existed picks up the formatting
+            // of the file it mirrors. Only the shape is taken — no values, so nothing about the
+            // stored variables changes here.
+            if parsedIntoFields {
+                let layout = EnvImportService.layout(of: pair.1.contents)
+                if !layout.isTrivial, !layout.keys.isEmpty {
+                    draft.envLayout = layout
+                }
+            }
             _ = try container.itemRepository.saveItem(draft)
             reload()
             invalidateFilteredCache()
@@ -1577,6 +1612,11 @@ final class VaultViewModel {
         copyEnv(for: selectedItem)
     }
 
+    func copyEnvValuesOnly() {
+        guard let selectedItem else { return }
+        copyEnvValuesOnly(for: selectedItem)
+    }
+
     func copyJSON() {
         guard let selectedItem else { return }
         copyJSON(for: selectedItem)
@@ -1587,7 +1627,19 @@ final class VaultViewModel {
         copyConnectionString(for: selectedItem)
     }
 
+    /// Copies the item as the file it came from: the owner's comments, section banners, blank
+    /// lines, ordering and quoting, with the values the item holds now.
     func copyEnv(for item: SecretItemEntity) {
+        let fields = resolvedFields(for: item)
+        maybeWarnForSensitiveCopy(isSensitive: fields.contains(where: \.isSensitive))
+        container.clipboard.copy(envDocumentContents(for: item), label: ".env")
+    }
+
+    /// Copies the assignments alone — no comments, no blank lines, no banners.
+    ///
+    /// Both forms are wanted for the same file: this one goes into anything that strips comments
+    /// anyway, and `copyEnv` is for putting the file back on another machine.
+    func copyEnvValuesOnly(for item: SecretItemEntity) {
         let fields = Self.visibleFields(in: resolvedFields(for: item))
         maybeWarnForSensitiveCopy(isSensitive: fields.contains(where: \.isSensitive))
         container.clipboard.copy(CopyFormatter.envString(for: item, fields: fields), label: ".env")
@@ -2203,7 +2255,8 @@ final class VaultViewModel {
             fields: item.fields,
             changeHistory: item.changeHistory,
             ignoredHealthIssues: item.ignoredHealthIssues,
-            linkedFile: item.linkedFile
+            linkedFile: item.linkedFile,
+            envLayout: item.envLayout
         )
     }
 
@@ -2686,7 +2739,10 @@ final class VaultViewModel {
 
         let built = buildEnvImportDraft(from: raw, suggestedTitle: titleForBuild, parseIntoEntries: parseIntoEntries)
         draft.fieldDrafts = built.fieldDrafts
-        draft.notes = built.notes
+        draft.envLayout = built.envLayout
+        // Notes are left alone. They used to be replaced with the file's comments flattened into
+        // one block, so pulling a file could take away notes the owner had written themselves —
+        // and comments now stay in the layout, next to the variable each one is about.
 
         guard trimmedTitle.isEmpty else { return }
         if let suggestedTitle, !suggestedTitle.isEmpty {
@@ -2897,7 +2953,8 @@ final class VaultViewModel {
                 )
             },
             templateID: item.template?.id,
-            linkedFile: item.linkedFile
+            linkedFile: item.linkedFile,
+            envLayout: item.envLayout
         )
     }
 
@@ -3014,6 +3071,7 @@ final class VaultViewModel {
     /// Parses `KEY=value` lines into separate fields; if nothing parses, keeps one multiline block.
     private func makeEnvImportDraft(from string: String, suggestedTitle: String) -> SecretItemDraft {
         let parsed = container.envImport.parse(string)
+        let layout = EnvImportService.layout(of: string)
         let fieldDrafts: [FieldDraft]
         if parsed.entries.isEmpty {
             fieldDrafts = [
@@ -3048,11 +3106,17 @@ final class VaultViewModel {
             type: .envGroup,
             workspaceID: preferredWorkspaceID,
             environment: preferredEnvironment,
-            notes: parsed.notes,
+            // The file's comments are no longer flattened into one note. They stay in the layout,
+            // where each one is still next to the variable it was written about, and the notes
+            // box goes back to being for notes.
+            notes: "",
             tags: [],
             isFavorite: false,
             fieldDrafts: fieldDrafts,
-            templateID: templates.first(where: { $0.itemType == .envGroup })?.id
+            templateID: templates.first(where: { $0.itemType == .envGroup })?.id,
+            // Nothing to preserve when the file held no assignments — the single blob field is
+            // the file — or when it was nothing but plain `KEY=value` lines.
+            envLayout: parsed.entries.isEmpty || layout.isTrivial ? nil : layout
         )
     }
 

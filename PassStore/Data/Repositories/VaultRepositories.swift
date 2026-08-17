@@ -332,6 +332,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         item.workspace = workspace(for: draft.workspaceID)
         item.template = template(for: draft.templateID)
         item.linkedFile = draft.linkedFile
+        item.envLayout = draft.envLayout
 
         // Field keys are the merge identity, so collisions must be resolved before mapping:
         // `Dictionary(uniqueKeysWithValues:)` traps on duplicates, and the editor lets two
@@ -720,7 +721,10 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                     sortOrder: index
                 )
             },
-            templateID: item.template?.id
+            templateID: item.template?.id,
+            // A duplicate is deliberately not linked to the same file, but it is still the same
+            // `.env`: it should copy out looking like one.
+            envLayout: item.envLayout
         )
         return try saveItem(duplicateDraft)
     }

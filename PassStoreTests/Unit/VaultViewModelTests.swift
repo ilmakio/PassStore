@@ -143,7 +143,10 @@ struct VaultViewModelTests {
         #expect(draft.title == "Imported .env")
         #expect(draft.type == .envGroup)
         #expect(draft.workspaceID == workspace.id)
-        #expect(draft.notes == "local config")
+        // The file's comments are kept in the layout, next to the variable each one is about,
+        // rather than flattened into the notes box.
+        #expect(draft.notes.isEmpty)
+        #expect(draft.envLayout?.outline.sections.first?.groups.first?.comments == ["local config"])
         #expect(draft.tags.isEmpty)
         #expect(draft.fieldDrafts.map(\.key) == ["API_URL", "SESSION_SECRET"])
         #expect(draft.fieldDrafts.last?.isSensitive == true)

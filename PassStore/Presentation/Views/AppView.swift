@@ -866,6 +866,11 @@ private struct ItemRow: View {
         Button("Copy .env", systemImage: "doc.on.doc") {
             viewModel.copyEnv(for: item)
         }
+        if item.envLayout != nil {
+            Button("Copy .env Values Only", systemImage: "list.bullet.rectangle") {
+                viewModel.copyEnvValuesOnly(for: item)
+            }
+        }
         Button("Copy JSON", systemImage: "curlybraces") {
             viewModel.copyJSON(for: item)
         }
@@ -1218,6 +1223,15 @@ private struct ItemDetailView: View {
                             }
                             .accessibilityIdentifier("detail-action-env")
 
+                            // Only worth offering where the two differ: an item with stored
+                            // formatting is the one whose copy carries comments.
+                            if item.envLayout != nil {
+                                Button("Copy .env Values Only", systemImage: "list.bullet.rectangle") {
+                                    viewModel.copyEnvValuesOnly()
+                                }
+                                .accessibilityIdentifier("detail-action-env-values")
+                            }
+
                             Button("Copy JSON", systemImage: "curlybraces") {
                                 viewModel.copyJSON()
                             }
@@ -1374,7 +1388,27 @@ private struct ItemDetailView: View {
 
     // MARK: Fields
 
+    @ViewBuilder
     private func fieldsSectionContent(for item: SecretItemEntity) -> some View {
+        if let outline = viewModel.envOutline(for: item) {
+            EnvOutlinedFields(
+                outline: outline,
+                fields: viewModel.visibleSelectedFields,
+                canRevealSecrets: viewModel.container.sessionManager.lockState == .unlocked,
+                copiedFieldID: copiedFieldID,
+                onCopy: { field in
+                    viewModel.copyField(field)
+                    flashCopiedField(field.id)
+                },
+                onOpenURL: { viewModel.openFieldURL($0) },
+                onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) }
+            )
+        } else {
+            plainFieldsContent(for: item)
+        }
+    }
+
+    private func plainFieldsContent(for item: SecretItemEntity) -> some View {
         VStack(alignment: .leading, spacing: VaultSpacing.l) {
             ForEach(viewModel.visibleSelectedFields) { field in
                 FieldRow(
@@ -1404,6 +1438,121 @@ private struct ItemDetailView: View {
             try? await Task.sleep(for: .seconds(1.4))
             if copiedFieldID == fieldID { copiedFieldID = nil }
         }
+    }
+}
+
+// MARK: - Outlined .env fields
+
+/// The item's variables laid out the way the `.env` they came from reads.
+///
+/// The comments in a `.env` are not a block of prose at the end of the file: each one sits above
+/// the variable it explains, and the banner rules split the file into sections. Flattening them
+/// into one note — which is what an import used to do — throws away the only thing that says
+/// which comment is about what.
+private struct EnvOutlinedFields: View {
+    let outline: EnvDocumentLayout.Outline
+    let fields: [FieldResolvedValue]
+    let canRevealSecrets: Bool
+    let copiedFieldID: UUID?
+    let onCopy: (FieldResolvedValue) -> Void
+    let onOpenURL: (FieldResolvedValue) -> Void
+    let onShowHistory: () -> Void
+
+    private var fieldsByKey: [String: FieldResolvedValue] {
+        Dictionary(fields.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Variables added in PassStore after the formatting was captured, plus anything the outline
+    /// does not mention. Shown after the file's own layout rather than dropped.
+    private var unplacedFields: [FieldResolvedValue] {
+        let placed = Set(outline.sections.flatMap { $0.groups.flatMap(\.keys) })
+        return fields.filter { !placed.contains($0.key) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+            ForEach(visibleSections) { section in
+                sectionView(section)
+            }
+
+            if !unplacedFields.isEmpty {
+                VStack(alignment: .leading, spacing: VaultSpacing.l) {
+                    ForEach(unplacedFields) { field in
+                        row(field)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A section with nothing left to show — every variable in it is empty, or was removed — is
+    /// not worth a heading.
+    private var visibleSections: [EnvDocumentLayout.Outline.Section] {
+        let byKey = fieldsByKey
+        return outline.sections.compactMap { section in
+            let groups = section.groups.filter { group in
+                group.keys.contains { byKey[$0] != nil }
+            }
+            guard !groups.isEmpty else { return nil }
+            var trimmed = section
+            trimmed.groups = groups
+            return trimmed
+        }
+    }
+
+    private func sectionView(_ section: EnvDocumentLayout.Outline.Section) -> some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.l) {
+            if !section.title.isEmpty {
+                Text(section.title)
+                    .font(.vaultSectionTitle)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !section.detail.isEmpty {
+                commentText(section.detail)
+            }
+
+            ForEach(section.groups) { group in
+                groupView(group)
+            }
+        }
+    }
+
+    private func groupView(_ group: EnvDocumentLayout.Outline.Group) -> some View {
+        let byKey = fieldsByKey
+        return VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            if !group.comments.isEmpty {
+                commentText(group.comments)
+            }
+
+            ForEach(group.keys.compactMap { byKey[$0] }) { field in
+                row(field)
+            }
+        }
+    }
+
+    private func commentText(_ lines: [String]) -> some View {
+        Text(lines.joined(separator: "\n"))
+            .font(.vaultFootnote)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func row(_ field: FieldResolvedValue) -> some View {
+        FieldRow(
+            field: field,
+            canRevealSecrets: canRevealSecrets,
+            isCopied: copiedFieldID == field.id,
+            onCopy: { onCopy(field) },
+            onOpenURL: { onOpenURL(field) },
+            onShowHistory: onShowHistory,
+            note: outline.trailingComments[field.key]
+        )
     }
 }
 
@@ -1591,6 +1740,8 @@ private struct FieldRow: View {
     let onCopy: () -> Void
     let onOpenURL: () -> Void
     var onShowHistory: (() -> Void)?
+    /// The `# comment` written after this variable's value in the file it came from.
+    var note: String?
 
     /// Pinned reveal: stays shown after the pointer leaves.
     ///
@@ -1621,6 +1772,17 @@ private struct FieldRow: View {
             header
 
             valueBox
+
+            if let note, !note.isEmpty {
+                Text(note)
+                    .font(.vaultFootnote)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("detail-field-note-\(field.key)")
+            }
 
             if isOpenableURL {
                 Button(action: onOpenURL) {

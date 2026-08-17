@@ -367,6 +367,9 @@ extension VaultSnapshot {
             for field in item.fields where field.previousValues.count > 1_000 {
                 throw VaultCryptoError.vaultContentsTooLarge
             }
+            if let lineCount = item.envLayout?.lines.count, lineCount > EnvDocumentLayout.maximumLines {
+                throw VaultCryptoError.vaultContentsTooLarge
+            }
         }
 
         for template in customTemplates where template.fieldDefinitions.count > 2_000 {
@@ -646,7 +649,8 @@ final class VaultMemoryStore {
                 },
                 changeHistory: item.changeHistory,
                 ignoredHealthIssues: item.ignoredHealthIssues,
-                linkedFile: item.linkedFile
+                linkedFile: item.linkedFile,
+                envLayout: item.envLayout
             )
         }
 
@@ -796,7 +800,8 @@ final class VaultMemoryStore {
                     namespace: "item-history|\(itemID.uuidString)"
                 ),
                 ignoredHealthIssues: Self.uniqueIgnoredIssues(itemSnapshot.ignoredHealthIssues),
-                linkedFile: itemSnapshot.linkedFile
+                linkedFile: itemSnapshot.linkedFile,
+                envLayout: itemSnapshot.envLayout
             )
             var seenFieldIDs: Set<UUID> = []
             item.fields = itemSnapshot.fields.map { fieldSnapshot in

@@ -310,10 +310,18 @@ extension VaultViewModel {
             .init(
                 id: "cmd.copyEnv",
                 title: "Copy as .env",
-                subtitle: nil,
-                keywords: ["copy", "clipboard", "env"],
+                subtitle: "Keeps the file's comments and formatting",
+                keywords: ["copy", "clipboard", "env", "comments", "original"],
                 isEnabled: canClipboard,
                 perform: wrap { self.copyEnv() }
+            ),
+            .init(
+                id: "cmd.copyEnvValuesOnly",
+                title: "Copy as .env (Values Only)",
+                subtitle: "Keys and values, no comments",
+                keywords: ["copy", "clipboard", "env", "values", "keys"],
+                isEnabled: canClipboard,
+                perform: wrap { self.copyEnvValuesOnly() }
             ),
             .init(
                 id: "cmd.copyJSON",
