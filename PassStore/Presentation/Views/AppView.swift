@@ -1160,7 +1160,7 @@ private struct ItemDetailView: View {
                         VStack(alignment: .leading, spacing: VaultSpacing.xl) {
                             LinkedFileSection(viewModel: viewModel, item: item)
 
-                            if !viewModel.visibleSelectedFields.isEmpty {
+                            if !viewModel.detailSelectedFields.isEmpty {
                                 VaultSection("Fields", systemImage: "list.bullet") {
                                     fieldsSectionContent(for: item)
                                 }
@@ -1393,7 +1393,7 @@ private struct ItemDetailView: View {
         if let outline = viewModel.envOutline(for: item) {
             EnvOutlinedFields(
                 outline: outline,
-                fields: viewModel.visibleSelectedFields,
+                fields: viewModel.detailSelectedFields,
                 canRevealSecrets: viewModel.container.sessionManager.lockState == .unlocked,
                 copiedFieldID: copiedFieldID,
                 onCopy: { field in
@@ -1401,7 +1401,11 @@ private struct ItemDetailView: View {
                     flashCopiedField(field.id)
                 },
                 onOpenURL: { viewModel.openFieldURL($0) },
-                onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) }
+                onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) },
+                drift: { viewModel.envFieldDrift(for: item, key: $0) },
+                linkedFileName: item.linkedFile?.fileName,
+                onPullField: { key in Task { await viewModel.updateFieldFromLinkedFile(key: key, in: item) } },
+                onPushField: { key in Task { await viewModel.writeFieldToLinkedFile(key: key, from: item) } }
             )
         } else {
             plainFieldsContent(for: item)
@@ -1410,20 +1414,25 @@ private struct ItemDetailView: View {
 
     private func plainFieldsContent(for item: SecretItemEntity) -> some View {
         VStack(alignment: .leading, spacing: VaultSpacing.l) {
-            ForEach(viewModel.visibleSelectedFields) { field in
-                FieldRow(
+            ForEach(viewModel.detailSelectedFields) { field in
+                DetailFieldRow(
                     field: field,
                     canRevealSecrets: viewModel.container.sessionManager.lockState == .unlocked,
                     isCopied: copiedFieldID == field.id,
+                    note: nil,
+                    drift: viewModel.envFieldDrift(for: item, key: field.key),
+                    linkedFileName: item.linkedFile?.fileName,
                     onCopy: {
                         viewModel.copyField(field)
                         flashCopiedField(field.id)
                     },
                     onOpenURL: { viewModel.openFieldURL(field) },
-                    onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) }
+                    onShowHistory: { viewModel.activeSheet = .itemHistory(item.id) },
+                    onPull: { Task { await viewModel.updateFieldFromLinkedFile(key: field.key, in: item) } },
+                    onPush: { Task { await viewModel.writeFieldToLinkedFile(key: field.key, from: item) } }
                 )
 
-                if field.id != viewModel.visibleSelectedFields.last?.id {
+                if field.id != viewModel.detailSelectedFields.last?.id {
                     Divider()
                 }
             }
@@ -1457,6 +1466,10 @@ private struct EnvOutlinedFields: View {
     let onCopy: (FieldResolvedValue) -> Void
     let onOpenURL: (FieldResolvedValue) -> Void
     let onShowHistory: () -> Void
+    let drift: (String) -> EnvFieldDrift?
+    let linkedFileName: String?
+    let onPullField: (String) -> Void
+    let onPushField: (String) -> Void
 
     private var fieldsByKey: [String: FieldResolvedValue] {
         Dictionary(fields.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
@@ -1544,15 +1557,120 @@ private struct EnvOutlinedFields: View {
     }
 
     private func row(_ field: FieldResolvedValue) -> some View {
-        FieldRow(
+        DetailFieldRow(
             field: field,
             canRevealSecrets: canRevealSecrets,
             isCopied: copiedFieldID == field.id,
+            note: outline.trailingComments[field.key],
+            drift: drift(field.key),
+            linkedFileName: linkedFileName,
             onCopy: { onCopy(field) },
             onOpenURL: { onOpenURL(field) },
             onShowHistory: onShowHistory,
-            note: outline.trailingComments[field.key]
+            onPull: { onPullField(field.key) },
+            onPush: { onPushField(field.key) }
         )
+    }
+}
+
+// MARK: - Detail field row
+
+/// One field in the detail pane, with whatever the linked file has to say about it.
+private struct DetailFieldRow: View {
+    let field: FieldResolvedValue
+    let canRevealSecrets: Bool
+    let isCopied: Bool
+    let note: String?
+    let drift: EnvFieldDrift?
+    let linkedFileName: String?
+    let onCopy: () -> Void
+    let onOpenURL: () -> Void
+    let onShowHistory: () -> Void
+    let onPull: () -> Void
+    let onPush: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            if let drift, let linkedFileName {
+                EnvFieldDriftBadge(
+                    key: field.key,
+                    drift: drift,
+                    fileName: linkedFileName,
+                    onPull: onPull,
+                    onPush: onPush
+                )
+            }
+
+            FieldRow(
+                field: field,
+                canRevealSecrets: canRevealSecrets,
+                isCopied: isCopied,
+                onCopy: onCopy,
+                onOpenURL: onOpenURL,
+                onShowHistory: onShowHistory,
+                note: note
+            )
+        }
+    }
+}
+
+/// Says what happened to this one variable, and offers the two ways out of it.
+///
+/// The file-level banner can only offer to replace everything in one direction, which is the wrong
+/// size of decision when a single variable moved — and the reason people ended up copying values
+/// by hand around it.
+private struct EnvFieldDriftBadge: View {
+    let key: String
+    let drift: EnvFieldDrift
+    let fileName: String
+    let onPull: () -> Void
+    let onPush: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+            VaultNote(text: message, tone: .warning, systemImage: "arrow.triangle.2.circlepath")
+
+            HStack(spacing: VaultSpacing.m) {
+                if drift.canPull {
+                    Button(pullTitle, action: onPull)
+                        .accessibilityIdentifier("field-drift-pull-\(key)")
+                }
+                if drift.canPush {
+                    Button(pushTitle, action: onPush)
+                        .accessibilityIdentifier("field-drift-push-\(key)")
+                }
+                Spacer(minLength: 0)
+            }
+            .buttonStyle(.link)
+            .font(.vaultFootnote)
+        }
+        .accessibilityIdentifier("field-drift-\(key)")
+    }
+
+    private var message: String {
+        switch drift {
+        case .fileChanged: "\(fileName) has a different value for this variable."
+        case .vaultChanged: "This value has changed since the last sync with \(fileName)."
+        case .diverged: "This value and the one in \(fileName) have both changed."
+        case .onlyInVault: "\(fileName) does not set this variable."
+        case .onlyInFile: "This variable is only in \(fileName)."
+        }
+    }
+
+    private var pullTitle: String {
+        switch drift {
+        case .vaultChanged: "Revert to file value"
+        case .onlyInFile: "Add to item"
+        default: "Use file value"
+        }
+    }
+
+    private var pushTitle: String {
+        switch drift {
+        case .fileChanged, .diverged: "Keep this value"
+        case .onlyInVault: "Add to file"
+        default: "Write to file"
+        }
     }
 }
 
@@ -1614,6 +1732,38 @@ private struct LinkedFileSection: View {
             .accessibilityIdentifier("linked-file-menu")
 
             statusRow(link)
+
+            // Variables the file sets and the item does not have. They have no field to be marked
+            // against, so they are listed here instead of being invisible.
+            let missing = viewModel.envFieldsOnlyInFile(for: item)
+            if !missing.isEmpty {
+                VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                    VaultNote(
+                        text: missing.count == 1
+                            ? "\(link.fileName) sets one variable this item does not have."
+                            : "\(link.fileName) sets \(missing.count) variables this item does not have.",
+                        tone: .warning
+                    )
+                    ForEach(missing, id: \.self) { key in
+                        HStack(spacing: VaultSpacing.s) {
+                            Text(key)
+                                .font(.vaultValueSmall)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: VaultSpacing.s)
+                            Button("Add to item") {
+                                Task {
+                                    _ = await viewModel.updateFieldFromLinkedFile(key: key, in: item)
+                                    await refresh()
+                                }
+                            }
+                            .buttonStyle(.link)
+                            .font(.vaultFootnote)
+                            .accessibilityIdentifier("linked-file-add-\(key)")
+                        }
+                    }
+                }
+            }
 
             HStack(spacing: VaultSpacing.s) {
                 Button {

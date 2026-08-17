@@ -464,6 +464,65 @@ nonisolated struct EnvImportService: Sendable {
         var currentValue: String { EnvImportService.unquote(rawValue) }
     }
 
+    /// Compares the file with the item one variable at a time.
+    ///
+    /// Only variables that actually differ are reported. `baseline` is the digest of each value at
+    /// the last sync: without it there is no way to tell an on-disk edit from a local one, and the
+    /// honest answer for a variable that differs is `.diverged` rather than a guess.
+    static func drift(
+        between fileContents: String,
+        and fields: [FieldResolvedValue],
+        baseline: [String: String]?
+    ) -> [String: EnvFieldDrift] {
+        // Last occurrence wins, which is how dotenv readers resolve a repeated variable.
+        let fileValues = Dictionary(
+            EnvImportService().parse(fileContents).entries.map { ($0.key, $0.value) },
+            uniquingKeysWith: { _, last in last }
+        )
+        let vaultValues = Dictionary(
+            fields.map { ($0.key, $0.value) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var result: [String: EnvFieldDrift] = [:]
+        for (key, vaultValue) in vaultValues {
+            guard let fileValue = fileValues[key] else {
+                result[key] = .onlyInVault
+                continue
+            }
+            guard fileValue != vaultValue else { continue }
+            guard let synced = baseline?[key] else {
+                result[key] = .diverged
+                continue
+            }
+            let fileMoved = synced != LinkedFileService.digest(fileValue)
+            let vaultMoved = synced != LinkedFileService.digest(vaultValue)
+            switch (fileMoved, vaultMoved) {
+            case (true, false): result[key] = .fileChanged
+            case (false, true): result[key] = .vaultChanged
+            // Both, or a baseline that matches neither: either way the owner has to pick a side.
+            default: result[key] = .diverged
+            }
+        }
+        for (key, _) in fileValues where vaultValues[key] == nil {
+            result[key] = .onlyInFile
+        }
+        return result
+    }
+
+    /// The per-variable baseline to store when the item and the file are in sync.
+    static func fieldDigests(of fields: [FieldResolvedValue]) -> [String: String] {
+        Dictionary(
+            fields.map { ($0.key, LinkedFileService.digest($0.value)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
+    /// The value the file currently gives a variable, or nil when it does not have it.
+    static func value(forKey key: String, in fileContents: String) -> String? {
+        EnvImportService().parse(fileContents).entries.last { $0.key == key }?.value
+    }
+
     /// Captures the file's shape — everything about it the item's fields cannot carry.
     ///
     /// Values are not part of it: see `EnvDocumentLayout`.

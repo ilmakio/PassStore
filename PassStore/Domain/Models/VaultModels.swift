@@ -478,6 +478,13 @@ nonisolated struct LinkedFileReference: Codable, Hashable, Sendable {
     /// A newly selected file whose contents did not match the vault when it was linked.
     /// No side is considered authoritative until the owner explicitly pulls or pushes.
     var requiresInitialSync: Bool
+    /// Digest of each variable's value at the last sync, keyed by variable name.
+    ///
+    /// The whole-file digests can only say *that* something moved. These say which side moved for
+    /// each variable, which is what makes "this one changed on disk — take it" possible without
+    /// deciding anything about the rest of the file. Nil for links made before 1.2.1, where the
+    /// answer is honestly unknown.
+    var syncedFieldDigests: [String: String]?
 
     init(
         bookmark: Data? = nil,
@@ -486,7 +493,8 @@ nonisolated struct LinkedFileReference: Codable, Hashable, Sendable {
         syncedAt: Date? = nil,
         syncedVaultDigest: String? = nil,
         parsedIntoFields: Bool = true,
-        requiresInitialSync: Bool = false
+        requiresInitialSync: Bool = false,
+        syncedFieldDigests: [String: String]? = nil
     ) {
         self.bookmark = bookmark
         self.displayPath = displayPath
@@ -495,6 +503,7 @@ nonisolated struct LinkedFileReference: Codable, Hashable, Sendable {
         self.syncedVaultDigest = syncedVaultDigest
         self.parsedIntoFields = parsedIntoFields
         self.requiresInitialSync = requiresInitialSync
+        self.syncedFieldDigests = syncedFieldDigests
     }
 
     init(from decoder: Decoder) throws {
@@ -506,6 +515,7 @@ nonisolated struct LinkedFileReference: Codable, Hashable, Sendable {
         syncedVaultDigest = try container.decodeIfPresent(String.self, forKey: .syncedVaultDigest)
         parsedIntoFields = try container.decodeIfPresent(Bool.self, forKey: .parsedIntoFields) ?? true
         requiresInitialSync = try container.decodeIfPresent(Bool.self, forKey: .requiresInitialSync) ?? false
+        syncedFieldDigests = try container.decodeIfPresent([String: String].self, forKey: .syncedFieldDigests)
     }
 
     var fileName: String {
