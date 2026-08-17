@@ -1929,11 +1929,15 @@ private struct FieldRow: View {
         return isRevealPinned || isHoveringValue
     }
 
+    /// Spaced by hand rather than by one stack spacing: a name and the value under it are one
+    /// thing and sit close enough to read as one, while what follows the value — a note, a
+    /// difference to resolve — is a separate statement and needs the room to say so.
     var body: some View {
-        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+        VStack(alignment: .leading, spacing: 0) {
             header
 
             valueBox
+                .padding(.top, VaultSpacing.xs)
 
             // Directly under the value it is about: this is a statement about that one value and
             // what to do with it, not a banner over the whole entry.
@@ -1945,7 +1949,7 @@ private struct FieldRow: View {
                     onPull: onPullField,
                     onPush: onPushField
                 )
-                .padding(.top, VaultSpacing.hair)
+                .padding(.top, VaultSpacing.s)
             }
 
             if let note, !note.isEmpty {
@@ -1956,6 +1960,7 @@ private struct FieldRow: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, VaultSpacing.xs)
                     .accessibilityIdentifier("detail-field-note-\(field.key)")
             }
 
@@ -1965,6 +1970,7 @@ private struct FieldRow: View {
                         .font(.vaultFootnote)
                 }
                 .buttonStyle(.link)
+                .padding(.top, VaultSpacing.s)
                 .accessibilityIdentifier("detail-field-open-\(field.key)")
             }
         }
