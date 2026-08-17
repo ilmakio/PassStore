@@ -230,4 +230,46 @@ struct WorkspaceNavigationTests {
         viewModel.setSelectedType(.envGroup)
         #expect(viewModel.filteredItems.map(\.title) == ["Prod Env File"])
     }
+
+    // MARK: - Overview
+
+    /// The overview describes one project, so its figures must not count the whole vault.
+    @Test func theOverviewCountsOnlyItsOwnWorkspace() throws {
+        let fixture = try makeFixture("Overview")
+        let other = try #require(fixture.viewModel.createWorkspace(
+            WorkspaceDraft(name: "Other", icon: "shippingbox", colorHex: "#4A7AFF", notes: "")
+        ))
+        for (title, workspaceID) in [("Mine", fixture.workspaceID), ("Theirs", other.id)] {
+            _ = try fixture.container.itemRepository.saveItem(SecretItemDraft(
+                title: title,
+                type: .envGroup,
+                workspaceID: workspaceID,
+                environment: .preset(.local),
+                notes: "",
+                tags: [],
+                isFavorite: false,
+                fieldDrafts: [],
+                templateID: nil,
+                linkedFile: LinkedFileReference(displayPath: "/tmp/\(title).env")
+            ))
+        }
+        fixture.viewModel.reload()
+
+        #expect(fixture.viewModel.linkedFileCount(inWorkspace: fixture.workspaceID) == 1)
+        #expect(fixture.viewModel.linkedFileCount(inWorkspace: other.id) == 1)
+        #expect(fixture.viewModel.itemCount(inWorkspace: other.id) == 1)
+        #expect(fixture.viewModel.itemCount(inWorkspace: fixture.workspaceID) == 3)
+    }
+
+    @Test func theOverviewNamesTheEnvironmentsThatAreNotInTheProjectYet() throws {
+        let fixture = try makeFixture(
+            "Adoption",
+            declaring: [WorkspaceEnvironment(name: "Local", kind: .local, sortOrder: 0)]
+        )
+
+        #expect(fixture.viewModel.undeclaredEnvironments(inWorkspace: fixture.workspaceID).map(\.title) == ["Prod"])
+
+        fixture.viewModel.declareEnvironmentsInUse(inWorkspace: fixture.workspaceID)
+        #expect(fixture.viewModel.undeclaredEnvironments(inWorkspace: fixture.workspaceID).isEmpty)
+    }
 }

@@ -312,6 +312,32 @@ final class VaultViewModel {
         }
     }
 
+    // MARK: - Workspace overview
+
+    /// Secrets in this workspace that mirror a file on disk.
+    func linkedFileCount(inWorkspace id: UUID) -> Int {
+        items.count { $0.workspace?.id == id && !$0.isArchived && $0.linkedFile != nil }
+    }
+
+    /// Of those, the ones whose file and vault copy have drifted apart.
+    func outdatedLinkedFileCount(inWorkspace id: UUID) -> Int {
+        let outdated = Set(itemsWithOutdatedLinks)
+        return items.count { $0.workspace?.id == id && !$0.isArchived && outdated.contains($0.id) }
+    }
+
+    func lastUpdatedAt(inWorkspace id: UUID) -> Date? {
+        items
+            .filter { $0.workspace?.id == id && !$0.isArchived }
+            .map(\.updatedAt)
+            .max()
+    }
+
+    /// Environments the items use that the project has not claimed — what the overview offers
+    /// to adopt in one gesture.
+    func undeclaredEnvironments(inWorkspace id: UUID) -> [ResolvedWorkspaceEnvironment] {
+        environments(inWorkspace: id).filter { !$0.isDeclared }
+    }
+
     // MARK: - Environment bar
 
     /// The workspace whose environments the item list should offer as tabs, or nil when the

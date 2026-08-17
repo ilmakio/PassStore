@@ -1345,6 +1345,329 @@ private struct MultiSelectionBar: View {
     }
 }
 
+// MARK: - Workspace overview
+
+/// What the detail pane shows when you are standing in a workspace with nothing selected.
+///
+/// That pane used to spend its whole width asking for a click. Once a workspace is a project it
+/// is the natural place to describe one: which environments it has and how much is in each, what
+/// mirrors a file on disk, and the two or three things you are most likely to do next.
+private struct WorkspaceOverviewView: View {
+    @Bindable var viewModel: VaultViewModel
+    let workspace: WorkspaceEntity
+
+    private var accent: Color { Color(hex: workspace.colorHex) }
+
+    private var environments: [ResolvedWorkspaceEnvironment] {
+        viewModel.environments(inWorkspace: workspace.id)
+    }
+
+    private var itemCount: Int { viewModel.itemCount(inWorkspace: workspace.id) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                    environmentsSection
+                    linkedFilesSection
+                    actionsSection
+
+                    if !workspace.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        VaultSection("Notes", systemImage: "note.text") {
+                            Text(workspace.notes)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                }
+                .padding(VaultSpacing.xl)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("workspace-overview-\(uiIdentifierSlug(workspace.name))")
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: VaultSpacing.l) {
+                icon
+
+                VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                    Text("Workspace")
+                        .font(.vaultBadge)
+                        .foregroundStyle(.secondary)
+
+                    Text(workspace.name)
+                        .font(.title3.weight(.semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                        .accessibilityIdentifier("workspace-overview-title")
+
+                    Text(summary)
+                        .font(.vaultFootnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+            .padding(.horizontal, VaultSpacing.xl)
+            .padding(.vertical, VaultSpacing.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(banner)
+
+            Rectangle()
+                .fill(VaultChrome.hairline)
+                .frame(height: 1)
+        }
+    }
+
+    private var summary: String {
+        var parts = ["\(itemCount) \(itemCount == 1 ? "secret" : "secrets")"]
+        if environments.count > 1 {
+            parts.append("\(environments.count) environments")
+        }
+        if let updated = viewModel.lastUpdatedAt(inWorkspace: workspace.id) {
+            parts.append("updated \(Self.relative(updated))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var banner: some View {
+        ZStack {
+            LinearGradient(
+                colors: [accent.opacity(0.20), accent.opacity(0.04)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            VaultPixelGrid(
+                tint: accent,
+                spacing: 11,
+                dot: 1.5,
+                maxAlpha: 0.30,
+                baseAlpha: 0.03,
+                focus: UnitPoint(x: 0.12, y: 0.35),
+                framesPerSecond: 8
+            )
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var icon: some View {
+        let shape = RoundedRectangle(cornerRadius: VaultRadius.hero, style: .continuous)
+        return shape
+            .fill(accent)
+            .overlay(
+                LinearGradient(
+                    colors: [.white.opacity(0.32), .white.opacity(0.04), .black.opacity(0.14)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(shape)
+            )
+            .overlay(shape.strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+            .frame(width: 50, height: 50)
+            .shadow(color: accent.opacity(0.40), radius: 9, y: 4)
+            .overlay(
+                Image(systemName: workspace.icon)
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(accent.vaultContrastingGlyph)
+            )
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Environments
+
+    @ViewBuilder
+    private var environmentsSection: some View {
+        VaultSection("Environments", systemImage: "circle.hexagongrid", tint: accent) {
+            Button("Manage…") { viewModel.activeSheet = .editWorkspace(workspace.id) }
+                .buttonStyle(.link)
+                .font(.vaultFootnote)
+                .accessibilityIdentifier("workspace-overview-manage-environments")
+        } content: {
+            VStack(alignment: .leading, spacing: VaultSpacing.m) {
+                if environments.isEmpty {
+                    VaultNote(
+                        text: "Nothing in this workspace yet. Declare the environments the project has and each one gets its own tab."
+                    )
+                } else {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 150), spacing: VaultSpacing.s)],
+                        alignment: .leading,
+                        spacing: VaultSpacing.s
+                    ) {
+                        ForEach(environments) { environment in
+                            environmentCard(environment)
+                        }
+                    }
+                }
+
+                let undeclared = viewModel.undeclaredEnvironments(inWorkspace: workspace.id)
+                if !undeclared.isEmpty {
+                    VaultNote(
+                        text: undeclared.count == 1
+                            ? "\(undeclared[0].title) is in use here but is not part of the project yet."
+                            : "In use here but not part of the project yet: \(undeclared.map(\.title).joined(separator: ", "))."
+                    )
+                    Button(undeclared.count == 1 ? "Add It to the Project" : "Add Them to the Project") {
+                        viewModel.declareEnvironmentsInUse(inWorkspace: workspace.id)
+                    }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("workspace-overview-adopt-environments")
+                }
+            }
+        }
+    }
+
+    private func environmentCard(_ environment: ResolvedWorkspaceEnvironment) -> some View {
+        let color = Color(hex: environment.colorHex)
+        let count = viewModel.itemCount(inWorkspace: workspace.id, environmentMatchKey: environment.matchKey)
+        let isCurrent = viewModel.selectedEnvironmentMatchKey == environment.matchKey
+
+        return Button {
+            viewModel.selectEnvironment(matchKey: environment.matchKey)
+        } label: {
+            VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+                HStack(spacing: VaultSpacing.s) {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 9, height: 9)
+                        .opacity(environment.isEnabled ? 1 : 0.35)
+                    Text(environment.title)
+                        .font(.vaultRowTitle)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("\(count)")
+                        .font(.vaultBadge)
+                        .foregroundStyle(.secondary)
+                }
+
+                // Deliberately not "not in the project" on every card: when a workspace has
+                // declared nothing that is every card, and the note under the grid already says
+                // it once, by name.
+                Text(environmentSubtitle(environment, count: count))
+                    .font(.vaultBadge)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(VaultSpacing.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                    .fill(isCurrent ? color.opacity(0.12) : VaultChrome.mutedFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                    .strokeBorder(
+                        isCurrent ? color.opacity(0.45) : VaultChrome.hairline,
+                        lineWidth: isCurrent ? 1 : 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if environment.isDeclared {
+                Button(environment.isEnabled ? "Switch Off" : "Switch On") {
+                    viewModel.setEnvironmentEnabled(
+                        !environment.isEnabled,
+                        matchKey: environment.matchKey,
+                        inWorkspace: workspace.id
+                    )
+                }
+                Button("Remove from Project") {
+                    viewModel.undeclareEnvironment(matchKey: environment.matchKey, inWorkspace: workspace.id)
+                }
+            } else {
+                Button("Add to Project") {
+                    viewModel.declareEnvironment(environment, inWorkspace: workspace.id)
+                }
+            }
+        }
+        .accessibilityIdentifier("workspace-overview-environment-\(uiIdentifierSlug(environment.title))")
+    }
+
+    private func environmentSubtitle(_ environment: ResolvedWorkspaceEnvironment, count: Int) -> String {
+        if !environment.isEnabled {
+            return count > 0 ? "Switched off · \(count) still here" : "Switched off"
+        }
+        return count == 0 ? "Empty" : "\(count) \(count == 1 ? "secret" : "secrets")"
+    }
+
+    // MARK: Linked files
+
+    @ViewBuilder
+    private var linkedFilesSection: some View {
+        let linked = viewModel.linkedFileCount(inWorkspace: workspace.id)
+        if linked > 0 {
+            let outdated = viewModel.outdatedLinkedFileCount(inWorkspace: workspace.id)
+            VaultSection("Linked Files", systemImage: "doc.text.magnifyingglass", tint: accent) {
+                VStack(alignment: .leading, spacing: VaultSpacing.s) {
+                    Text("\(linked) of \(itemCount) \(itemCount == 1 ? "secret" : "secrets") here mirrors a file on disk.")
+                        .font(.vaultFootnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if outdated > 0 {
+                        VaultNote(
+                            text: "\(outdated) \(outdated == 1 ? "file has" : "files have") changed on one side since the last sync. Open the secret to pull the file in or push the vault out.",
+                            tone: .warning
+                        )
+                    } else {
+                        VaultNote(text: "Everything matched at the last check.", tone: .success)
+                    }
+
+                    Button("Check Again") {
+                        Task { await viewModel.refreshLinkedFileStatuses() }
+                    }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("workspace-overview-check-links")
+                }
+            }
+        }
+    }
+
+    // MARK: Actions
+
+    private var actionsSection: some View {
+        VaultSection("Add to This Project", systemImage: "plus.circle", tint: accent) {
+            VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.s) {
+                Button("New Secret…") {
+                    viewModel.activeSheet = .newItemFlow
+                }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .accessibilityIdentifier("workspace-overview-new-item")
+
+                Button("Import a .env File…") {
+                    viewModel.importEnvFileCreatingItem()
+                }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .accessibilityIdentifier("workspace-overview-import-env")
+
+                Button("Edit Workspace…") {
+                    viewModel.activeSheet = .editWorkspace(workspace.id)
+                }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .accessibilityIdentifier("workspace-overview-edit")
+            }
+        }
+    }
+
+    private static func relative(_ date: Date) -> String {
+        // Same rule the item detail uses: inside a minute, "in 0 sec." is not an answer.
+        guard Date().timeIntervalSince(date) >= 60 else { return "just now" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
 // MARK: - Item Detail
 
 private struct ItemDetailView: View {
@@ -1430,6 +1753,12 @@ private struct ItemDetailView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .accessibilityIdentifier("detail-item-\(uiIdentifierSlug(item.title))")
+                } else if let workspaceID = viewModel.selectedDestination.workspaceID,
+                          let workspace = viewModel.workspace(for: workspaceID) {
+                    // Standing in a workspace with nothing selected used to say "Select a
+                    // Secret" — a whole pane spent asking for a click. It is the one place with
+                    // room to describe the project instead.
+                    WorkspaceOverviewView(viewModel: viewModel, workspace: workspace)
                 } else {
                     emptyDetailPlaceholder
                 }
