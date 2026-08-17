@@ -163,6 +163,14 @@ struct PassStoreCommands: Commands {
                 .disabled(!canUseClipboardActions)
 
                 Button {
+                    viewModel.copyEnvValuesOnly()
+                } label: {
+                    Label("Copy as .env (Values Only)", systemImage: "list.bullet.rectangle")
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift, .option])
+                .disabled(!canUseClipboardActions)
+
+                Button {
                     viewModel.copyJSON()
                 } label: {
                     Label("Copy as JSON", systemImage: "curlybraces")

@@ -995,7 +995,9 @@ struct EnvRoundTripTests {
 
         #expect(lines.contains("TOKEN=\"\\$(whoami)\""))
         #expect(lines.contains("NOTE=\"two words # not a comment\""))
-        #expect(lines.contains("EMPTIED=\"\""))
+        // An empty value is the exception: `KEY=` is unambiguous, and a file without quotes
+        // should not acquire a pair for a value that has nothing in it.
+        #expect(lines.contains("EMPTIED="))
         #expect(lines.contains("WRAPS=\"a\\nb\""))
     }
 
