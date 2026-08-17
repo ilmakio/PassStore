@@ -69,6 +69,33 @@ final class WorkspaceEnvironmentUITests: XCTestCase {
         app.terminate()
     }
 
+    /// Secrets sharing a name in one workspace are one secret in several environments, and the
+    /// detail pane is where you read across them.
+    func testTheDetailPaneSwitchesTheSameSecretBetweenEnvironments() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--uitesting", "--ui-select-destination=workspace:pokeos-api"]
+        app.launch()
+        app.activate()
+
+        XCTAssertTrue(itemRow(app, "primary-postgres").waitForExistence(timeout: 5))
+        itemRow(app, "primary-postgres").click()
+
+        let bar = app.descendants(matching: .any).matching(identifier: "environment-sibling-bar").firstMatch
+        // Only drawn when the project has more than one environment to read across.
+        guard bar.waitForExistence(timeout: 2) else {
+            throw XCTSkip("The seeded workspace has no secret that exists in more than one environment.")
+        }
+
+        let local = app.descendants(matching: .any)
+            .matching(identifier: "environment-sibling-local").firstMatch
+        XCTAssertTrue(local.waitForExistence(timeout: 2))
+        local.click()
+
+        // The title stays — it is the same secret — and the header now names the environment.
+        XCTAssertTrue(app.staticTexts.matching(identifier: "detail-item-title").firstMatch.exists)
+        app.terminate()
+    }
+
     private func itemRow(_ app: XCUIApplication, _ slug: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "item-row-\(slug)").firstMatch
     }

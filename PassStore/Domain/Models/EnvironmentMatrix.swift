@@ -68,6 +68,66 @@ nonisolated struct EnvironmentMatrix: Sendable {
     var rowsNeedingAttention: [Row] {
         rows.filter { $0.missingCount > 0 || $0.hasSharedSecret || $0.isDefinedTwiceSomewhere }
     }
+
+    /// One environment and how many keys it is missing that a sibling defines.
+    struct MissingEnvironment: Identifiable, Sendable {
+        let title: String
+        let count: Int
+
+        var id: String { title }
+    }
+
+    /// What the comparison amounts to, in the terms a person would use.
+    ///
+    /// Exists so a surface can *state the finding* — "Staging is missing 3 keys" — instead of
+    /// offering a button called "Compare" and leaving the reader to go and look.
+    struct Summary: Sendable {
+        let keyCount: Int
+        let environmentCount: Int
+        /// Environments short of at least one key, emptiest first.
+        let missing: [MissingEnvironment]
+        let sharedSecretCount: Int
+        /// Keys that two secrets in the same environment both define.
+        let definedTwiceCount: Int
+
+        var hasFindings: Bool {
+            !missing.isEmpty || sharedSecretCount > 0 || definedTwiceCount > 0
+        }
+
+        /// True when there is not yet enough in the workspace for a comparison to mean anything.
+        var isInconclusive: Bool { keyCount == 0 || environmentCount < 2 }
+    }
+
+    var summary: Summary {
+        var missingByColumn: [String: Int] = [:]
+        for row in rows {
+            for cell in row.cells where cell.presence == .missing {
+                // Only counts where the row itself counted it, so an environment nobody has put
+                // anything in yet is not reported as missing every key in the project.
+                guard row.missingCount > 0 else { continue }
+                missingByColumn[cell.columnKey, default: 0] += 1
+            }
+        }
+
+        let titlesByKey = Dictionary(columns.map { ($0.matchKey, $0.title) }, uniquingKeysWith: { first, _ in first })
+        let missing = missingByColumn
+            .compactMap { key, count -> MissingEnvironment? in
+                guard let title = titlesByKey[key], count > 0 else { return nil }
+                return MissingEnvironment(title: title, count: count)
+            }
+            .sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+
+        return Summary(
+            keyCount: rows.count,
+            environmentCount: columns.count,
+            missing: missing,
+            sharedSecretCount: sharedSecretCount,
+            definedTwiceCount: rows.count(where: \.isDefinedTwiceSomewhere)
+        )
+    }
 }
 
 /// What the matrix is built from: one environment per column, and per column the field keys its
@@ -123,19 +183,34 @@ extension EnvironmentMatrix {
             Column(matchKey: $0.matchKey, title: $0.title, systemImage: $0.systemImage, itemCount: $0.itemCount)
         }
 
+        // Each column's entries are grouped by normalised key once, up front. Rescanning a
+        // column's whole entry list for every row turned the build into keys × columns × entries,
+        // with a fresh lowercasing of every key on each pass.
+        var entriesByColumn: [String: [String: [EnvironmentMatrixInput.Entry]]] = [:]
+
         // First appearance, in column order, decides both the display spelling and the row order:
         // the environment listed first is usually the fullest one.
         var displayKeys: [String: String] = [:]
         var order: [String] = []
         for column in input.columns {
+            var grouped: [String: [EnvironmentMatrixInput.Entry]] = [:]
             for entry in column.entries {
                 let normalized = entry.key.lowercased()
+                grouped[normalized, default: []].append(entry)
                 if displayKeys[normalized] == nil {
                     displayKeys[normalized] = entry.key
                     order.append(normalized)
                 }
             }
+            entriesByColumn[column.matchKey] = grouped
         }
+
+        // "Missing" only counts against environments that hold something: a project that has
+        // declared Staging and put nothing in it yet is not missing every key. Fixed for the whole
+        // matrix, so it is settled once rather than rebuilt for every row.
+        let populatedColumnKeys = Set(
+            input.columns.filter { !$0.entries.isEmpty }.map(\.matchKey)
+        )
 
         let rows: [Row] = order.map { normalizedKey in
             var cells: [Cell] = []
@@ -143,7 +218,7 @@ extension EnvironmentMatrix {
             var digestsByColumn: [String: String] = [:]
 
             for column in input.columns {
-                let matches = column.entries.filter { $0.key.lowercased() == normalizedKey }
+                let matches = entriesByColumn[column.matchKey]?[normalizedKey] ?? []
                 if matches.contains(where: \.isSensitive) { isSensitive = true }
 
                 guard let first = matches.first else {
@@ -174,11 +249,6 @@ extension EnvironmentMatrix {
                 )
             }
 
-            // "Missing" only counts against environments that hold something: a project that
-            // has declared Staging and put nothing in it yet is not missing every key.
-            let populatedColumnKeys = Set(
-                input.columns.filter { !$0.entries.isEmpty }.map(\.matchKey)
-            )
             let missingCount = cells.count {
                 $0.presence == .missing && populatedColumnKeys.contains($0.columnKey)
             }

@@ -18,8 +18,11 @@ struct WorkspaceNavigationTests {
             WorkspaceEnvironment(name: "Local", kind: .local, sortOrder: 0),
             WorkspaceEnvironment(name: "Prod", kind: .prod, sortOrder: 1)
         ],
-        items: [(String, EnvironmentValue)] = [("Local DB", .preset(.local)), ("Prod DB", .preset(.prod))]
+        // Resolved in the body rather than as a default argument: a default argument is evaluated
+        // outside the actor this suite runs on, and `EnvironmentValue` belongs to the main one.
+        items: [(String, EnvironmentValue)]? = nil
     ) throws -> Fixture {
+        let items = items ?? [("Local DB", .preset(.local)), ("Prod DB", .preset(.prod))]
         let container = AppContainer(
             inMemory: true,
             defaults: UserDefaults(suiteName: "WorkspaceNavigation-\(label)-\(UUID().uuidString)")!,
@@ -322,15 +325,65 @@ struct WorkspaceNavigationTests {
         #expect(fixture.viewModel.itemCount(inWorkspace: fixture.workspaceID) == 3)
     }
 
-    @Test func theOverviewNamesTheEnvironmentsThatAreNotInTheProjectYet() throws {
+    /// Using an environment is what adds it. There is no separate step, so an environment its
+    /// secrets are in is never reported as somehow not belonging to the workspace.
+    @Test func savingASecretAddsItsEnvironmentToTheWorkspace() throws {
         let fixture = try makeFixture(
-            "Adoption",
-            declaring: [WorkspaceEnvironment(name: "Local", kind: .local, sortOrder: 0)]
+            "SelfDeclaring",
+            declaring: [WorkspaceEnvironment(name: "Local", kind: .local, sortOrder: 0)],
+            items: []
+        )
+        let workspace = try #require(fixture.viewModel.workspace(for: fixture.workspaceID))
+        #expect(workspace.environments.map(\.title) == ["Local"])
+
+        fixture.viewModel.saveItem(
+            SecretItemDraft(
+                id: nil,
+                title: "QA token",
+                type: .generic,
+                workspaceID: fixture.workspaceID,
+                environment: .custom("QA"),
+                notes: "",
+                tags: [],
+                isFavorite: false,
+                fieldDrafts: [],
+                templateID: nil
+            )
         )
 
-        #expect(fixture.viewModel.undeclaredEnvironments(inWorkspace: fixture.workspaceID).map(\.title) == ["Prod"])
+        let updated = try #require(fixture.viewModel.workspace(for: fixture.workspaceID))
+        #expect(updated.environments.map(\.title) == ["Local", "QA"])
+        // And the editor sees one list, with no notion of a half-member.
+        #expect(
+            fixture.viewModel.draftForWorkspace(updated).environments.map(\.title) == ["Local", "QA"]
+        )
+    }
 
-        fixture.viewModel.declareEnvironmentsInUse(inWorkspace: fixture.workspaceID)
-        #expect(fixture.viewModel.undeclaredEnvironments(inWorkspace: fixture.workspaceID).isEmpty)
+    /// The same environment used twice must not be added twice.
+    @Test func savingIntoAnEnvironmentItAlreadyHasChangesNothing() throws {
+        let fixture = try makeFixture(
+            "NoDuplicate",
+            declaring: [WorkspaceEnvironment(name: "Prod", kind: .prod, sortOrder: 0)],
+            items: []
+        )
+        for title in ["One", "Two"] {
+            fixture.viewModel.saveItem(
+                SecretItemDraft(
+                    id: nil,
+                    title: title,
+                    type: .generic,
+                    workspaceID: fixture.workspaceID,
+                    environment: .preset(.prod),
+                    notes: "",
+                    tags: [],
+                    isFavorite: false,
+                    fieldDrafts: [],
+                    templateID: nil
+                )
+            )
+        }
+
+        let updated = try #require(fixture.viewModel.workspace(for: fixture.workspaceID))
+        #expect(updated.environments.map(\.title) == ["Prod"])
     }
 }

@@ -303,8 +303,8 @@ struct WorkspaceEnvironmentTests {
         )
         viewModel.reload()
 
-        viewModel.setEnvironmentEnabled(false, matchKey: "prod", inWorkspace: workspace.id)
-        viewModel.setEnvironmentEnabled(false, matchKey: "local", inWorkspace: workspace.id)
+        viewModel.setEnvironmentVisible(false, matchKey: "prod", inWorkspace: workspace.id)
+        viewModel.setEnvironmentVisible(false, matchKey: "local", inWorkspace: workspace.id)
 
         let offered = viewModel.offeredEnvironments(inWorkspace: workspace.id)
         // Prod still holds a secret, so switching it off must not put that secret out of reach.
@@ -360,8 +360,11 @@ struct WorkspaceEnvironmentTests {
         #expect(viewModel.hasEnvironmentStructure(inWorkspace: workspace.id))
     }
 
-    @Test func adoptingEnvironmentsInUseDeclaresThemInLifecycleOrder() throws {
-        let container = makeContainer("Adopt")
+    /// A vault written before 1.3 has environments on its items and nothing written down. It is
+    /// read, never rewritten — the environments are worked out from the items, and the editor is
+    /// handed one list with no notion of a half-member.
+    @Test func aVaultWithNothingWrittenDownStillReadsItsEnvironmentsInLifecycleOrder() throws {
+        let container = makeContainer("Legacy")
         let viewModel = VaultViewModel(container: container)
         let workspace = try #require(viewModel.createWorkspace(
             WorkspaceDraft(name: "Acme", icon: "shippingbox", colorHex: "#4A7AFF", notes: "")
@@ -373,11 +376,15 @@ struct WorkspaceEnvironmentTests {
         }
         viewModel.reload()
 
-        viewModel.declareEnvironmentsInUse(inWorkspace: workspace.id)
+        // Nothing was written to the workspace by reading it.
+        #expect(viewModel.workspace(for: workspace.id)?.environments.isEmpty == true)
 
         let resolved = viewModel.environments(inWorkspace: workspace.id)
         #expect(resolved.map(\.title) == ["Local", "Prod", "QA"])
-        #expect(resolved.map(\.isDeclared) == [true, true, true])
+
+        // The editor is given the union, so saving settles it in one go.
+        let draft = viewModel.draftForWorkspace(viewModel.workspace(for: workspace.id))
+        #expect(draft.environments.map(\.title) == ["Local", "Prod", "QA"])
     }
 
     /// A merge adds what the backup has and the vault does not, and overwrites nothing — so an

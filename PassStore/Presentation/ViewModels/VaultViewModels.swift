@@ -175,40 +175,59 @@ final class VaultViewModel {
 
     // MARK: - Workspace environments
 
-    /// One pass over the vault, keyed by workspace and then by environment.
+    /// One pass over the vault per generation: for every workspace, which environments its items
+    /// use and how many sit in each.
     ///
-    /// The sidebar asks for a badge per environment per workspace on every render; filtering the
-    /// whole item list once per badge turned that into a quadratic walk of the vault.
-    @ObservationIgnored private var environmentCountsCache: (generation: Int, value: [UUID: [String: Int]])?
+    /// The sidebar asks for a badge per environment per workspace on every render, and resolving a
+    /// workspace's environments needs the titles its items carry. Answering either by filtering the
+    /// whole item list turned one render into a quadratic walk of the vault.
+    @ObservationIgnored private var environmentUsageCache: (generation: Int, value: [UUID: WorkspaceEnvironmentUsage])?
 
-    private var environmentCounts: [UUID: [String: Int]] {
-        if let cached = environmentCountsCache, cached.generation == vaultGeneration {
+    /// Resolution is a pure function of the usage above and the workspace's declarations, and both
+    /// are fixed within a generation — so it is memoised per workspace rather than recomputed for
+    /// every sidebar row that asks.
+    @ObservationIgnored private var resolvedEnvironmentsCache: (generation: Int, value: [UUID: [ResolvedWorkspaceEnvironment]])?
+
+    private var environmentUsage: [UUID: WorkspaceEnvironmentUsage] {
+        if let cached = environmentUsageCache, cached.generation == vaultGeneration {
             return cached.value
         }
-        var counts: [UUID: [String: Int]] = [:]
+        var usage: [UUID: WorkspaceEnvironmentUsage] = [:]
         for item in items where !item.isArchived {
             guard let workspaceID = item.workspace?.id else { continue }
-            let key = WorkspaceEnvironment.matchKey(for: item.environmentValue.title)
-            counts[workspaceID, default: [:]][key, default: 0] += 1
+            usage[workspaceID, default: WorkspaceEnvironmentUsage()].record(item.environmentValue.title)
         }
-        environmentCountsCache = (vaultGeneration, counts)
-        return counts
+        environmentUsageCache = (vaultGeneration, usage)
+        return usage
     }
 
-    /// Environment titles the workspace's items actually use.
+    func environmentUsage(inWorkspace id: UUID) -> WorkspaceEnvironmentUsage {
+        environmentUsage[id] ?? WorkspaceEnvironmentUsage()
+    }
+
+    /// Environment titles the workspace's items actually use, each once, in first-seen order.
     func presentEnvironmentTitles(inWorkspace id: UUID) -> [String] {
-        items
-            .filter { $0.workspace?.id == id && !$0.isArchived }
-            .map { $0.environmentValue.title }
+        environmentUsage(inWorkspace: id).titles
     }
 
     /// Every environment of a workspace: what it declares, plus what its items already use.
     func environments(inWorkspace id: UUID) -> [ResolvedWorkspaceEnvironment] {
+        if let cached = resolvedEnvironmentsCache,
+           cached.generation == vaultGeneration,
+           let resolved = cached.value[id] {
+            return resolved
+        }
         guard let workspace = workspace(for: id) else { return [] }
-        return WorkspaceEnvironment.resolvedList(
+        let resolved = WorkspaceEnvironment.resolvedList(
             declared: workspace.environments,
             presentTitles: presentEnvironmentTitles(inWorkspace: id)
         )
+        if resolvedEnvironmentsCache?.generation == vaultGeneration {
+            resolvedEnvironmentsCache?.value[id] = resolved
+        } else {
+            resolvedEnvironmentsCache = (vaultGeneration, [id: resolved])
+        }
+        return resolved
     }
 
     /// The environments the sidebar and the chip bar offer.
@@ -223,7 +242,7 @@ final class VaultViewModel {
     }
 
     func itemCount(inWorkspace id: UUID, environmentMatchKey key: String) -> Int {
-        environmentCounts[id]?[key] ?? 0
+        environmentUsage(inWorkspace: id).count(forMatchKey: key)
     }
 
     func itemCount(inWorkspace id: UUID, environmentTitle title: String) -> Int {
@@ -241,41 +260,40 @@ final class VaultViewModel {
         return environments(inWorkspace: id).count > 1
     }
 
-    /// Adopts an environment the items already use into the workspace's declared list.
-    func declareEnvironment(_ environment: ResolvedWorkspaceEnvironment, inWorkspace id: UUID) {
-        guard let workspace = workspace(for: id) else { return }
-        guard !workspace.environments.contains(where: { $0.matchKey == environment.matchKey }) else { return }
-        var updated = workspace.environments
-        updated.append(
-            WorkspaceEnvironment.declaration(
-                for: environment.environmentValue,
-                sortOrder: updated.count
-            )
-        )
-        applyEnvironments(updated, inWorkspace: id)
-    }
-
-    /// Adopts every environment the items use, for a workspace that has declared none.
-    func declareEnvironmentsInUse(inWorkspace id: UUID) {
+    /// Adds one or more environments to a workspace, skipping the ones it already has.
+    ///
+    /// The one-click way out of an empty workspace: "Add Local, Staging and Prod" is what almost
+    /// every project wants, and picking them one at a time from a menu is three gestures to
+    /// arrive at the same place.
+    func addEnvironments(_ values: [EnvironmentValue], toWorkspace id: UUID) {
         guard let workspace = workspace(for: id) else { return }
         var updated = workspace.environments
-        for environment in environments(inWorkspace: id) where !environment.isDeclared {
-            updated.append(
-                WorkspaceEnvironment.declaration(
-                    for: environment.environmentValue,
-                    sortOrder: updated.count
-                )
-            )
+        for value in values {
+            let key = WorkspaceEnvironment.matchKey(for: value.title)
+            guard !key.isEmpty, !updated.contains(where: { $0.matchKey == key }) else { continue }
+            updated.append(WorkspaceEnvironment.declaration(for: value, sortOrder: updated.count))
         }
         guard updated.count != workspace.environments.count else { return }
         applyEnvironments(updated, inWorkspace: id)
     }
 
-    func setEnvironmentEnabled(_ isEnabled: Bool, matchKey: String, inWorkspace id: UUID) {
+    /// The environments a project that has none should be offered: the lifecycle, minus anything
+    /// its secrets already put it in.
+    func suggestedEnvironments(forWorkspace id: UUID) -> [EnvironmentValue] {
+        let existing = Set(environments(inWorkspace: id).map(\.matchKey))
+        return EnvironmentKind.allCases
+            .filter { $0 != .custom && $0 != .dev }
+            .map { EnvironmentValue.preset($0) }
+            .filter { !existing.contains(WorkspaceEnvironment.matchKey(for: $0.title)) }
+    }
+
+    /// Whether an environment is drawn in the sidebar and the tab bar. Hiding one never hides its
+    /// secrets — see `offeredEnvironments(inWorkspace:)`.
+    func setEnvironmentVisible(_ isVisible: Bool, matchKey: String, inWorkspace id: UUID) {
         guard let workspace = workspace(for: id) else { return }
         var updated = workspace.environments
         guard let index = updated.firstIndex(where: { $0.matchKey == matchKey }) else { return }
-        updated[index].isEnabled = isEnabled
+        updated[index].isEnabled = isVisible
         applyEnvironments(updated, inWorkspace: id)
     }
 
@@ -329,29 +347,41 @@ final class VaultViewModel {
         var selectedCount: Int { plans.count { $0.isSelected } }
     }
 
-    /// Asks for a folder and links it to the workspace.
+    /// Asks for a folder, with the panel saying plainly what the grant is for.
     ///
-    /// A folder grant reaches everything inside it, so it is deliberately a separate, explicit
-    /// act: the panel says what it is for, nothing is scanned until this returns, and
-    /// `unlinkProjectFolder` gives the permission back in one click.
-    func linkProjectFolder(toWorkspace id: UUID) {
+    /// A folder grant reaches everything inside it, so it is always an explicit pick: no path
+    /// typed into a field and no path riding along in a backup can stand in for one.
+    private func pickProjectFolder(message: String, prompt: String) -> LinkedFolderReference? {
         guard container.sessionManager.lockState == .unlocked else {
-            alertMessage = "Unlock the vault before linking a folder."
-            return
+            alertMessage = "Unlock the vault before choosing a folder."
+            return nil
         }
-        guard let workspace = workspace(for: id) else { return }
-
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = true
-        panel.prompt = "Link Folder"
-        panel.message = "Choose the project folder for “\(workspace.name)”. PassStore will be able to read files inside it, and will only look when you ask it to."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        panel.prompt = prompt
+        panel.message = message
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
 
         do {
-            let folder = try container.envDiscovery.makeLink(to: url)
+            return try container.envDiscovery.makeLink(to: url)
+        } catch {
+            alertMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Links a folder to a workspace that already exists.
+    func linkProjectFolder(toWorkspace id: UUID) {
+        guard let workspace = workspace(for: id) else { return }
+        guard let folder = pickProjectFolder(
+            message: "Choose the folder “\(workspace.name)” lives in. PassStore will be able to read files inside it, and only looks when you ask.",
+            prompt: "Link Folder"
+        ) else { return }
+
+        do {
             try container.workspaceRepository.setLinkedFolder(folder, onWorkspaceWithID: id)
             reload()
             lastActionMessage = "Linked \(folder.folderName)."
@@ -359,6 +389,188 @@ final class VaultViewModel {
         } catch {
             handleMutationFailure(error)
         }
+    }
+
+    // MARK: - A new workspace, from a folder
+
+    /// A workspace being set up from a folder the owner just picked.
+    ///
+    /// Everything the creation sheet needs is settled before it opens — the name, the files, the
+    /// environment each one suggests — so the sheet is a review of a finished proposal rather
+    /// than a form to fill in.
+    struct NewWorkspaceFromFolder {
+        let folder: LinkedFolderReference
+        let folderPath: String
+        var name: String
+        var icon: String
+        var colorHex: String
+        var plans: [EnvFileImportPlan]
+        var didReachLimit: Bool
+        var isWorking: Bool = false
+
+        var selectedPlans: [EnvFileImportPlan] { plans.filter(\.isSelected) }
+        var selectedCount: Int { selectedPlans.count }
+
+        /// The environments this workspace will start with: the distinct ones among the files
+        /// being imported, in lifecycle order.
+        var environmentValues: [EnvironmentValue] {
+            WorkspaceEnvironment.canonicallyOrderedValues(from: selectedPlans.map(\.environment.title))
+        }
+
+        var canCreate: Bool {
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isWorking
+        }
+    }
+
+    var newWorkspaceFromFolder: NewWorkspaceFromFolder?
+
+    /// Picks a folder and proposes a whole workspace from it.
+    ///
+    /// This is the path most projects should take: a repository already knows its own name and
+    /// already says which environments it has, in the `.env` files sitting next to its code.
+    /// Asking someone to type all of that in and *then* link the folder is asking them to
+    /// describe something the folder could have described itself.
+    func beginWorkspaceFromFolder() async {
+        guard let folder = pickProjectFolder(
+            message: "Choose a project folder. PassStore will name the workspace after it and look for the .env files inside — reading nothing until you say which ones to import.",
+            prompt: "Choose Folder"
+        ) else { return }
+
+        let service = container.envDiscovery
+        let linkedPaths = alreadyLinkedFilePaths
+        let sessionGeneration = container.sessionManager.captureSecurityGeneration()
+
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try service.discover(in: folder, alreadyLinkedPaths: linkedPaths)
+            }.value
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return }
+
+            var linked = folder
+            linked.bookmark = result.refreshedBookmark ?? folder.bookmark
+            if !result.resolvedPath.isEmpty { linked.displayPath = result.resolvedPath }
+            linked.lastScannedAt = .now
+
+            newWorkspaceFromFolder = NewWorkspaceFromFolder(
+                folder: linked,
+                folderPath: linked.displayPath,
+                name: linked.folderName,
+                icon: "shippingbox",
+                colorHex: Self.suggestedWorkspaceColor(existing: workspaces.map(\.colorHex)),
+                plans: result.files.map { file in
+                    EnvFileImportPlan(
+                        file: file,
+                        isSelected: !file.isTemplate,
+                        environment: file.suggestedEnvironment,
+                        parsesIntoFields: true
+                    )
+                },
+                didReachLimit: result.didReachLimit
+            )
+            activeSheet = .newWorkspaceFromFolder
+        } catch {
+            guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return }
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// A colour the sidebar does not already use, so two projects are told apart at a glance.
+    private static func suggestedWorkspaceColor(existing: [String]) -> String {
+        let palette = ["#4A7AFF", "#28C76F", "#FF9F43", "#EA5455", "#7367F0", "#00CFE8"]
+        let used = Set(existing.map { $0.lowercased() })
+        return palette.first { !used.contains($0.lowercased()) } ?? palette[0]
+    }
+
+    func setNewWorkspaceName(_ name: String) { newWorkspaceFromFolder?.name = name }
+    func setNewWorkspaceIcon(_ icon: String) { newWorkspaceFromFolder?.icon = icon }
+    func setNewWorkspaceColor(_ hex: String) { newWorkspaceFromFolder?.colorHex = hex }
+
+    func setNewWorkspaceSelection(_ isSelected: Bool, forFileID id: String) {
+        guard let index = newWorkspaceFromFolder?.plans.firstIndex(where: { $0.id == id }) else { return }
+        newWorkspaceFromFolder?.plans[index].isSelected = isSelected
+    }
+
+    func setNewWorkspaceEnvironment(_ environment: EnvironmentValue, forFileID id: String) {
+        guard let index = newWorkspaceFromFolder?.plans.firstIndex(where: { $0.id == id }) else { return }
+        newWorkspaceFromFolder?.plans[index].environment = environment
+    }
+
+    func setNewWorkspaceParsing(_ parsesIntoFields: Bool, forFileID id: String) {
+        guard let index = newWorkspaceFromFolder?.plans.firstIndex(where: { $0.id == id }) else { return }
+        newWorkspaceFromFolder?.plans[index].parsesIntoFields = parsesIntoFields
+    }
+
+    /// Creates the workspace, its environments and its secrets from the reviewed proposal.
+    func createWorkspaceFromFolder() async {
+        guard container.sessionManager.lockState == .unlocked,
+              let state = newWorkspaceFromFolder else { return }
+        let name = state.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        newWorkspaceFromFolder?.isWorking = true
+
+        let declarations = state.environmentValues.enumerated().map { offset, value in
+            WorkspaceEnvironment.declaration(for: value, sortOrder: offset)
+        }
+
+        // The workspace and its folder go in together: a workspace made from a folder it then
+        // failed to remember would be a worse outcome than not making it at all.
+        let created: WorkspaceEntity
+        do {
+            created = try container.memoryStore.performTransaction { () -> WorkspaceEntity in
+                let workspace = try container.workspaceRepository.saveWorkspace(
+                    WorkspaceDraft(
+                        name: name,
+                        icon: state.icon,
+                        colorHex: state.colorHex,
+                        notes: "",
+                        environments: declarations
+                    )
+                )
+                try container.workspaceRepository.setLinkedFolder(state.folder, onWorkspaceWithID: workspace.id)
+                return workspace
+            }
+        } catch {
+            newWorkspaceFromFolder?.isWorking = false
+            handleMutationFailure(error)
+            return
+        }
+        reload()
+
+        // Importing opens files, so it happens outside that transaction: one unreadable file
+        // must not undo a workspace the owner has already seen created.
+        let outcome = await importEnvFiles(
+            state.selectedPlans,
+            from: state.folder,
+            intoWorkspaceWithID: created.id
+        )
+
+        newWorkspaceFromFolder = nil
+        reload()
+        selectDestination(.workspace(created.id))
+        lastActionMessage = Self.creationMessage(name: name, outcome: outcome)
+    }
+
+    private static func creationMessage(name: String, outcome: EnvImportOutcome) -> String {
+        var message = "Created \(name)"
+        if outcome.imported > 0 {
+            message += " with \(outcome.imported) \(outcome.imported == 1 ? "secret" : "secrets")"
+        }
+        message += "."
+        if !outcome.failures.isEmpty {
+            message += " Could not read: \(outcome.failures.joined(separator: ", "))."
+        }
+        return message
+    }
+
+    /// Absolute paths the vault already mirrors, so a scan can mark a file rather than offer to
+    /// import a second copy of it.
+    private var alreadyLinkedFilePaths: Set<String> {
+        Set(
+            items.compactMap { $0.linkedFile?.displayPath }
+                .filter { !$0.isEmpty }
+                .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        )
     }
 
     /// Forgets the folder. Secrets already imported from it keep their own per-file links: they
@@ -381,11 +593,7 @@ final class VaultViewModel {
               let folder = workspace(for: id)?.linkedFolder else { return }
 
         let service = container.envDiscovery
-        let linkedPaths = Set(
-            items.compactMap { $0.linkedFile?.displayPath }
-                .filter { !$0.isEmpty }
-                .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
-        )
+        let linkedPaths = alreadyLinkedFilePaths
         let sessionGeneration = container.sessionManager.captureSecurityGeneration()
 
         do {
@@ -422,10 +630,7 @@ final class VaultViewModel {
                         // an example file holds no secrets, and importing the same file twice
                         // makes two records that disagree the moment one is edited.
                         isSelected: !file.isTemplate && !file.isAlreadyLinked,
-                        environment: Self.environment(
-                            matching: file.suggestedEnvironment,
-                            declaredIn: declared
-                        ),
+                        environment: Self.environment(for: file, declaredIn: declared),
                         parsesIntoFields: true
                     )
                 },
@@ -443,12 +648,24 @@ final class VaultViewModel {
         }
     }
 
-    /// Prefers an environment the project already knows about over a new one with the same name,
-    /// so `.env.production` lands in the declared "Production" rather than creating "Prod".
-    private static func environment(
-        matching suggestion: EnvironmentValue,
+    /// Which environment a discovered file should land in.
+    ///
+    /// A declaration that names this exact file wins outright: it was set by hand, so it knows the
+    /// project's own convention instead of guessing at it from the file name. Failing that, an
+    /// environment the project already has beats inventing one that merely reads the same, so
+    /// `.env.production` lands in a declared "Production" rather than creating a second "Prod".
+    static func environment(
+        for file: DiscoveredEnvFile,
         declaredIn environments: [ResolvedWorkspaceEnvironment]
     ) -> EnvironmentValue {
+        if let mapped = environments.first(where: {
+            guard let mappedName = $0.envFileName else { return false }
+            return mappedName.caseInsensitiveCompare(file.fileName) == .orderedSame
+        }) {
+            return mapped.environmentValue
+        }
+
+        let suggestion = file.suggestedEnvironment
         let key = WorkspaceEnvironment.matchKey(for: suggestion.title)
         if let existing = environments.first(where: { $0.matchKey == key }) {
             return existing.environmentValue
@@ -475,6 +692,11 @@ final class VaultViewModel {
         envDiscovery?.plans[index].parsesIntoFields = parsesIntoFields
     }
 
+    struct EnvImportOutcome {
+        var imported = 0
+        var failures: [String] = []
+    }
+
     /// Imports the files the owner ticked, one secret each, linked to the file it came from.
     func importDiscoveredEnvFiles() async {
         guard container.sessionManager.lockState == .unlocked,
@@ -485,14 +707,33 @@ final class VaultViewModel {
         guard !selected.isEmpty else { return }
 
         envDiscovery?.isWorking = true
-        defer { envDiscovery?.isWorking = false }
+        let outcome = await importEnvFiles(selected, from: folder, intoWorkspaceWithID: state.workspaceID)
+        envDiscovery = nil
+        reload()
 
+        if outcome.imported > 0 {
+            lastActionMessage = outcome.failures.isEmpty
+                ? "Imported \(outcome.imported) \(outcome.imported == 1 ? "file" : "files") from \(folder.folderName)."
+                : "Imported \(outcome.imported) of \(selected.count). Could not read: \(outcome.failures.joined(separator: ", "))."
+        } else if !outcome.failures.isEmpty {
+            alertMessage = "None of the selected files could be read: \(outcome.failures.joined(separator: ", "))."
+        }
+    }
+
+    /// Turns reviewed plans into secrets, each mirroring the file it came from.
+    ///
+    /// Shared by the two ways a `.env` gets in — the sheet on an existing workspace, and setting a
+    /// new workspace up from its folder — because they differ only in what is on screen.
+    private func importEnvFiles(
+        _ plans: [EnvFileImportPlan],
+        from folder: LinkedFolderReference,
+        intoWorkspaceWithID workspaceID: UUID
+    ) async -> EnvImportOutcome {
         let service = container.envDiscovery
         let sessionGeneration = container.sessionManager.captureSecurityGeneration()
-        var imported = 0
-        var failures: [String] = []
+        var outcome = EnvImportOutcome()
 
-        for plan in selected {
+        for plan in plans {
             let relativePath = plan.file.relativePath
             let parsesIntoFields = plan.parsesIntoFields
             do {
@@ -503,43 +744,40 @@ final class VaultViewModel {
                         parsedIntoFields: parsesIntoFields
                     )
                 }.value
-                guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { return }
+                // Locking mid-import stops the run, but what was already imported still has to be
+                // reported, so this leaves the loop rather than the function.
+                guard container.sessionManager.isSecurityGenerationCurrent(sessionGeneration) else { break }
 
                 var draft = buildEnvImportDraft(
                     from: prepared.contents,
                     suggestedTitle: Self.importedTitle(for: plan.file),
                     parseIntoEntries: parsesIntoFields
                 )
-                draft.workspaceID = state.workspaceID
+                draft.workspaceID = workspaceID
                 draft.environment = plan.environment
-                let saved = try container.itemRepository.saveItem(draft)
 
-                // Linked in a second pass, the same way a hand-picked file is: the vault-side
-                // digest can only be taken once the item exists.
-                var link = prepared.fileLink
-                link.syncedDigest = LinkedFileService.digest(prepared.contents)
-                link.syncedVaultDigest = LinkedFileService.digest(envContents(for: saved))
-                link.syncedAt = .now
-                link.requiresInitialSync = false
-                var linkDraft = makeDraft(from: saved)
-                linkDraft.linkedFile = link
-                _ = try container.itemRepository.saveItem(linkDraft)
+                let saved = try container.memoryStore.performTransaction { () -> SecretItemEntity in
+                    let item = try container.itemRepository.saveItem(draft)
+                    try declareEnvironmentIfNeeded(plan.environment, inWorkspaceWithID: workspaceID)
+
+                    // Linked in a second pass, the same way a hand-picked file is: the vault-side
+                    // digest can only be taken once the item exists.
+                    var link = prepared.fileLink
+                    link.syncedDigest = LinkedFileService.digest(prepared.contents)
+                    link.syncedVaultDigest = LinkedFileService.digest(envContents(for: item))
+                    link.syncedAt = .now
+                    link.requiresInitialSync = false
+                    var linkDraft = makeDraft(from: item)
+                    linkDraft.linkedFile = link
+                    return try container.itemRepository.saveItem(linkDraft)
+                }
                 linkedFileStatuses[saved.id] = .upToDate
-                imported += 1
+                outcome.imported += 1
             } catch {
-                failures.append(plan.file.fileName)
+                outcome.failures.append(plan.file.fileName)
             }
         }
-
-        reload()
-        envDiscovery = nil
-        if imported > 0 {
-            lastActionMessage = failures.isEmpty
-                ? "Imported \(imported) \(imported == 1 ? "file" : "files") from \(folder.folderName)."
-                : "Imported \(imported) of \(selected.count). Could not read: \(failures.joined(separator: ", "))."
-        } else if !failures.isEmpty {
-            alertMessage = "None of the selected files could be read: \(failures.joined(separator: ", "))."
-        }
+        return outcome
     }
 
     /// "Acme API — .env.production" rather than five secrets all called ".env".
@@ -569,33 +807,49 @@ final class VaultViewModel {
             .max()
     }
 
-    /// Environments the items use that the project has not claimed — what the overview offers
-    /// to adopt in one gesture.
-    func undeclaredEnvironments(inWorkspace id: UUID) -> [ResolvedWorkspaceEnvironment] {
-        environments(inWorkspace: id).filter { !$0.isDeclared }
-    }
-
     // MARK: - Environment comparison
+
+    /// The last comparison built, kept until the vault changes.
+    ///
+    /// The sheet reads it from a SwiftUI body, so every keystroke on its filter toggle asked for
+    /// the whole thing again — and building it walks the workspace's plaintext.
+    @ObservationIgnored private var environmentMatrixCache: (generation: Int, workspaceID: UUID, value: EnvironmentMatrix)?
 
     /// Builds the key-by-environment comparison for one workspace.
     ///
     /// Values are digested here and never leave this function: what the matrix carries is
     /// presence and sameness, which is enough to answer "what is missing in production?" and
     /// "am I using the same key in local?" without putting a secret on screen.
+    ///
+    /// Fields are read straight off the entity rather than through `resolvedFields`, which also
+    /// materialises and sorts every field's previous values — rotated plaintext secrets that this
+    /// comparison has no use for and would only copy into another buffer nobody wipes.
     func environmentMatrix(inWorkspace id: UUID) -> EnvironmentMatrix {
-        let offered = offeredEnvironments(inWorkspace: id)
-        let columns: [EnvironmentMatrixInput.Column] = offered.map { environment in
-            let environmentItems = items.filter {
-                $0.workspace?.id == id
-                    && !$0.isArchived
-                    && WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) == environment.matchKey
-            }
+        if let cached = environmentMatrixCache,
+           cached.generation == vaultGeneration,
+           cached.workspaceID == id {
+            return cached.value
+        }
+
+        var itemsByEnvironment: [String: [SecretItemEntity]] = [:]
+        for item in items where item.workspace?.id == id && !item.isArchived {
+            let key = WorkspaceEnvironment.matchKey(for: item.environmentValue.title)
+            itemsByEnvironment[key, default: []].append(item)
+        }
+
+        let columns: [EnvironmentMatrixInput.Column] = offeredEnvironments(inWorkspace: id).map { environment in
+            let environmentItems = itemsByEnvironment[environment.matchKey] ?? []
             let entries: [EnvironmentMatrixInput.Entry] = environmentItems.flatMap { item in
-                resolvedFields(for: item).map { field in
+                // Same order the resolved view of a secret uses, so which key a row is spelled
+                // after does not depend on how the fields happen to sit in the entity.
+                item.fields.sorted {
+                    if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+                    return $0.id.uuidString < $1.id.uuidString
+                }.map { field in
                     EnvironmentMatrixInput.Entry(
-                        key: field.key,
-                        valueDigest: Self.digest(field.value),
-                        isBlank: field.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        key: field.fieldKey,
+                        valueDigest: Self.digest(field.plainValue),
+                        isBlank: field.plainValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                         isSensitive: field.isSensitive,
                         itemID: item.id
                     )
@@ -609,7 +863,15 @@ final class VaultViewModel {
                 entries: entries
             )
         }
-        return EnvironmentMatrix(EnvironmentMatrixInput(columns: columns))
+
+        let matrix = EnvironmentMatrix(EnvironmentMatrixInput(columns: columns))
+        environmentMatrixCache = (vaultGeneration, id, matrix)
+        return matrix
+    }
+
+    /// What the comparison found, for a surface that should say so in a sentence.
+    func environmentKeySummary(inWorkspace id: UUID) -> EnvironmentMatrix.Summary {
+        environmentMatrix(inWorkspace: id).summary
     }
 
     /// True when there is more than one environment holding something — the only case where a
@@ -625,6 +887,393 @@ final class VaultViewModel {
         guard let item = items.first(where: { $0.id == itemID }) else { return }
         activeSheet = nil
         revealAndSelectItemFromPalette(item)
+    }
+
+    // MARK: - The same secret across environments
+
+    /// One secret as it stands in one environment of its project.
+    struct EnvironmentSibling: Identifiable {
+        let environment: ResolvedWorkspaceEnvironment
+        /// The secret of this name in that environment, or nil where the project has the
+        /// environment but nothing in it under this name.
+        let item: SecretItemEntity?
+        let isCurrent: Bool
+
+        var id: String { environment.matchKey }
+        var exists: Bool { item != nil }
+    }
+
+    /// Secrets answering to the same name inside one workspace are one secret in several
+    /// environments: the database URL for local and the database URL for production are the same
+    /// decision made twice, not two unrelated records.
+    ///
+    /// The name is what links them because it is the only thing they reliably share — they have
+    /// different ids, different values, and often different fields. Normalised the way environment
+    /// titles are, so a stray capital or trailing space does not split a family in two.
+    static func siblingKey(for title: String) -> String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// This secret across every environment its project offers: where it exists, and where it does
+    /// not. The gaps are the point — "not in Staging" is the answer you came for.
+    func environmentSiblings(of item: SecretItemEntity) -> [EnvironmentSibling] {
+        guard let workspaceID = item.workspace?.id else { return [] }
+        let key = Self.siblingKey(for: item.title)
+        guard !key.isEmpty else { return [] }
+
+        var byEnvironment: [String: SecretItemEntity] = [:]
+        for candidate in items
+        where candidate.workspace?.id == workspaceID
+            && (!candidate.isArchived || candidate.id == item.id)
+            && Self.siblingKey(for: candidate.title) == key {
+            let environmentKey = WorkspaceEnvironment.matchKey(for: candidate.environmentValue.title)
+            // The secret in hand always wins its own environment; otherwise first seen. Two of
+            // the same name in one environment is a duplicate, and the comparison sheet is where
+            // that gets reported.
+            if byEnvironment[environmentKey] == nil || candidate.id == item.id {
+                byEnvironment[environmentKey] = candidate
+            }
+        }
+
+        let currentKey = WorkspaceEnvironment.matchKey(for: item.environmentValue.title)
+        var offered = offeredEnvironments(inWorkspace: workspaceID)
+        // An archived secret does not count towards what an environment offers, so its own
+        // environment can be absent from that list. It still has to be able to say where it is.
+        if !offered.contains(where: { $0.matchKey == currentKey }) {
+            offered.insert(
+                ResolvedWorkspaceEnvironment(
+                    declaration: WorkspaceEnvironment.declaration(for: item.environmentValue),
+                    isDeclared: false
+                ),
+                at: 0
+            )
+        }
+
+        return offered.map { environment in
+            EnvironmentSibling(
+                environment: environment,
+                item: byEnvironment[environment.matchKey],
+                isCurrent: environment.matchKey == currentKey
+            )
+        }
+    }
+
+    /// Whether the detail pane has an environment switcher to draw: there is somewhere else to go.
+    func hasEnvironmentSiblings(of item: SecretItemEntity) -> Bool {
+        environmentSiblings(of: item).count > 1
+    }
+
+    /// Opens the same secret in another environment.
+    func selectEnvironmentSibling(_ sibling: EnvironmentSibling) {
+        guard let item = sibling.item, let workspaceID = item.workspace?.id else { return }
+        // The list behind the pane has to hold the row that is about to be selected. Scoped to one
+        // environment it follows the secret into its own; anywhere else it already holds it — and
+        // where it does not, the workspace always does.
+        if case .workspaceEnvironment = selectedDestination {
+            revealDestinationKeepingSelection(
+                .workspaceEnvironment(workspaceID, item.environmentValue.title)
+            )
+        }
+        if !filteredItems.contains(where: { $0.id == item.id }) {
+            revealDestinationKeepingSelection(
+                item.isArchived ? .library(.archived) : .workspace(workspaceID)
+            )
+        }
+        select(item)
+    }
+
+    // MARK: - Copying a secret into another environment
+
+    /// What is about to be copied where, and how much of it comes across.
+    ///
+    /// The same decision serves both ways in: the plus on a missing environment in a secret's own
+    /// header, and "Copy to Environment" on any selection. Filling one in without asking was the
+    /// wrong call either way — blank fields are useless when what you wanted was a duplicate, and
+    /// a duplicated production key is a finding the key check would report against you.
+    struct EnvironmentCopyPlan {
+        /// How much of a value comes across when there is no per-field answer.
+        enum ValueMode: String, CaseIterable, Identifiable {
+            /// A straight duplicate.
+            case all
+            /// Settings yes, secrets no. The default, and the reason is the same one the key
+            /// check uses: a port being identical everywhere is how ports work, an API key being
+            /// identical everywhere is a problem.
+            case settingsOnly
+            /// The shape only — somewhere to type the real values into.
+            case none
+
+            var id: String { rawValue }
+
+            var title: String {
+                switch self {
+                case .all: "Copy every value"
+                case .settingsOnly: "Copy settings, leave secrets empty"
+                case .none: "Copy the keys only, no values"
+                }
+            }
+
+            var detail: String {
+                switch self {
+                case .all: "An exact duplicate, secrets included."
+                case .settingsOnly: "Hosts, ports and flags come across. Passwords, tokens and keys arrive empty."
+                case .none: "Every field is created empty, ready to fill in."
+                }
+            }
+        }
+
+        /// One field of a single secret, and what happens to it.
+        struct Field: Identifiable {
+            let id: UUID
+            let key: String
+            let label: String
+            let isSensitive: Bool
+            let hasValue: Bool
+            var isIncluded: Bool
+            var copiesValue: Bool
+        }
+
+        let workspaceID: UUID
+        let sourceIDs: [UUID]
+        /// The secret's name, or "3 secrets" when several are being copied at once.
+        let subject: String
+        var destination: EnvironmentValue
+        var destinationOptions: [EnvironmentValue]
+        var mode: ValueMode
+        /// Only populated when exactly one secret is being copied — several secrets do not share
+        /// a field list to tick through.
+        var fields: [Field]
+        var isWorking = false
+
+        var isSingle: Bool { sourceIDs.count == 1 }
+        var includedFieldCount: Int { isSingle ? fields.count { $0.isIncluded } : 0 }
+        var copiedValueCount: Int { isSingle ? fields.count { $0.isIncluded && $0.copiesValue } : 0 }
+    }
+
+    var environmentCopy: EnvironmentCopyPlan?
+
+    /// Opens the copy sheet for one or more secrets.
+    ///
+    /// `destination` is already known when the gesture named it — the plus on a particular
+    /// environment, or a menu entry for one — and nil when the sheet has to ask.
+    func beginEnvironmentCopy(itemIDs: [UUID], to destination: EnvironmentValue? = nil) {
+        let sources = itemIDs.compactMap { id in items.first { $0.id == id } }
+        guard let first = sources.first,
+              let workspaceID = first.workspace?.id else { return }
+
+        let currentKeys = Set(sources.map { WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) })
+        var options = offeredEnvironments(inWorkspace: workspaceID).map(\.environmentValue)
+        // Copying a secret into the environment it is already in makes a duplicate of it there,
+        // which is never what this gesture means.
+        if sources.count == 1 {
+            options = options.filter { !currentKeys.contains(WorkspaceEnvironment.matchKey(for: $0.title)) }
+        }
+        if let destination,
+           !options.contains(where: { $0.title == destination.title }) {
+            options.insert(destination, at: 0)
+        }
+        guard let target = destination ?? options.first else { return }
+
+        let mode = EnvironmentCopyPlan.ValueMode.settingsOnly
+        environmentCopy = EnvironmentCopyPlan(
+            workspaceID: workspaceID,
+            sourceIDs: sources.map(\.id),
+            subject: sources.count == 1 ? first.title : "\(sources.count) secrets",
+            destination: target,
+            destinationOptions: options,
+            mode: mode,
+            fields: sources.count == 1 ? Self.copyFields(for: first, resolved: resolvedFields(for: first), mode: mode) : []
+        )
+        activeSheet = .copyToEnvironment
+    }
+
+    private static func copyFields(
+        for item: SecretItemEntity,
+        resolved: [FieldResolvedValue],
+        mode: EnvironmentCopyPlan.ValueMode
+    ) -> [EnvironmentCopyPlan.Field] {
+        resolved.map { field in
+            EnvironmentCopyPlan.Field(
+                id: field.id,
+                key: field.key,
+                label: field.label,
+                isSensitive: field.isSensitive,
+                hasValue: !field.value.isEmpty,
+                isIncluded: true,
+                copiesValue: Self.copiesValue(isSensitive: field.isSensitive, mode: mode)
+            )
+        }
+    }
+
+    private static func copiesValue(isSensitive: Bool, mode: EnvironmentCopyPlan.ValueMode) -> Bool {
+        switch mode {
+        case .all: true
+        case .settingsOnly: !isSensitive
+        case .none: false
+        }
+    }
+
+    /// Changing the overall answer resets the per-field ones: the presets are how you get most of
+    /// the way there, and the ticks are how you finish the job.
+    func setEnvironmentCopyMode(_ mode: EnvironmentCopyPlan.ValueMode) {
+        guard var plan = environmentCopy else { return }
+        plan.mode = mode
+        for index in plan.fields.indices {
+            plan.fields[index].copiesValue = Self.copiesValue(
+                isSensitive: plan.fields[index].isSensitive,
+                mode: mode
+            )
+        }
+        environmentCopy = plan
+    }
+
+    func setEnvironmentCopyDestination(_ destination: EnvironmentValue) {
+        environmentCopy?.destination = destination
+    }
+
+    func setEnvironmentCopyField(included: Bool, fieldID: UUID) {
+        guard let index = environmentCopy?.fields.firstIndex(where: { $0.id == fieldID }) else { return }
+        environmentCopy?.fields[index].isIncluded = included
+    }
+
+    func setEnvironmentCopyField(copiesValue: Bool, fieldID: UUID) {
+        guard let index = environmentCopy?.fields.firstIndex(where: { $0.id == fieldID }) else { return }
+        environmentCopy?.fields[index].copiesValue = copiesValue
+    }
+
+    /// The name of a secret already sitting in the destination under this name, if there is one.
+    /// Copying on top of it would leave two secrets of the same name in one environment, which is
+    /// exactly what the key check reports as "defined twice".
+    func environmentCopyConflict() -> String? {
+        guard let plan = environmentCopy, plan.isSingle,
+              let source = items.first(where: { $0.id == plan.sourceIDs[0] }) else { return nil }
+        let key = Self.siblingKey(for: source.title)
+        let destinationKey = WorkspaceEnvironment.matchKey(for: plan.destination.title)
+        let clash = items.contains {
+            $0.workspace?.id == plan.workspaceID
+                && !$0.isArchived
+                && Self.siblingKey(for: $0.title) == key
+                && WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) == destinationKey
+        }
+        return clash ? source.title : nil
+    }
+
+    /// Creates the copies.
+    func performEnvironmentCopy() {
+        guard container.sessionManager.lockState == .unlocked,
+              let plan = environmentCopy, !plan.sourceIDs.isEmpty else { return }
+        environmentCopy?.isWorking = true
+
+        var created: [UUID] = []
+        do {
+            try container.memoryStore.performTransaction {
+                for id in plan.sourceIDs {
+                    guard let source = items.first(where: { $0.id == id }) else { continue }
+                    let draft = makeCopyDraft(from: source, plan: plan)
+                    let saved = try container.itemRepository.saveItem(draft)
+                    created.append(saved.id)
+                }
+                try declareEnvironmentIfNeeded(plan.destination, inWorkspaceWithID: plan.workspaceID)
+            }
+        } catch {
+            environmentCopy = nil
+            handleMutationFailure(error)
+            return
+        }
+
+        environmentCopy = nil
+        reload()
+        multiSelectedIDs.removeAll()
+        if created.count == 1, let item = items.first(where: { $0.id == created[0] }) {
+            selectEnvironmentSibling(
+                EnvironmentSibling(
+                    environment: ResolvedWorkspaceEnvironment(
+                        declaration: WorkspaceEnvironment.declaration(for: plan.destination),
+                        isDeclared: false
+                    ),
+                    item: item,
+                    isCurrent: false
+                )
+            )
+        }
+        let noun = created.count == 1 ? "secret" : "secrets"
+        lastActionMessage = "Copied \(created.count) \(noun) to \(plan.destination.title)."
+    }
+
+    private func makeCopyDraft(from item: SecretItemEntity, plan: EnvironmentCopyPlan) -> SecretItemDraft {
+        var draft = SecretItemDraft.empty
+        draft.title = item.title
+        draft.type = item.type
+        draft.workspaceID = plan.workspaceID
+        draft.environment = plan.destination
+        draft.notes = item.notes
+        draft.tags = item.tags
+        draft.templateID = item.template?.id
+
+        var index = 0
+        draft.fieldDrafts = resolvedFields(for: item).compactMap { field in
+            let decision: (include: Bool, copies: Bool)
+            if plan.isSingle, let match = plan.fields.first(where: { $0.id == field.id }) {
+                decision = (match.isIncluded, match.copiesValue)
+            } else {
+                decision = (true, Self.copiesValue(isSensitive: field.isSensitive, mode: plan.mode))
+            }
+            guard decision.include else { return nil }
+            defer { index += 1 }
+            return FieldDraft(
+                key: field.key,
+                label: field.label,
+                value: decision.copies ? field.value : "",
+                kind: field.kind,
+                isSensitive: field.isSensitive,
+                isCopyable: field.isCopyable,
+                isMasked: field.isMasked,
+                sortOrder: index
+            )
+        }
+        return draft
+    }
+
+    /// Moves secrets into another environment, rather than copying them. The secret is the same
+    /// one afterwards — same id, same history — it just lives somewhere else now.
+    func moveItems(_ itemIDs: [UUID], toEnvironment destination: EnvironmentValue) {
+        let sources = itemIDs.compactMap { id in items.first { $0.id == id } }
+        guard !sources.isEmpty else { return }
+        let destinationKey = WorkspaceEnvironment.matchKey(for: destination.title)
+        let moving = sources.filter {
+            WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) != destinationKey
+        }
+        guard !moving.isEmpty else { return }
+
+        do {
+            try container.memoryStore.performTransaction {
+                for item in moving {
+                    var draft = makeDraft(from: item)
+                    draft.id = item.id
+                    draft.environment = destination
+                    try container.itemRepository.saveItem(draft)
+                    try declareEnvironmentIfNeeded(destination, inWorkspaceWithID: item.workspace?.id)
+                }
+            }
+        } catch {
+            handleMutationFailure(error)
+            return
+        }
+        reload()
+        let noun = moving.count == 1 ? "secret" : "secrets"
+        lastActionMessage = "Moved \(moving.count) \(noun) to \(destination.title)."
+    }
+
+    /// Environments a selection can be sent to: the ones its workspace offers, minus the one it is
+    /// already in. Nil when the selection spans workspaces, where there is no shared answer.
+    func environmentDestinations(forItemIDs itemIDs: [UUID]) -> [EnvironmentValue] {
+        let sources = itemIDs.compactMap { id in items.first { $0.id == id } }
+        guard let first = sources.first, let workspaceID = first.workspace?.id else { return [] }
+        guard sources.allSatisfy({ $0.workspace?.id == workspaceID }) else { return [] }
+
+        let occupied = Set(sources.map { WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) })
+        let offered = offeredEnvironments(inWorkspace: workspaceID).map(\.environmentValue)
+        guard sources.count == 1 else { return offered }
+        return offered.filter { !occupied.contains(WorkspaceEnvironment.matchKey(for: $0.title)) }
     }
 
     // MARK: - Environment bar
@@ -662,11 +1311,11 @@ final class VaultViewModel {
     /// Moves along the bar, wrapping. "All" is part of the cycle: it is where you go to see the
     /// whole project again.
     func cycleEnvironment(by offset: Int) {
-        guard let id = environmentBarWorkspaceID else { return }
+        guard environmentBarWorkspaceID != nil else { return }
         let keys: [String?] = [nil] + environmentBarItems.map { $0.matchKey }
         guard keys.count > 1 else { return }
         let current = keys.firstIndex(of: selectedEnvironmentMatchKey) ?? 0
-        let next = (current + offset % keys.count + keys.count) % keys.count
+        let next = (((current + offset) % keys.count) + keys.count) % keys.count
         selectEnvironment(matchKey: keys[next])
     }
 
@@ -844,6 +1493,13 @@ final class VaultViewModel {
     private func invalidateFilteredCache() {
         vaultGeneration &+= 1
         filteredCache = nil
+        // Dropped as well as invalidated. Bumping the generation is enough to stop them being
+        // read, but this also runs from `clearUnlockedState` on lock, and these hold environment
+        // names — which can be a client's or a project's — and digests of field values. Nothing
+        // derived from an unlocked vault stays resident once it is locked.
+        environmentUsageCache = nil
+        resolvedEnvironmentsCache = nil
+        environmentMatrixCache = nil
     }
 
     /// Removes every reference that can carry vault plaintext outside the memory store.
@@ -861,6 +1517,11 @@ final class VaultViewModel {
         stagedImport = nil
         importPreview = nil
         undoStep = nil
+        // Both hold a folder bookmark and the paths found inside it.
+        envDiscovery = nil
+        newWorkspaceFromFolder = nil
+        // Holds field names and, once a value is ticked to come across, plaintext on the way.
+        environmentCopy = nil
 
         workspaces = []
         items = []
@@ -915,18 +1576,35 @@ final class VaultViewModel {
         select(item)
     }
 
-    func selectDestination(_ destination: VaultDestination) {
-        let showsWorkspace = destination.workspaceID != nil
+    /// Changes what the item list is showing.
+    ///
+    /// Asking for a project shows the project: keeping whichever secret happened to be selected
+    /// meant the detail pane described one item while the sidebar had just been asked about a whole
+    /// workspace, or about one of its environments.
+    ///
+    /// `keepingItemSelection` is for the moves that start *from* a secret — the breadcrumb in its
+    /// own detail header, switching it to another environment — where clearing the selection would
+    /// close the pane the gesture was made in.
+    func selectDestination(_ destination: VaultDestination, keepingItemSelection: Bool = false) {
         selectedDestination = destination
         multiSelectedIDs.removeAll()
         selectionAnchorID = nil
-        // Asking for a project shows the project. Keeping whichever secret happened to be
-        // selected meant the detail pane described one item while the sidebar had just been
-        // asked about a whole workspace — or about one of its environments.
-        if showsWorkspace {
+        if destination.workspaceID != nil, !keepingItemSelection {
             selectedItemID = nil
         }
         syncSelectedItem()
+    }
+
+    /// Follows a link in a secret's own detail header — its workspace, one of that workspace's
+    /// environments — without closing the secret.
+    ///
+    /// Filters are cleared first, and only then does the destination change: the selection only
+    /// survives if the item is actually in the list it lands on, so an active search would
+    /// otherwise close the pane the click was made in.
+    func revealDestinationKeepingSelection(_ destination: VaultDestination) {
+        searchText = ""
+        selectedType = nil
+        selectDestination(destination, keepingItemSelection: true)
     }
 
     /// What a row in the item list should say about where its secret lives.
@@ -1260,7 +1938,11 @@ final class VaultViewModel {
     @discardableResult
     private func saveItemReturningResult(_ draft: SecretItemDraft) -> SecretItemEntity? {
         do {
-            let item = try container.itemRepository.saveItem(draft)
+            let item = try container.memoryStore.performTransaction { () -> SecretItemEntity in
+                let saved = try container.itemRepository.saveItem(draft)
+                try declareEnvironmentIfNeeded(saved.environmentValue, inWorkspaceWithID: saved.workspace?.id)
+                return saved
+            }
             reload()
             selectedItemID = item.id
             selectionAnchorID = item.id
@@ -1269,6 +1951,28 @@ final class VaultViewModel {
             handleMutationFailure(error)
             return nil
         }
+    }
+
+    /// Puts an environment on its workspace the moment a secret is saved into it.
+    ///
+    /// Using an environment is what adds it — there is no separate step, because being asked to
+    /// confirm that the environment you just filed something under is one you meant to have is
+    /// not a question with an interesting answer.
+    ///
+    /// The list is only ever written from here and from the editor, never on read: a vault
+    /// written before 1.3 still has its environments worked out from its items, and opening it
+    /// rewrites nothing.
+    private func declareEnvironmentIfNeeded(
+        _ environment: EnvironmentValue,
+        inWorkspaceWithID id: UUID?
+    ) throws {
+        guard let id, let workspace = workspace(for: id) else { return }
+        let key = WorkspaceEnvironment.matchKey(for: environment.title)
+        guard !key.isEmpty,
+              !workspace.environments.contains(where: { $0.matchKey == key }) else { return }
+        var updated = workspace.environments
+        updated.append(WorkspaceEnvironment.declaration(for: environment, sortOrder: updated.count))
+        try container.workspaceRepository.setEnvironments(updated, onWorkspaceWithID: id)
     }
 
     func saveWorkspace(_ draft: WorkspaceDraft) {
@@ -1316,22 +2020,32 @@ final class VaultViewModel {
 
     /// Moves every item of one workspace from one environment to another, through the normal
     /// item save path so each one gets its own audit entry.
+    ///
+    /// Where each item ends up is decided against the state *before* anything moves. Applying the
+    /// renames one after another let a later one pick up items an earlier one had just moved, so
+    /// swapping two names emptied one environment into the other instead of exchanging them.
     private func migrateItems(
         inWorkspaceWithID id: UUID,
         applying renames: [(from: EnvironmentValue, to: EnvironmentValue)]
     ) throws {
+        var destinations: [String: EnvironmentValue] = [:]
         for rename in renames {
-            let sourceKey = WorkspaceEnvironment.matchKey(for: rename.from.title)
-            let targets = items.filter {
-                $0.workspace?.id == id
-                    && WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) == sourceKey
-            }
-            for item in targets {
-                var itemDraft = makeDraft(from: item)
-                itemDraft.id = item.id
-                itemDraft.environment = rename.to
-                try container.itemRepository.saveItem(itemDraft)
-            }
+            destinations[WorkspaceEnvironment.matchKey(for: rename.from.title)] = rename.to
+        }
+
+        let moves: [(item: SecretItemEntity, destination: EnvironmentValue)] = items.compactMap { item in
+            guard item.workspace?.id == id,
+                  let destination = destinations[
+                    WorkspaceEnvironment.matchKey(for: item.environmentValue.title)
+                  ] else { return nil }
+            return (item, destination)
+        }
+
+        for move in moves {
+            var itemDraft = makeDraft(from: move.item)
+            itemDraft.id = move.item.id
+            itemDraft.environment = move.destination
+            try container.itemRepository.saveItem(itemDraft)
         }
     }
 
@@ -2701,6 +3415,12 @@ final class VaultViewModel {
         )
     }
 
+    /// Everything but the linked folder, which is deliberately dropped.
+    ///
+    /// A folder reference is a security-scoped bookmark plus the path it was minted from, and
+    /// neither survives the trip: the bookmark belongs to the Mac that made it, and carrying the
+    /// path alone would show a project folder in the overview that this machine has no permission
+    /// to open. The owner links it again, which is the only way to grant that permission anyway.
     private static func copyWorkspace(_ workspace: WorkspaceSnapshot, id: UUID, name: String) -> WorkspaceSnapshot {
         WorkspaceSnapshot(
             id: id,
@@ -3308,7 +4028,12 @@ final class VaultViewModel {
             icon: workspace.icon,
             colorHex: workspace.colorHex,
             notes: workspace.notes,
-            environments: workspace.environments
+            // The resolved list, not the stored one: an environment its secrets are using is one
+            // of this workspace's environments, whether or not a previous version got round to
+            // writing it down. The editor shows one list and saving settles it. Stored
+            // declarations keep their ids here, which is what lets a rename be told from a
+            // removal-and-add.
+            environments: environments(inWorkspace: workspace.id).map(\.declaration)
         )
     }
 
@@ -3419,12 +4144,15 @@ final class VaultViewModel {
         if let workspaceID = selectedDestination.workspaceID, workspace(for: workspaceID) == nil {
             selectedDestination = .library(.allItems)
         }
-        // An environment can stop existing — its last item moved away and it was never
-        // declared. Fall back to the workspace rather than to the whole vault: that is the
-        // scope the owner was actually looking at.
+        // An environment can stop being reachable — its last item moved away and it was never
+        // declared, or it was switched off while empty. Checked against what the sidebar and the
+        // chip bar actually offer, not against every environment that resolves: standing in one
+        // that neither of them draws left the header naming a scope with no row to go back to.
+        // Fall back to the workspace rather than to the whole vault: that is the scope the owner
+        // was actually looking at.
         if case let .workspaceEnvironment(id, environment) = selectedDestination {
             let key = WorkspaceEnvironment.matchKey(for: environment)
-            if !environments(inWorkspace: id).contains(where: { $0.matchKey == key }) {
+            if !offeredEnvironments(inWorkspace: id).contains(where: { $0.matchKey == key }) {
                 selectedDestination = .workspace(id)
             }
         }

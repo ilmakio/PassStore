@@ -247,8 +247,9 @@ struct ReorderableRows: NSViewRepresentable {
                 return false
             }
             // Only top-level rows have an order. With children on screen a visible row index is
-            // not an index into that order, so the drop point is counted in parents: dropping
-            // anywhere inside a workspace's environments means "before that workspace".
+            // not an index into that order, so the drop point is counted in parents instead:
+            // every parent above the drop line keeps its place, which means a drop anywhere
+            // inside a workspace's expanded environments lands just after that workspace.
             var parentIDs = items.filter { $0.indentationLevel == 0 }.map(\.id)
             let parentsBeforeDrop = items.prefix(row).count { $0.indentationLevel == 0 }
             guard let fromIndex = parentIDs.firstIndex(of: srcID) else { return false }
@@ -421,6 +422,8 @@ private final class SidebarCell: NSView {
                 accessibilityDescription: isExpanded ? "Collapse" : "Expand"
             )
             disclosureButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+            disclosureButton.setAccessibilityElement(true)
+            disclosureButton.setAccessibilityRole(.button)
             disclosureButton.setAccessibilityLabel(
                 isExpanded ? "Collapse \(item.title)" : "Expand \(item.title)"
             )
@@ -456,6 +459,11 @@ private final class SidebarCell: NSView {
         setAccessibilityRole(.button)
         setAccessibilityLabel(item.badge.map { "\(item.title), \($0)" } ?? item.title)
         setAccessibilityIdentifier(item.accessibilityIdentifier)
+        // The cell is its own accessibility element, which by default makes it a leaf and hides
+        // everything inside it. The triangle has to stay reachable: it is the only way to open a
+        // workspace's environments, and with it hidden there is no keyboard or VoiceOver route in
+        // at all.
+        setAccessibilityChildren(item.isExpanded == nil ? [] : [disclosureButton])
     }
 
     override func accessibilityPerformPress() -> Bool {

@@ -58,7 +58,7 @@ enum FieldKind: String, CaseIterable, Codable, Identifiable {
 /// The declared order is the lifecycle order — local, dev, staging, prod — and code relies on
 /// it: `WorkspaceEnvironment.canonicalRank(of:)` orders a workspace's environments by it, so
 /// reordering these cases reorders the UI.
-enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
+nonisolated enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
     case local
     case dev
     case staging
@@ -313,10 +313,15 @@ enum VaultSheet: Identifiable {
     case importPreview
     /// Full audit trail and previous values for one item.
     case itemHistory(UUID)
+    /// A whole workspace proposed from a folder the owner picked: its name, its environments and
+    /// the `.env` files it will start with, all reviewable before anything is created.
+    case newWorkspaceFromFolder
     /// The `.env` files found in a workspace's linked folder, before any of them is imported.
     case envDiscovery(UUID)
     /// Keys side by side across one workspace's environments.
     case environmentMatrix(UUID)
+    /// Sending a secret into another environment, and choosing how much of it comes across.
+    case copyToEnvironment
 
     var id: String {
         switch self {
@@ -331,8 +336,10 @@ enum VaultSheet: Identifiable {
         case .bulkEdit: "bulk-edit"
         case .importPreview: "import-preview"
         case let .itemHistory(id): "item-history-\(id.uuidString)"
+        case .newWorkspaceFromFolder: "new-workspace-from-folder"
         case let .envDiscovery(id): "env-discovery-\(id.uuidString)"
         case let .environmentMatrix(id): "environment-matrix-\(id.uuidString)"
+        case .copyToEnvironment: "copy-to-environment"
         }
     }
 }

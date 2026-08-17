@@ -270,7 +270,13 @@ final class SecretFieldDefinitionEntity: Identifiable, Hashable {
     }
 }
 
-struct EnvironmentValue: Codable, Hashable {
+/// Which environment a secret targets.
+///
+/// Actor-independent because the types built on it are: `WorkspaceEnvironment` resolves lists off
+/// the main actor and `EnvFileDiscoveryService` classifies file names inside a detached task, and
+/// both are `nonisolated`. Leaving this one on the main actor made every such use a warning that
+/// the Swift 6 language mode turns into an error.
+nonisolated struct EnvironmentValue: Codable, Hashable {
     let kind: EnvironmentKind
     let customName: String?
 

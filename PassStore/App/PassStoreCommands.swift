@@ -74,12 +74,21 @@ struct PassStoreCommands: Commands {
             .keyboardShortcut("n", modifiers: [.command])
             .disabled(isLocked)
 
+            // Pointing at a repository is the path most workspaces should take, so it gets the
+            // shortcut; an empty one is right below it for a workspace that is not a codebase.
+            Button {
+                Task { await viewModel.beginWorkspaceFromFolder() }
+            } label: {
+                Label("New Workspace from Folder…", systemImage: "folder.badge.gearshape")
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .disabled(isLocked)
+
             Button {
                 viewModel.activeSheet = .newWorkspace
             } label: {
-                Label("New Workspace…", systemImage: "folder.badge.plus")
+                Label("New Empty Workspace…", systemImage: "folder.badge.plus")
             }
-            .keyboardShortcut("n", modifiers: [.command, .shift])
             .disabled(isLocked)
 
             Divider()

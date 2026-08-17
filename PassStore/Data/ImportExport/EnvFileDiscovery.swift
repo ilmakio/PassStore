@@ -206,8 +206,11 @@ nonisolated struct EnvFileDiscoveryService: Sendable {
         let keys: [URLResourceKey] = [
             .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .nameKey
         ]
+        // Walked from the resolved root, not from what was handed in: a folder that is itself a
+        // symlink — `~/code` pointing at a volume — makes the enumerator yield nothing at all,
+        // and the walk would report an empty project rather than the files in it.
         guard let enumerator = FileManager.default.enumerator(
-            at: directory,
+            at: root,
             includingPropertiesForKeys: keys,
             // Hidden files are the whole point: `.env` is hidden. Packages are not walked into,
             // and errors on one entry must not abort the walk.
@@ -288,11 +291,19 @@ nonisolated struct EnvFileDiscoveryService: Sendable {
 
         let url = try Self.fileURL(forRelativePath: relativePath, inResolvedFolder: resolution.url)
         let contents = try LinkedFileService.readPickedFile(at: url)
-        let bookmark = try? url.bookmarkData(
-            options: .withSecurityScope,
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        )
+        // Not `try?`. A file whose bookmark could not be minted has no durable access, so the
+        // secret made from it would be linked to a path it can never open again — and the import
+        // would report it as in sync. Failing here loses one file from the batch and says so.
+        let bookmark: Data
+        do {
+            bookmark = try url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            throw LinkedFolderError.bookmarkCreationFailed
+        }
         return PreparedEnvFile(
             fileName: url.lastPathComponent,
             contents: contents,

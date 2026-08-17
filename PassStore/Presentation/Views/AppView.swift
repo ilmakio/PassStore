@@ -107,11 +107,13 @@ struct AppView: View {
                 )
             case .newWorkspace:
                 WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: viewModel.saveWorkspace)
+            case .newWorkspaceFromFolder:
+                NewWorkspaceFromFolderSheet(viewModel: viewModel)
             case let .editWorkspace(workspaceID):
                 WorkspaceEditorSheet(
                     title: "Edit Workspace",
                     draft: viewModel.draftForWorkspace(viewModel.workspace(for: workspaceID)),
-                    environmentTitlesInUse: viewModel.presentEnvironmentTitles(inWorkspace: workspaceID),
+                    environmentUsage: viewModel.environmentUsage(inWorkspace: workspaceID),
                     onSave: viewModel.saveWorkspace
                 )
             case .importEncryptedExport:
@@ -132,6 +134,8 @@ struct AppView: View {
                 EnvDiscoverySheet(viewModel: viewModel, workspaceID: workspaceID)
             case let .environmentMatrix(workspaceID):
                 EnvironmentMatrixSheet(viewModel: viewModel, workspaceID: workspaceID)
+            case .copyToEnvironment:
+                CopyToEnvironmentSheet(viewModel: viewModel)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
@@ -465,46 +469,57 @@ private struct SidebarView: View {
     private func workspaceRowActions(for rowID: String) -> [SidebarRowAction] {
         switch WorkspaceRowID(rowID) {
         case let .workspace(id):
-            return [
-                SidebarRowAction(title: "Edit Workspace…") {
-                    viewModel.activeSheet = .editWorkspace(id)
-                },
-                SidebarRowAction(title: "New Secret Item Here…") {
+            var actions = [
+                SidebarRowAction(title: "New Secret Here…") {
                     viewModel.selectDestination(.workspace(id))
                     viewModel.setSelectedType(nil)
                     viewModel.activeSheet = .newItemFlow
                 },
+                SidebarRowAction(title: "Edit Workspace…") {
+                    viewModel.activeSheet = .editWorkspace(id)
+                }
+            ]
+            if viewModel.workspace(for: id)?.linkedFolder == nil {
+                actions.append(
+                    SidebarRowAction(title: "Link a Folder…") {
+                        viewModel.linkProjectFolder(toWorkspace: id)
+                    }
+                )
+            } else {
+                actions.append(
+                    SidebarRowAction(title: "Find .env Files…") {
+                        Task { await viewModel.scanProjectFolder(inWorkspace: id, presentingSheet: true) }
+                    }
+                )
+            }
+            actions.append(
                 SidebarRowAction(title: "Delete Workspace…", isDestructive: true) {
                     viewModel.requestWorkspaceDeletion(id: id)
                 }
-            ]
+            )
+            return actions
         case let .environment(id, title):
             let key = WorkspaceEnvironment.matchKey(for: title)
             let environment = viewModel.environments(inWorkspace: id).first { $0.matchKey == key }
             var actions = [
-                SidebarRowAction(title: "New Secret Item Here…") {
+                SidebarRowAction(title: "New Secret Here…") {
                     viewModel.selectDestination(.workspaceEnvironment(id, title))
                     viewModel.setSelectedType(nil)
                     viewModel.activeSheet = .newItemFlow
                 }
             ]
             if let environment {
-                if environment.isDeclared {
-                    actions.append(
-                        SidebarRowAction(title: environment.isEnabled ? "Switch Off" : "Switch On") {
-                            viewModel.setEnvironmentEnabled(!environment.isEnabled, matchKey: key, inWorkspace: id)
-                        }
-                    )
-                } else {
-                    actions.append(
-                        SidebarRowAction(title: "Add to Project") {
-                            viewModel.declareEnvironment(environment, inWorkspace: id)
-                        }
-                    )
-                }
+                // "Hide", not "switch off": nothing about the environment stops working, it just
+                // stops taking up a row. There is no "add this to the workspace" entry any more —
+                // an environment its secrets are using is already one of the workspace's.
+                actions.append(
+                    SidebarRowAction(title: environment.isEnabled ? "Hide from Sidebar" : "Show in Sidebar") {
+                        viewModel.setEnvironmentVisible(!environment.isEnabled, matchKey: key, inWorkspace: id)
+                    }
+                )
             }
             actions.append(
-                SidebarRowAction(title: "Edit Workspace…") {
+                SidebarRowAction(title: "Edit Environments…") {
                     viewModel.activeSheet = .editWorkspace(id)
                 }
             )
@@ -521,13 +536,30 @@ private struct SidebarView: View {
             Divider()
                 .opacity(0.45)
             HStack {
-                Button {
-                    viewModel.activeSheet = .newWorkspace
+                // Two honest paths rather than one that hides the other. Pointing at a repository
+                // is the way most workspaces should start — it already knows its own name and its
+                // own environments — so it is listed first and given the shortcut.
+                Menu {
+                    Button {
+                        Task { await viewModel.beginWorkspaceFromFolder() }
+                    } label: {
+                        Label("From Project Folder…", systemImage: "folder.badge.gearshape")
+                    }
+                    .accessibilityIdentifier("sidebar-new-workspace-from-folder")
+
+                    Button {
+                        viewModel.activeSheet = .newWorkspace
+                    } label: {
+                        Label("Empty Workspace…", systemImage: "folder.badge.plus")
+                    }
+                    .accessibilityIdentifier("sidebar-new-workspace-empty")
                 } label: {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 14))
                 }
-                .buttonStyle(.plain)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .foregroundStyle(.secondary)
                 .help("New Workspace")
                 .accessibilityIdentifier("sidebar-new-workspace")
@@ -1155,6 +1187,7 @@ private struct ItemRow: View {
         Button("Duplicate", systemImage: "plus.square.on.square") {
             viewModel.duplicate(item)
         }
+        environmentTransferMenus(for: [item.id])
         Button(
             item.isArchived ? "Restore" : "Archive",
             systemImage: item.isArchived ? "tray.and.arrow.up" : "archivebox"
@@ -1164,6 +1197,32 @@ private struct ItemRow: View {
         Divider()
         Button("Delete…", systemImage: "trash", role: .destructive) {
             viewModel.requestDeletion(of: item)
+        }
+    }
+
+    /// Moving and copying between environments, as two submenus.
+    ///
+    /// They are deliberately next to each other: "take this to production" and "give production
+    /// one of its own" are the two things anyone wants here, and having only the second — by way
+    /// of the editor — meant the first was done by hand, one secret at a time.
+    @ViewBuilder
+    private func environmentTransferMenus(for itemIDs: [UUID]) -> some View {
+        let destinations = viewModel.environmentDestinations(forItemIDs: itemIDs)
+        if !destinations.isEmpty {
+            Menu("Copy to Environment") {
+                ForEach(destinations, id: \.self) { destination in
+                    Button(destination.title, systemImage: destination.kind.systemImage) {
+                        viewModel.beginEnvironmentCopy(itemIDs: itemIDs, to: destination)
+                    }
+                }
+            }
+            Menu("Move to Environment") {
+                ForEach(destinations, id: \.self) { destination in
+                    Button(destination.title, systemImage: destination.kind.systemImage) {
+                        viewModel.moveItems(itemIDs, toEnvironment: destination)
+                    }
+                }
+            }
         }
     }
 
@@ -1191,6 +1250,7 @@ private struct ItemRow: View {
         Button("Duplicate \(count) Items", systemImage: "plus.square.on.square") {
             viewModel.bulkDuplicate()
         }
+        environmentTransferMenus(for: Array(viewModel.multiSelectedIDs))
         Button("Archive \(count) Items", systemImage: "archivebox") {
             viewModel.bulkArchive()
         }
@@ -1408,8 +1468,9 @@ private struct WorkspaceOverviewView: View {
             header
 
             ScrollView {
+                // Environments first: they are what the workspace *is*. The folder is how it got
+                // its contents, which is a fact about its past, so it sits quietly in the header.
                 VStack(alignment: .leading, spacing: VaultSpacing.xl) {
-                    projectFolderSection
                     environmentsSection
                     linkedFilesSection
                     actionsSection
@@ -1455,7 +1516,14 @@ private struct WorkspaceOverviewView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .multilineTextAlignment(.leading)
+
+                    if let folder = workspace.linkedFolder {
+                        folderRow(folder)
+                            .padding(.top, VaultSpacing.hair)
+                    }
                 }
+
+                overflowMenu
             }
             .padding(.horizontal, VaultSpacing.xl)
             .padding(.vertical, VaultSpacing.l)
@@ -1524,60 +1592,68 @@ private struct WorkspaceOverviewView: View {
 
     // MARK: Project folder
 
-    @ViewBuilder
-    private var projectFolderSection: some View {
-        VaultSection("Project Folder", systemImage: "folder", tint: accent) {
-            if let folder = workspace.linkedFolder {
-                VStack(alignment: .leading, spacing: VaultSpacing.s) {
-                    HStack(spacing: VaultSpacing.s) {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(accent)
-                            .accessibilityHidden(true)
-                        Text(folder.abbreviatedPath)
-                            .font(.vaultValueSmall)
-                            .textSelection(.enabled)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .multilineTextAlignment(.leading)
-                    }
-
-                    Text(folder.lastScannedAt.map { "Last looked for .env files \(Self.relative($0))." }
-                        ?? "Not scanned yet.")
-                        .font(.vaultBadge)
-                        .foregroundStyle(.secondary)
-
-                    VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.s) {
-                        Button("Find .env Files…") {
-                            Task { await viewModel.scanProjectFolder(inWorkspace: workspace.id, presentingSheet: true) }
-                        }
-                        .buttonStyle(VaultButtonStyle(.secondary))
-                        .accessibilityIdentifier("workspace-overview-scan-folder")
-
-                        Button("Unlink Folder") {
-                            viewModel.unlinkProjectFolder(fromWorkspace: workspace.id)
-                        }
-                        .buttonStyle(VaultButtonStyle(.secondary))
-                        .accessibilityIdentifier("workspace-overview-unlink-folder")
-                    }
-
-                    VaultNote(
-                        text: "PassStore can read files in this folder, and only looks when you ask. Unlinking gives that back; secrets already imported keep their own file links."
-                    )
-                }
-            } else {
-                VStack(alignment: .leading, spacing: VaultSpacing.s) {
-                    VaultNote(
-                        text: "Link the folder this project lives in and PassStore can find its .env files for you — one secret per file, each linked to the file it came from."
-                    )
-                    Button("Link a Folder…") {
-                        viewModel.linkProjectFolder(toWorkspace: workspace.id)
-                    }
-                    .buttonStyle(VaultButtonStyle(.secondary))
-                    .accessibilityIdentifier("workspace-overview-link-folder")
-                }
+    /// The linked folder, as one quiet line under the name.
+    ///
+    /// It used to be the first and largest section of this pane, which said the folder was what a
+    /// workspace is *about*. Most workspaces have no folder and are complete without one, so it
+    /// belongs here — a fact about this one, next to the other facts about it.
+    private func folderRow(_ folder: LinkedFolderReference) -> some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text(folder.abbreviatedPath)
+                .font(.vaultBadge)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let scanned = folder.lastScannedAt {
+                Text("· looked for .env files \(Self.relative(scanned))")
+                    .font(.vaultBadge)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
         }
+        .help("PassStore can read files in this folder, and only looks when you ask.")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Linked folder \(folder.abbreviatedPath)")
+        .accessibilityIdentifier("workspace-overview-folder")
+    }
+
+    /// Everything you can do *to* the workspace, in one place instead of scattered across the pane
+    /// as three buttons that each looked like the main event.
+    private var overflowMenu: some View {
+        Menu {
+            Button("Edit Workspace…") { viewModel.activeSheet = .editWorkspace(workspace.id) }
+
+            Divider()
+
+            if workspace.linkedFolder == nil {
+                Button("Link a Folder…") { viewModel.linkProjectFolder(toWorkspace: workspace.id) }
+            } else {
+                Button("Find .env Files…") {
+                    Task { await viewModel.scanProjectFolder(inWorkspace: workspace.id, presentingSheet: true) }
+                }
+                Button("Unlink Folder") { viewModel.unlinkProjectFolder(fromWorkspace: workspace.id) }
+            }
+
+            Divider()
+
+            Button("Delete Workspace…", role: .destructive) {
+                viewModel.requestWorkspaceDeletion(id: workspace.id)
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 15))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help("Workspace actions")
+        .accessibilityLabel("Workspace actions")
+        .accessibilityIdentifier("workspace-overview-actions")
     }
 
     // MARK: Environments
@@ -1585,24 +1661,9 @@ private struct WorkspaceOverviewView: View {
     @ViewBuilder
     private var environmentsSection: some View {
         VaultSection("Environments", systemImage: "circle.hexagongrid", tint: accent) {
-            HStack(spacing: VaultSpacing.m) {
-                if viewModel.canCompareEnvironments(inWorkspace: workspace.id) {
-                    Button("Compare…") { viewModel.activeSheet = .environmentMatrix(workspace.id) }
-                        .buttonStyle(.link)
-                        .font(.vaultFootnote)
-                        .accessibilityIdentifier("workspace-overview-compare-environments")
-                }
-                Button("Manage…") { viewModel.activeSheet = .editWorkspace(workspace.id) }
-                    .buttonStyle(.link)
-                    .font(.vaultFootnote)
-                    .accessibilityIdentifier("workspace-overview-manage-environments")
-            }
-        } content: {
             VStack(alignment: .leading, spacing: VaultSpacing.m) {
                 if environments.isEmpty {
-                    VaultNote(
-                        text: "Nothing in this workspace yet. Declare the environments the project has and each one gets its own tab."
-                    )
+                    emptyEnvironmentsState
                 } else {
                     LazyVGrid(
                         columns: [GridItem(.adaptive(minimum: 150), spacing: VaultSpacing.s)],
@@ -1612,24 +1673,159 @@ private struct WorkspaceOverviewView: View {
                         ForEach(environments) { environment in
                             environmentCard(environment)
                         }
+                        addEnvironmentCard
                     }
+
+                    keyCheckRow
                 }
 
-                let undeclared = viewModel.undeclaredEnvironments(inWorkspace: workspace.id)
-                if !undeclared.isEmpty {
-                    VaultNote(
-                        text: undeclared.count == 1
-                            ? "\(undeclared[0].title) is in use here but is not part of the project yet."
-                            : "In use here but not part of the project yet: \(undeclared.map(\.title).joined(separator: ", "))."
-                    )
-                    Button(undeclared.count == 1 ? "Add It to the Project" : "Add Them to the Project") {
-                        viewModel.declareEnvironmentsInUse(inWorkspace: workspace.id)
+                if workspace.linkedFolder == nil {
+                    // One line, once, at the bottom — not a section of its own. A workspace that
+                    // is just somewhere to keep secrets is a complete workspace.
+                    HStack(spacing: VaultSpacing.xs) {
+                        Text("Not linked to a folder.")
+                            .font(.vaultBadge)
+                            .foregroundStyle(.tertiary)
+                        Button("Link one to find its .env files") {
+                            viewModel.linkProjectFolder(toWorkspace: workspace.id)
+                        }
+                        .buttonStyle(.link)
+                        .font(.vaultBadge)
+                        .accessibilityIdentifier("workspace-overview-link-folder")
                     }
-                    .buttonStyle(VaultButtonStyle(.secondary))
-                    .accessibilityIdentifier("workspace-overview-adopt-environments")
                 }
             }
         }
+    }
+
+    /// The first thing you see in a brand-new workspace. It says what an environment *is* — once,
+    /// while there is nothing else to look at — and then offers the answer almost every project
+    /// wants instead of making you assemble it from a menu.
+    private var emptyEnvironmentsState: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            Text("Environments are the copies of this project you keep secrets for — your machine, staging, production.")
+                .font(.vaultFootnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+
+            let suggested = viewModel.suggestedEnvironments(forWorkspace: workspace.id)
+            VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.s) {
+                if !suggested.isEmpty {
+                    Button("Add \(Self.list(suggested.map(\.title)))") {
+                        viewModel.addEnvironments(suggested, toWorkspace: workspace.id)
+                    }
+                    .buttonStyle(VaultButtonStyle(.primary))
+                    .accessibilityIdentifier("workspace-overview-add-suggested-environments")
+                }
+                Button("Add One…") { viewModel.activeSheet = .editWorkspace(workspace.id) }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("workspace-overview-add-environment")
+            }
+        }
+    }
+
+    private var addEnvironmentCard: some View {
+        Button { viewModel.activeSheet = .editWorkspace(workspace.id) } label: {
+            HStack(spacing: VaultSpacing.s) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 14)
+                Text("Add")
+                    .font(.vaultRowTitle)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+            .padding(VaultSpacing.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(
+                RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                    .strokeBorder(VaultChrome.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Add an environment to this workspace")
+        .accessibilityIdentifier("workspace-overview-add-environment")
+    }
+
+    /// States the finding rather than offering a tool.
+    ///
+    /// This used to be a link called "Compare…", which names the mechanism and leaves the reader
+    /// to go and find out whether it was worth opening. Saying "Staging is missing 3 keys" answers
+    /// the question on the way past, and clicking it is how you see which ones.
+    @ViewBuilder
+    private var keyCheckRow: some View {
+        let summary = viewModel.environmentKeySummary(inWorkspace: workspace.id)
+
+        if !summary.isInconclusive {
+            Button { viewModel.activeSheet = .environmentMatrix(workspace.id) } label: {
+                HStack(spacing: VaultSpacing.s) {
+                    Image(systemName: summary.hasFindings ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(summary.hasFindings ? Color.orange : Color.green)
+                        .accessibilityHidden(true)
+
+                    Text(Self.keyCheckSentence(summary))
+                        .font(.vaultFootnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.vertical, VaultSpacing.s)
+                .padding(.horizontal, VaultSpacing.m)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                        .fill(VaultChrome.mutedFill)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("See every key, environment by environment")
+            .accessibilityIdentifier("workspace-overview-key-check")
+        }
+    }
+
+    /// The finding, in a sentence. Worst thing first — a shared secret is a security problem, a
+    /// missing key is only a gap.
+    private static func keyCheckSentence(_ summary: EnvironmentMatrix.Summary) -> String {
+        var parts: [String] = []
+        if summary.sharedSecretCount > 0 {
+            parts.append(
+                summary.sharedSecretCount == 1
+                    ? "1 secret is used in more than one environment"
+                    : "\(summary.sharedSecretCount) secrets are used in more than one environment"
+            )
+        }
+        if let worst = summary.missing.first {
+            let others = summary.missing.dropFirst().count
+            var text = "\(worst.title) is missing \(worst.count) \(worst.count == 1 ? "key" : "keys")"
+            if others > 0 { text += ", and \(others) other \(others == 1 ? "environment is" : "environments are") short too" }
+            parts.append(text)
+        }
+        if summary.definedTwiceCount > 0 {
+            parts.append(
+                summary.definedTwiceCount == 1
+                    ? "1 key is defined twice in the same environment"
+                    : "\(summary.definedTwiceCount) keys are defined twice in the same environment"
+            )
+        }
+        guard !parts.isEmpty else {
+            return "All \(summary.environmentCount) environments define the same \(summary.keyCount) \(summary.keyCount == 1 ? "key" : "keys")."
+        }
+        return parts.joined(separator: " · ") + "."
+    }
+
+    /// "Local, Staging and Prod" — an Oxford-comma-free list, the way a person would say it.
+    private static func list(_ items: [String]) -> String {
+        guard let last = items.last else { return "" }
+        guard items.count > 1 else { return last }
+        return items.dropLast().joined(separator: ", ") + " and " + last
     }
 
     private func environmentCard(_ environment: ResolvedWorkspaceEnvironment) -> some View {
@@ -1682,54 +1878,52 @@ private struct WorkspaceOverviewView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            if environment.isDeclared {
-                Button(environment.isEnabled ? "Switch Off" : "Switch On") {
-                    viewModel.setEnvironmentEnabled(
-                        !environment.isEnabled,
-                        matchKey: environment.matchKey,
-                        inWorkspace: workspace.id
-                    )
-                }
-                Button("Remove from Project") {
-                    viewModel.undeclareEnvironment(matchKey: environment.matchKey, inWorkspace: workspace.id)
-                }
-            } else {
-                Button("Add to Project") {
-                    viewModel.declareEnvironment(environment, inWorkspace: workspace.id)
-                }
+            Button("New Secret Here…") {
+                viewModel.selectEnvironment(matchKey: environment.matchKey)
+                viewModel.activeSheet = .newItemFlow
             }
+            Divider()
+            Button(environment.isEnabled ? "Hide from Sidebar" : "Show in Sidebar") {
+                viewModel.setEnvironmentVisible(
+                    !environment.isEnabled,
+                    matchKey: environment.matchKey,
+                    inWorkspace: workspace.id
+                )
+            }
+            Button("Remove from Workspace", role: .destructive) {
+                viewModel.undeclareEnvironment(matchKey: environment.matchKey, inWorkspace: workspace.id)
+            }
+            .disabled(count > 0)
         }
         .accessibilityIdentifier("workspace-overview-environment-\(uiIdentifierSlug(environment.title))")
     }
 
     private func environmentSubtitle(_ environment: ResolvedWorkspaceEnvironment, count: Int) -> String {
         if !environment.isEnabled {
-            return count > 0 ? "Switched off · \(count) still here" : "Switched off"
+            return count > 0 ? "Hidden · \(count) still here" : "Hidden"
         }
-        return count == 0 ? "Empty" : "\(count) \(count == 1 ? "secret" : "secrets")"
+        return count == 0 ? "Nothing here yet" : "\(count) \(count == 1 ? "secret" : "secrets")"
     }
 
-    // MARK: Linked files
+    // MARK: Files on disk
 
     @ViewBuilder
     private var linkedFilesSection: some View {
         let linked = viewModel.linkedFileCount(inWorkspace: workspace.id)
         if linked > 0 {
             let outdated = viewModel.outdatedLinkedFileCount(inWorkspace: workspace.id)
-            VaultSection("Linked Files", systemImage: "doc.text.magnifyingglass", tint: accent) {
+            VaultSection("Files on Disk", systemImage: "doc.text.magnifyingglass", tint: accent) {
                 VStack(alignment: .leading, spacing: VaultSpacing.s) {
-                    Text("\(linked) of \(itemCount) \(itemCount == 1 ? "secret" : "secrets") here mirrors a file on disk.")
-                        .font(.vaultFootnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
                     if outdated > 0 {
                         VaultNote(
-                            text: "\(outdated) \(outdated == 1 ? "file has" : "files have") changed on one side since the last sync. Open the secret to pull the file in or push the vault out.",
+                            text: "\(outdated) of \(linked) \(outdated == 1 ? "file has" : "files have") changed on one side since the last check. Open the secret to pull the file in, or push the vault out.",
                             tone: .warning
                         )
                     } else {
-                        VaultNote(text: "Everything matched at the last check.", tone: .success)
+                        VaultNote(
+                            text: "\(linked) \(linked == 1 ? "secret mirrors a file" : "secrets mirror files") on disk, and everything matched at the last check.",
+                            tone: .success
+                        )
                     }
 
                     Button("Check Again") {
@@ -1745,7 +1939,7 @@ private struct WorkspaceOverviewView: View {
     // MARK: Actions
 
     private var actionsSection: some View {
-        VaultSection("Add to This Project", systemImage: "plus.circle", tint: accent) {
+        VaultSection("Add a Secret", systemImage: "plus.circle", tint: accent) {
             VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.s) {
                 Button("New Secret…") {
                     viewModel.activeSheet = .newItemFlow
@@ -1753,17 +1947,19 @@ private struct WorkspaceOverviewView: View {
                 .buttonStyle(VaultButtonStyle(.primary))
                 .accessibilityIdentifier("workspace-overview-new-item")
 
+                if workspace.linkedFolder != nil {
+                    Button("Find .env Files…") {
+                        Task { await viewModel.scanProjectFolder(inWorkspace: workspace.id, presentingSheet: true) }
+                    }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .accessibilityIdentifier("workspace-overview-scan-folder")
+                }
+
                 Button("Import a .env File…") {
                     viewModel.importEnvFileCreatingItem()
                 }
                 .buttonStyle(VaultButtonStyle(.secondary))
                 .accessibilityIdentifier("workspace-overview-import-env")
-
-                Button("Edit Workspace…") {
-                    viewModel.activeSheet = .editWorkspace(workspace.id)
-                }
-                .buttonStyle(VaultButtonStyle(.secondary))
-                .accessibilityIdentifier("workspace-overview-edit")
             }
         }
     }
@@ -2508,6 +2704,105 @@ private struct FieldRow: View {
 /// projects rather than between identical grey cards. The pixel grid is the same one the
 /// welcome and lock screens use, turned right down — enough to give the band a texture, not
 /// enough to compete with the title sitting on it.
+/// The same secret, in every environment of its project.
+///
+/// Secrets sharing a name inside one workspace are one secret configured several times, so this
+/// band is how you read across them: which environments have it, which do not, and one click to
+/// step between them without going back to the list. A gap is information — "not in Staging yet"
+/// is usually the thing you opened the secret to find out.
+private struct EnvironmentSiblingBar: View {
+    @Bindable var viewModel: VaultViewModel
+    let item: SecretItemEntity
+    let accent: Color
+
+    var body: some View {
+        let siblings = viewModel.environmentSiblings(of: item)
+
+        ScrollView(.horizontal) {
+            HStack(spacing: VaultSpacing.xs) {
+                Text("This secret in")
+                    .font(.vaultBadge)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize()
+
+                ForEach(siblings) { sibling in
+                    chip(sibling)
+                }
+            }
+            .padding(.horizontal, VaultSpacing.xl)
+            .padding(.vertical, VaultSpacing.s)
+        }
+        .scrollIndicators(.never)
+        .background(VaultChrome.mutedFill.opacity(0.5))
+        .accessibilityIdentifier("environment-sibling-bar")
+    }
+
+    @ViewBuilder
+    private func chip(_ sibling: VaultViewModel.EnvironmentSibling) -> some View {
+        let title = sibling.environment.title
+        let identifier = "environment-sibling-\(uiIdentifierSlug(title))"
+
+        if sibling.isCurrent {
+            label(sibling, foreground: accent, fill: accent.opacity(0.14), border: accent.opacity(0.35))
+                .accessibilityIdentifier(identifier)
+                .accessibilityAddTraits(.isSelected)
+                .help("You are looking at \(title)")
+        } else if sibling.exists {
+            Button {
+                viewModel.selectEnvironmentSibling(sibling)
+            } label: {
+                label(sibling, foreground: .secondary, fill: Color.primary.opacity(0.05), border: Color.primary.opacity(0.08))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(identifier)
+            .help("Open “\(item.title)” in \(title)")
+        } else {
+            // A missing sibling is still drawn, dashed and dimmed, because the absence is the
+            // answer. Clicking asks what should come across rather than guessing: an empty copy
+            // and a straight duplicate are both reasonable, and only the owner knows which.
+            Button {
+                viewModel.beginEnvironmentCopy(itemIDs: [item.id], to: sibling.environment.environmentValue)
+            } label: {
+                label(sibling, foreground: .tertiary, fill: .clear, border: Color.primary.opacity(0.12), isDashed: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(identifier)
+            .accessibilityLabel("\(title), not here yet. Copy it there.")
+            .help("Not in \(title) yet — copy it there, choosing what comes across")
+        }
+    }
+
+    private func label(
+        _ sibling: VaultViewModel.EnvironmentSibling,
+        foreground: some ShapeStyle,
+        fill: some ShapeStyle,
+        border: Color,
+        isDashed: Bool = false
+    ) -> some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Image(systemName: sibling.environment.systemImage)
+                .font(.system(size: 9))
+                .accessibilityHidden(true)
+            Text(sibling.environment.title)
+                .font(.caption)
+                .fontWeight(sibling.isCurrent ? .semibold : .medium)
+            if !sibling.exists {
+                Image(systemName: "plus")
+                    .font(.system(size: 8, weight: .semibold))
+                    .accessibilityHidden(true)
+            }
+        }
+        .foregroundStyle(foreground)
+        .padding(.horizontal, VaultSpacing.s)
+        .padding(.vertical, VaultSpacing.xs)
+        .background(Capsule(style: .continuous).fill(fill))
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(border, style: StrokeStyle(lineWidth: 0.6, dash: isDashed ? [3, 2] : []))
+        )
+    }
+}
+
 private struct ItemDetailHeader: View {
     @Bindable var viewModel: VaultViewModel
     let item: SecretItemEntity
@@ -2543,6 +2838,10 @@ private struct ItemDetailHeader: View {
             .padding(.vertical, VaultSpacing.l)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(banner)
+
+            if viewModel.hasEnvironmentSiblings(of: item) {
+                EnvironmentSiblingBar(viewModel: viewModel, item: item, accent: accent)
+            }
 
             Rectangle()
                 .fill(VaultChrome.hairline)
@@ -2620,8 +2919,9 @@ private struct ItemDetailHeader: View {
                     color: Color(hex: workspace.colorHex),
                     hint: "Show everything in \(workspace.name)"
                 ) {
-                    viewModel.selectDestination(.workspace(workspace.id))
-                    viewModel.setSelectedType(nil)
+                    // Keeps this secret open: the link is *in* its detail pane, so clearing the
+                    // selection would close the thing the click was made in.
+                    viewModel.revealDestinationKeepingSelection(.workspace(workspace.id))
                 }
             }
 
@@ -2644,10 +2944,9 @@ private struct ItemDetailHeader: View {
                     systemImage: "circle.hexagongrid",
                     hint: "Show \(workspace.name) › \(item.environmentValue.title)"
                 ) {
-                    viewModel.selectDestination(
+                    viewModel.revealDestinationKeepingSelection(
                         .workspaceEnvironment(workspace.id, item.environmentValue.title)
                     )
-                    viewModel.setSelectedType(nil)
                 }
             } else {
                 DetailHeaderLink(

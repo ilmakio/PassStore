@@ -252,6 +252,28 @@ nonisolated struct WorkspaceEnvironment: Identifiable, Codable, Hashable, Sendab
     }
 }
 
+/// What a workspace's items say about its environments: which ones they use, in the order they
+/// were first seen, and how many secrets sit in each.
+///
+/// Gathered in a single pass over the vault because both questions are asked once per environment
+/// per workspace on every sidebar render.
+nonisolated struct WorkspaceEnvironmentUsage: Hashable, Sendable {
+    private(set) var titles: [String] = []
+    private(set) var counts: [String: Int] = [:]
+
+    mutating func record(_ title: String) {
+        let key = WorkspaceEnvironment.matchKey(for: title)
+        if counts[key] == nil { titles.append(title) }
+        counts[key, default: 0] += 1
+    }
+
+    func count(forMatchKey key: String) -> Int { counts[key] ?? 0 }
+
+    func count(forTitle title: String) -> Int {
+        count(forMatchKey: WorkspaceEnvironment.matchKey(for: title))
+    }
+}
+
 /// A workspace environment as the UI sees it: either a declaration, or an environment the items
 /// are already using without one.
 nonisolated struct ResolvedWorkspaceEnvironment: Identifiable, Hashable, Sendable {

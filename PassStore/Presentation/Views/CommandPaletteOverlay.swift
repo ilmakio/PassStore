@@ -275,8 +275,16 @@ extension VaultViewModel {
                 perform: wrap { self.activeSheet = .newItemFlow }
             ),
             .init(
+                id: "cmd.newWorkspaceFromFolder",
+                title: "New Workspace from Folder…",
+                subtitle: "Names it after the folder and finds its .env files",
+                keywords: ["workspace", "folder", "project", "repository", "repo", "import"],
+                isEnabled: container.sessionManager.lockState == .unlocked,
+                perform: wrap { Task { await self.beginWorkspaceFromFolder() } }
+            ),
+            .init(
                 id: "cmd.newWorkspace",
-                title: "New Workspace…",
+                title: "New Empty Workspace…",
                 subtitle: nil,
                 keywords: ["workspace", "folder"],
                 isEnabled: true,
@@ -388,9 +396,9 @@ extension VaultViewModel {
                 dynamic.append(
                     .init(
                         id: "compare.workspace.\(id)",
-                        title: "Compare Environments — \(workspace.name)",
+                        title: "Keys Across Environments — \(workspace.name)",
                         subtitle: "What each environment defines, and what it is missing",
-                        keywords: ["compare", "diff", "matrix", "missing", "environments", workspace.name],
+                        keywords: ["compare", "diff", "matrix", "missing", "keys", "environments", workspace.name],
                         isEnabled: true,
                         perform: wrap { self.activeSheet = .environmentMatrix(workspaceID) }
                     )
