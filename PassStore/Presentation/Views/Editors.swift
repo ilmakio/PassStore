@@ -1410,6 +1410,204 @@ struct EnvDiscoverySheet: View {
     }
 }
 
+// MARK: - Environment matrix
+
+/// Every key a project uses, against every environment it has.
+///
+/// The sheet deliberately shows presence rather than contents: a tick, a gap, a blank. It can
+/// say that local and production hold the *same* secret without showing either of them, because
+/// the comparison is made on digests. Reading a value still means opening the secret.
+struct EnvironmentMatrixSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var viewModel: VaultViewModel
+    let workspaceID: UUID
+
+    @State private var showsOnlyProblems = false
+
+    private static let keyColumnWidth: CGFloat = 230
+    private static let cellWidth: CGFloat = 92
+
+    private var matrix: EnvironmentMatrix {
+        viewModel.environmentMatrix(inWorkspace: workspaceID)
+    }
+
+    private var workspaceName: String {
+        viewModel.workspace(for: workspaceID)?.name ?? "Workspace"
+    }
+
+    var body: some View {
+        let matrix = matrix
+        let rows = showsOnlyProblems ? matrix.rowsNeedingAttention : matrix.rows
+
+        return VaultSheetScaffold(
+            title: "Compare Environments",
+            subtitle: workspaceName,
+            systemImage: "tablecells",
+            scrolls: false
+        ) {
+            Toggle("Only what needs attention", isOn: $showsOnlyProblems)
+                .toggleStyle(.checkbox)
+                .font(.vaultFootnote)
+                .accessibilityIdentifier("matrix-only-problems")
+
+            Spacer(minLength: 0)
+
+            Button("Done") { dismiss() }
+                .buttonStyle(VaultButtonStyle(.primary))
+                .keyboardShortcut(.defaultAction)
+        } content: {
+            VStack(alignment: .leading, spacing: VaultSpacing.m) {
+                summary(matrix)
+
+                if matrix.columns.count < 2 {
+                    VaultNote(text: "This workspace has one environment, so there is nothing to compare yet.")
+                } else if rows.isEmpty {
+                    VaultNote(
+                        text: showsOnlyProblems
+                            ? "Every key is defined in every environment, and no secret is shared between them."
+                            : "No keys to compare yet.",
+                        tone: .success
+                    )
+                } else {
+                    grid(matrix: matrix, rows: rows)
+                }
+
+                legend
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 780, height: 620)
+    }
+
+    private func summary(_ matrix: EnvironmentMatrix) -> some View {
+        VaultFlowLayout(spacing: VaultSpacing.s, lineSpacing: VaultSpacing.xs) {
+            VaultChip(title: "\(matrix.keyCount) keys", systemImage: "number")
+            if matrix.missingCount > 0 {
+                VaultChip(title: "\(matrix.missingCount) missing", systemImage: "minus.circle", color: .orange)
+            }
+            if matrix.sharedSecretCount > 0 {
+                VaultChip(
+                    title: "\(matrix.sharedSecretCount) shared \(matrix.sharedSecretCount == 1 ? "secret" : "secrets")",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    color: .red
+                )
+            }
+        }
+    }
+
+    private func grid(matrix: EnvironmentMatrix, rows: [EnvironmentMatrix.Row]) -> some View {
+        ScrollView([.horizontal, .vertical]) {
+            VStack(alignment: .leading, spacing: 0) {
+                headerRow(matrix)
+                Divider()
+
+                ForEach(rows) { row in
+                    gridRow(row, columns: matrix.columns)
+                    Divider().opacity(0.35)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("environment-matrix-grid")
+    }
+
+    private func headerRow(_ matrix: EnvironmentMatrix) -> some View {
+        HStack(spacing: 0) {
+            Text("Key")
+                .font(.vaultFieldLabel)
+                .foregroundStyle(.secondary)
+                .frame(width: Self.keyColumnWidth, alignment: .leading)
+
+            ForEach(matrix.columns) { column in
+                VStack(spacing: 1) {
+                    Text(column.title)
+                        .font(.vaultBadge)
+                        .foregroundStyle(Color(hex: column.colorHex))
+                        .lineLimit(1)
+                    Text("\(column.itemCount)")
+                        .font(.vaultBadge)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(width: Self.cellWidth)
+            }
+        }
+        .padding(.vertical, VaultSpacing.xs)
+    }
+
+    private func gridRow(_ row: EnvironmentMatrix.Row, columns: [EnvironmentMatrix.Column]) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: VaultSpacing.xs) {
+                if row.isSensitive {
+                    Image(systemName: "lock.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                Text(row.key)
+                    .font(.vaultValueSmall)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if row.hasSharedSecret {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .help("The same secret is used in more than one environment")
+                }
+                if row.isDefinedTwiceSomewhere {
+                    Image(systemName: "exclamationmark.2")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .help("Two secrets in the same environment define this key")
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(width: Self.keyColumnWidth, alignment: .leading)
+
+            ForEach(row.cells) { cell in
+                cellView(cell, row: row)
+                    .frame(width: Self.cellWidth)
+            }
+        }
+        .padding(.vertical, VaultSpacing.xs)
+        .accessibilityIdentifier("matrix-row-\(row.key)")
+    }
+
+    @ViewBuilder
+    private func cellView(_ cell: EnvironmentMatrix.Cell, row: EnvironmentMatrix.Row) -> some View {
+        let isShared = row.sharedSecretColumnKeys.contains(cell.columnKey)
+        switch cell.presence {
+        case .set:
+            Button {
+                if let itemID = cell.itemID { viewModel.revealMatrixCell(itemID: itemID) }
+            } label: {
+                Image(systemName: isShared ? "equal.circle.fill" : "checkmark")
+                    .font(.system(size: isShared ? 12 : 11, weight: .semibold))
+                    .foregroundStyle(isShared ? Color.red : Color.green)
+            }
+            .buttonStyle(.plain)
+            .help(isShared ? "Same value as another environment — open the secret" : "Open the secret that defines it")
+        case .blank:
+            Image(systemName: "circle")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .help("Defined, with an empty value")
+        case .missing:
+            Image(systemName: "minus")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.orange.opacity(0.8))
+                .help("Not defined in this environment")
+        }
+    }
+
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+            VaultNote(
+                text: "Ticks mean the key is defined. Values are never shown here — the comparison is made on digests, so “same as another environment” can be reported without displaying either secret."
+            )
+        }
+    }
+}
+
 // MARK: - Settings
 
 private enum SettingsTab: String, CaseIterable, Hashable, Identifiable {

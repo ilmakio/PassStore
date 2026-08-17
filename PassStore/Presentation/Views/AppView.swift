@@ -130,6 +130,8 @@ struct AppView: View {
                 ItemHistorySheet(viewModel: viewModel, itemID: itemID)
             case let .envDiscovery(workspaceID):
                 EnvDiscoverySheet(viewModel: viewModel, workspaceID: workspaceID)
+            case let .environmentMatrix(workspaceID):
+                EnvironmentMatrixSheet(viewModel: viewModel, workspaceID: workspaceID)
             }
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
@@ -1548,10 +1550,18 @@ private struct WorkspaceOverviewView: View {
     @ViewBuilder
     private var environmentsSection: some View {
         VaultSection("Environments", systemImage: "circle.hexagongrid", tint: accent) {
-            Button("Manage…") { viewModel.activeSheet = .editWorkspace(workspace.id) }
-                .buttonStyle(.link)
-                .font(.vaultFootnote)
-                .accessibilityIdentifier("workspace-overview-manage-environments")
+            HStack(spacing: VaultSpacing.m) {
+                if viewModel.canCompareEnvironments(inWorkspace: workspace.id) {
+                    Button("Compare…") { viewModel.activeSheet = .environmentMatrix(workspace.id) }
+                        .buttonStyle(.link)
+                        .font(.vaultFootnote)
+                        .accessibilityIdentifier("workspace-overview-compare-environments")
+                }
+                Button("Manage…") { viewModel.activeSheet = .editWorkspace(workspace.id) }
+                    .buttonStyle(.link)
+                    .font(.vaultFootnote)
+                    .accessibilityIdentifier("workspace-overview-manage-environments")
+            }
         } content: {
             VStack(alignment: .leading, spacing: VaultSpacing.m) {
                 if environments.isEmpty {

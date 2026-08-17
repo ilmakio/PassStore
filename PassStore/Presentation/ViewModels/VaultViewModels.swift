@@ -575,6 +575,58 @@ final class VaultViewModel {
         environments(inWorkspace: id).filter { !$0.isDeclared }
     }
 
+    // MARK: - Environment comparison
+
+    /// Builds the key-by-environment comparison for one workspace.
+    ///
+    /// Values are digested here and never leave this function: what the matrix carries is
+    /// presence and sameness, which is enough to answer "what is missing in production?" and
+    /// "am I using the same key in local?" without putting a secret on screen.
+    func environmentMatrix(inWorkspace id: UUID) -> EnvironmentMatrix {
+        let offered = offeredEnvironments(inWorkspace: id)
+        let columns: [EnvironmentMatrixInput.Column] = offered.map { environment in
+            let environmentItems = items.filter {
+                $0.workspace?.id == id
+                    && !$0.isArchived
+                    && WorkspaceEnvironment.matchKey(for: $0.environmentValue.title) == environment.matchKey
+            }
+            let entries: [EnvironmentMatrixInput.Entry] = environmentItems.flatMap { item in
+                resolvedFields(for: item).map { field in
+                    EnvironmentMatrixInput.Entry(
+                        key: field.key,
+                        valueDigest: Self.digest(field.value),
+                        isBlank: field.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        isSensitive: field.isSensitive,
+                        itemID: item.id
+                    )
+                }
+            }
+            return EnvironmentMatrixInput.Column(
+                matchKey: environment.matchKey,
+                title: environment.title,
+                colorHex: environment.colorHex,
+                itemCount: environmentItems.count,
+                entries: entries
+            )
+        }
+        return EnvironmentMatrix(EnvironmentMatrixInput(columns: columns))
+    }
+
+    /// True when there is more than one environment holding something — the only case where a
+    /// comparison has anything to say.
+    func canCompareEnvironments(inWorkspace id: UUID) -> Bool {
+        offeredEnvironments(inWorkspace: id).count(where: {
+            itemCount(inWorkspace: id, environmentMatchKey: $0.matchKey) > 0
+        }) > 1
+    }
+
+    /// Opens the secret behind one cell of the matrix.
+    func revealMatrixCell(itemID: UUID) {
+        guard let item = items.first(where: { $0.id == itemID }) else { return }
+        activeSheet = nil
+        revealAndSelectItemFromPalette(item)
+    }
+
     // MARK: - Environment bar
 
     /// The workspace whose environments the item list should offer as tabs, or nil when the

@@ -311,6 +311,8 @@ enum VaultSheet: Identifiable {
     case itemHistory(UUID)
     /// The `.env` files found in a workspace's linked folder, before any of them is imported.
     case envDiscovery(UUID)
+    /// Keys side by side across one workspace's environments.
+    case environmentMatrix(UUID)
 
     var id: String {
         switch self {
@@ -326,6 +328,7 @@ enum VaultSheet: Identifiable {
         case .importPreview: "import-preview"
         case let .itemHistory(id): "item-history-\(id.uuidString)"
         case let .envDiscovery(id): "env-discovery-\(id.uuidString)"
+        case let .environmentMatrix(id): "environment-matrix-\(id.uuidString)"
         }
     }
 }

@@ -384,6 +384,19 @@ extension VaultViewModel {
                 )
             )
 
+            if canCompareEnvironments(inWorkspace: workspaceID) {
+                dynamic.append(
+                    .init(
+                        id: "compare.workspace.\(id)",
+                        title: "Compare Environments — \(workspace.name)",
+                        subtitle: "What each environment defines, and what it is missing",
+                        keywords: ["compare", "diff", "matrix", "missing", "environments", workspace.name],
+                        isEnabled: true,
+                        perform: wrap { self.activeSheet = .environmentMatrix(workspaceID) }
+                    )
+                )
+            }
+
             // One entry per environment, so "acme prod" reaches that project's production
             // secrets directly instead of the workspace and then a second gesture.
             for environment in offeredEnvironments(inWorkspace: workspaceID) {
