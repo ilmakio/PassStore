@@ -101,8 +101,9 @@ extension View {
 /// Tints the title bar to match the hero while one is on screen, and puts it back afterwards.
 ///
 /// Without this the hero stops dead at a strip of standard window chrome — which in light
-/// appearance is a white bar over a black panel. Only the title bar's colour is touched: the
-/// window's style mask is left alone so the toolbar comes back exactly as it went away.
+/// appearance is a white bar over a black panel. Only the title bar's own three properties are
+/// touched: the style mask is left alone so the toolbar comes back exactly as it went away, and
+/// nothing reaches into the split view AppKit builds for `NavigationSplitView`.
 struct VaultHeroWindowChrome: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -115,41 +116,111 @@ struct VaultHeroWindowChrome: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.restore()
+        coordinator.finish()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     @MainActor
     final class Coordinator {
-        private weak var window: NSWindow?
-        private var previousBackground: NSColor?
-        private var previousTransparency: Bool?
-        private var previousSeparator: NSTitlebarSeparatorStyle?
+        private weak var heldWindow: NSWindow?
+        /// One-way, set when SwiftUI takes this view away.
+        private var isFinished = false
 
+        /// A view has no window at the moment it is made, so this is handed to the next run-loop
+        /// turn — which means a queued call can land *after* SwiftUI has torn the view down.
+        /// Unguarded, that call dresses a window with no hero on it and no coordinator left alive
+        /// to undo it, and the app keeps the hero's title bar for the rest of its run. Once
+        /// finished, always finished.
         func apply(to window: NSWindow?) {
-            guard let window, window !== self.window else { return }
-            restore()
-
-            self.window = window
-            previousBackground = window.backgroundColor
-            previousTransparency = window.titlebarAppearsTransparent
-            previousSeparator = window.titlebarSeparatorStyle
-
-            window.backgroundColor = VaultHeroPalette.baseNSColor
-            window.titlebarAppearsTransparent = true
-            window.titlebarSeparatorStyle = .none
+            guard !isFinished, let window, window !== heldWindow else { return }
+            release()
+            heldWindow = window
+            VaultHeroTitlebar.retain(window)
         }
 
-        func restore() {
-            guard let window else { return }
-            if let previousBackground { window.backgroundColor = previousBackground }
-            if let previousTransparency { window.titlebarAppearsTransparent = previousTransparency }
-            if let previousSeparator { window.titlebarSeparatorStyle = previousSeparator }
-            self.window = nil
-            previousBackground = nil
-            previousTransparency = nil
-            previousSeparator = nil
+        func finish() {
+            isFinished = true
+            release()
+        }
+
+        private func release() {
+            guard let window = heldWindow else { return }
+            heldWindow = nil
+            VaultHeroTitlebar.release(window)
+        }
+    }
+}
+
+/// The window chrome a hero borrows, counted so it is captured once and put back once.
+///
+/// Two heroes overlap whenever one crossfades into another, and erasing the vault does exactly
+/// that: the lock screen goes straight to onboarding, and for the length of the fade both are
+/// mounted. With each screen saving and restoring on its own, the incoming one read the *outgoing
+/// one's* black as the value to put back — so the vault came up after setup with a black window
+/// that stayed black until the app was quit. Counting means the first hero in captures what was
+/// really there and the last hero out is the only one that restores it.
+///
+/// Deliberately nothing more than that. Three earlier attempts to also chase a hairline in the
+/// lock screen from here — writing to the split view's items, re-asserting on every layout pass,
+/// substituting "neutral" values for the ones read from the window — each broke the toolbar or
+/// the sidebar. The hairline turned out to be a toolbar item's own background and is dealt with
+/// where it lives.
+@MainActor
+enum VaultHeroTitlebar {
+    private struct Saved {
+        /// Weak, and checked before an entry is trusted: `ObjectIdentifier` is an address, and a
+        /// window closed while its entry was still counted would otherwise leave a booby trap for
+        /// the next object allocated in the same place.
+        weak var window: NSWindow?
+        var count = 0
+        var background: NSColor?
+        var appearsTransparent: Bool?
+        var separator: NSTitlebarSeparatorStyle?
+    }
+
+    private static var saved: [ObjectIdentifier: Saved] = [:]
+
+    private static func entry(for window: NSWindow) -> Saved? {
+        saved = saved.filter { $0.value.window != nil }
+        guard let entry = saved[ObjectIdentifier(window)], entry.window === window else { return nil }
+        return entry
+    }
+
+    static func retain(_ window: NSWindow) {
+        var entry = self.entry(for: window) ?? {
+            // Read, not assumed. This runs before any hero has dressed the window, which is what
+            // makes it the real state — and the count is what guarantees it runs only then.
+            var fresh = Saved()
+            fresh.window = window
+            fresh.background = window.backgroundColor
+            fresh.appearsTransparent = window.titlebarAppearsTransparent
+            fresh.separator = window.titlebarSeparatorStyle
+            return fresh
+        }()
+        entry.count += 1
+        saved[ObjectIdentifier(window)] = entry
+
+        window.backgroundColor = VaultHeroPalette.baseNSColor
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+    }
+
+    static func release(_ window: NSWindow) {
+        guard var entry = self.entry(for: window) else { return }
+        entry.count -= 1
+        guard entry.count <= 0 else {
+            saved[ObjectIdentifier(window)] = entry
+            return
+        }
+
+        saved[ObjectIdentifier(window)] = nil
+        if let background = entry.background { window.backgroundColor = background }
+        if let appearsTransparent = entry.appearsTransparent {
+            window.titlebarAppearsTransparent = appearsTransparent
+        }
+        if let separator = entry.separator {
+            window.titlebarSeparatorStyle = separator
         }
     }
 }
