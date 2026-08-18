@@ -2,6 +2,233 @@
 
 All notable changes to PassStore are documented here.
 
+## [1.3.0] - 2026-08-19
+
+### Added
+
+- **Environments belong to a workspace.** A workspace can state which environments its project
+  has — Local, Dev, Staging, Prod or names of your own — in which order they are offered and
+  which of them are still current. An environment can be switched off without deleting
+  anything, and one that still holds secrets stays reachable. Environments your secrets already
+  use but the project never declared are listed alongside the declared ones, so an existing
+  vault shows its structure without anything to migrate. Renaming a declaration moves the
+  secrets that were in it, in one step.
+- **Enter a workspace one environment at a time.** A project with `.env.local`,
+  `.env.staging` and `.env.production` stops being three unrelated rows in one long list.
+  Workspaces expand in the sidebar into their environments, the item list gains a row of tabs
+  with counts, and **⌘⌥←** / **⌘⌥→** move along them — "All" included. A new secret inherits
+  the environment you are standing in, or the first one the project offers. A workspace with
+  nothing to divide gets no triangle and no tabs, so vaults that do not use environments look
+  and behave exactly as before.
+- **A page for each workspace.** Standing in a workspace with nothing selected used to spend
+  the whole detail pane asking for a click. It now describes the project: its name over a band
+  in its own colour, how many secrets it holds and how they are spread across its environments,
+  how many mirror a file on disk and whether any have drifted, and one button to add the next
+  secret. Everything you can do *to* the workspace — edit it, link a folder, delete it — is in
+  one menu instead of three buttons that each looked like the main event.
+- **Point a workspace at the folder its project lives in.** PassStore then lists the `.env`
+  files inside it and imports the ones you tick: one secret per file, each linked to the file it
+  came from and each landing in the environment its name implies. Nothing is scanned at unlock
+  or on a timer — a scan happens when you ask for one — and `.env.example` and friends are
+  listed but never pre-selected. Unlinking hands the folder permission back in one click.
+- **New Workspace from Folder… (⇧⌘N)** builds the whole workspace from a repository: it takes
+  the folder's name, proposes an environment for every `.env` it finds, and lets you drop the
+  ones you do not want before anything is created. A repository already knows its own name, and
+  the files next to its code already say which environments it has.
+- **Compare keys across a workspace's environments.** Answers the two questions a project with
+  several `.env` files keeps raising: what is production missing, and am I using the same secret
+  in more than one place. The workspace page states the finding in a sentence — "Staging is
+  missing 3 keys" — and clicking it opens the grid. An empty value and an absent key are drawn
+  differently, because in a `.env` the first is a decision and the second an omission. Two
+  secrets defining the same key in one environment are flagged: they can disagree, and
+  something is ignoring one of them.
+- **Resolve a linked `.env` one variable at a time.** The link now records a digest of each
+  variable's value at every sync, which is what makes it possible to say *which side moved* for
+  a given variable rather than only for the file. The entry that differs is marked in the detail
+  pane and offers to take the file's value or to write its own — either way touching that one
+  variable and nothing else. A variable the file sets and the secret does not is listed, where
+  it can be added.
+- **A `.env` keeps its comments.** An imported `.env` used to have every comment flattened into
+  one notes block, so the note explaining a variable ended up several screens away from it. A
+  secret now remembers the shape of the file it came from — comments, blank lines, ordering,
+  indentation, `export` prefixes, quoting, values written across several lines — and no values
+  at all: a value lives only in its field, so the layout can never become a stale second copy of
+  a secret. The detail pane reads those comments the way the file does: banner blocks become
+  headings, a block above a run of variables introduces that run, and a `# note` after a value
+  sits under that value.
+- **Copy as .env (⇧⌘E) reproduces the file you imported**, comments and all.
+  **Copy as .env (Values Only) (⇧⌥⌘E)** keeps the plain keys-and-values form for anything that
+  strips comments anyway. Rendering needs no access to the file, so it works from a backup and
+  on another Mac.
+- **Copy to Environment and Move to Environment**, on one secret or on a whole selection, so
+  "take this to production" and "give production one of its own" stop being done by hand.
+- **A secret's siblings are in its header.** Where the same secret exists in more than one
+  environment of a project, the others are listed under its name and are one click away — with
+  a `+` to create the one that is missing.
+- **Name a field and press Return.** The new-secret sheet has a row for adding a field that is
+  always visible: type a name, press Return, and the cursor lands in that field's value. Return
+  there comes back for the next one, so a set of variables can be typed straight through without
+  touching the mouse.
+- **The empty detail pane offers the thing it talks about.** It said "or create a new one" while
+  having no button to do it; now it has one, and says ⌘N does the same.
+- **Setup says how far along you are.** The onboarding steps are named — Welcome, Password,
+  Touch ID, Workspace, Done — with the one you are on picked out and the ones behind you ticked.
+
+### Changed
+
+- **Creating a secret is one page.** It used to open on a full screen of template cards, so the
+  kind of thing you were storing had to be decided before you were allowed to type its name —
+  and a custom template was reachable *only* from that page. Now the sheet opens on the form:
+  three pickers across the top for **workspace, environment and type**, because those decide
+  where the secret will be when you go looking for it, and the name underneath. The type picker
+  lists every template, custom ones included, and changing it fills the fields in without
+  discarding anything you have already typed.
+- **The new-secret sheet is painted in the workspace's colour**, carries its icon, and says
+  where the secret will land — `Pokéos API · Staging · Database` — under the title. Opening it
+  from inside a workspace already filed the secret there; now the sheet looks like it.
+- **The environment picker offers the environments the workspace actually has.** It was a
+  segmented control over five fixed presets, which is not what a project with "Local, Staging
+  EU, Prod" has — so filing a secret in one of its own environments meant choosing "Custom" and
+  retyping the name, exactly right, from memory.
+- **There is no "Advanced" switch in the item editor.** It lived in the section header and
+  applied to every field at once: turning it on to rename one field unfolded a label box, a
+  storage-key box, a kind popup and three checkboxes under *all* of them, and the form doubled
+  in height. Renaming, reordering, the value kind and the sensitive / masked / copyable flags are
+  now in a menu on the field they belong to.
+- **Setting a field's kind to Secret makes it sensitive and masked.** Calling a value "Secret"
+  and leaving it neither contradicts itself. Deliberately one-way: switching back to Text leaves
+  the flags alone rather than quietly unmasking a value that is already stored.
+- **Tags and notes share one card**, with a rule between them, instead of taking a titled
+  section each — two optional afterthoughts had the same weight as the fields.
+- **One yellow.** The app had drifted into four: the asset accent, the system accent, the system
+  yellow and a readable gold, mixed almost at random. There is now a single rule — the brand
+  yellow is what gets *painted*, always with black content on it, and a deeper shade of the same
+  hue is used wherever the accent is the ink instead. Section rules, chips, glyphs, badges,
+  selection washes and the password-strength meter all follow it.
+- **Notices come in two registers, not five.** A pane could hold a green sentence, an amber one,
+  a grey one and a yellow one, none of which meant anything by being that colour, each with a
+  decorative `(i)` in front of it. Now: something needs you — a tinted band, a coloured glyph and
+  readable text — or it does not, in which case it is one quiet grey line with no icon at all.
+  "Everything matched at the last check" no longer shouts in green.
+- **Every button in the app is the app's button.** Inline actions, small buttons beside a text
+  field, "Update from File", "Write to File", "Link a .env File…", the add-field and add-tag
+  buttons and the text links inside a sentence were a mix of stock macOS styles. They now share
+  one shape in three sizes. The text links in particular were drawn in the app's tint — bright
+  yellow, at caption size, on a white sheet.
+- **Icons that identify something are a solid tile with a contrasting glyph** — the treatment the
+  item detail already had — in sheet headers, on the workspace page, on the template cards and in
+  the workspace previews. The washed 15%-tint version made the one element meant to carry the
+  colour the palest thing on the screen.
+- **A list row names where its secret lives on the right-hand edge**, as plain text with the
+  colour on the glyph only, instead of a capsule in the middle of the row competing with the
+  secret's own name. The type's icon sits tight against its name rather than a menu-row's width
+  away.
+- **A row no longer repeats the scope you are already inside.** In a workspace it names the
+  environment; inside one environment of one workspace it names neither, because both are in the
+  title above.
+- **Environments have no colours of their own.** Colour already means "which workspace this
+  belongs to", and a second palette competing for the same signal was the confusing part. Every
+  environment of a project is drawn in the project's colour and told apart by a glyph — laptop,
+  hammer, test tube, globe.
+- **Clicking a secret's workspace opens that workspace.** It used to narrow the list and leave
+  the secret on screen, which showed you none of the page the workspace now has. The environment
+  link beside it still keeps the secret open, because narrowing the list is what that one is for.
+- **The hover copy button is gone from the item list.** It appeared and disappeared under the
+  pointer, shoving the rest of the row aside as you moved down the list. The same copy is on the
+  right-click menu and on ⇧⌘C.
+- **A `.env` in the detail pane is laid out like the file it came from.** A comment block and the
+  variables it introduces are bracketed by a rule down the left, so what a note covers is drawn
+  rather than measured by eye; runs of variables are separated, sections spaced wider; comments
+  are set in the monospaced style the values use, because they are text out of your file and not
+  a caption PassStore wrote. A field's name sits 2pt above its value so the two read as one
+  thing, and the sync notice for a variable sits directly under the value it is about.
+- **⇧⌘N is New Workspace from Folder…**, the way most workspaces should start. An empty workspace
+  is right below it in the same menu.
+- **Setup's progress dots are gone.** They were six points tall on a dark, animated backdrop —
+  the inactive ones were invisible, and even when you found them they only said "three more of
+  something".
+
+### Fixed
+
+- **Writing to a linked `.env` can no longer flatten it.** A write merges into the file on disk,
+  but the merge was best-effort: when the read failed it fell through to a document regenerated
+  from the secret's fields, deleting every comment, blank line and untracked variable in it. A
+  `.env` holding a single non-UTF-8 byte reads as unreadable and writes fine, so that path was
+  reachable. The write is now refused, with a reason. Alongside it: a change landing between the
+  read and the rename is refused rather than overwritten; a file that moved since the last sync
+  is refused explicitly; a write that would change nothing is skipped; a line the secret does not
+  touch stays byte-identical; and a changed value keeps the quoting the file used where that is
+  still safe — every tracked assignment used to be rebuilt double-quoted, so one Write turned
+  into a diff on every line of somebody's file.
+- **A successful write is reported as in sync.** It was measured against the file's digest, which
+  a merged file never matches.
+- **The per-variable baseline records the value both sides agreed on.** An edit landing while the
+  file operation was suspended would have been recorded as the synced value, which then blamed
+  the secret's own change on the file at the next check.
+- **Importing a workspace's `.env` files records that baseline too.** It stored the whole-file
+  digests but not the per-variable one, so every later difference in those secrets would have
+  read as "both sides changed" instead of naming the side that moved.
+- **Copying several `.env` secrets at once gives the same thing as copying one.** A multiple
+  selection produced the regenerated form — keys and values, no comments — while a single secret
+  produced the file as its owner wrote it. Each file now carries its secret's name above it, so a
+  paste of several can be told apart.
+- **Asking the sidebar about a workspace shows the workspace.** The detail pane kept describing
+  whichever secret happened to be selected.
+- **A workspace's "Add" environment tile matches the height of the card beside it** and is
+  clickable across its whole area, not only on the word.
+- **Missing keys are only counted against environments that hold something**, so a declared but
+  empty Staging is not reported as missing every key in the project.
+- **Identical values are only a finding for sensitive fields.** `PORT` being the same everywhere
+  is how ports work.
+- **A variable emptied in the vault but still set in the file stays visible**; hiding it left the
+  difference with nothing to click.
+- **An environment that empties out falls back to its workspace**, not to the whole vault.
+- **The compare sheet has its own padding**, picks up the workspace's tint, and shows each
+  environment's glyph in the column head.
+- **Pulling a file no longer overwrites your notes.** Notes are yours; the file's comments have
+  somewhere better to live now.
+- **A variable the secret no longer holds renders as no line at all** rather than as an empty
+  assignment, and one added in PassStore is appended. An empty value keeps the bare `KEY=` form
+  when that is what the file used.
+- **The lock screen has no hairline in its top-left corner.** The invisible spacer that holds the
+  title bar at its normal height — so the window buttons do not move — was being given the
+  toolbar's own background, and drew as a one-point sliver of chrome.
+- **Keys compare case-insensitively and keep the spelling they were first given.**
+
+### Security
+
+- **A folder grant reaches everything inside it, so linking one is deliberately narrow.** The
+  folder is only ever chosen through a panel that says what it is for. Nothing is scanned at
+  unlock or on a timer. Discovery reads names and sizes, never a file body — the first read of
+  any contents is the import you confirmed. Symlinks are skipped rather than followed, so a link
+  cannot walk out of the folder; depth, result count and the usual dependency directories are
+  capped or excluded; and a stored relative path cannot escape the folder it was found in.
+  Imported secrets get per-file bookmarks of their own, so unlinking the folder later costs them
+  nothing. No new entitlement was needed.
+- **Comparing environments does not create a second place secrets are rendered.** Every cell of
+  the grid carries presence and a digest, never the thing it digests — so "local and production
+  hold the same secret" can be reported without either being displayed. Reading one still means
+  opening it.
+- **A `.env` layout stored with a secret holds no values.** A value lives only in its field, so
+  the remembered shape of a file cannot become a stale copy of a secret.
+- **Environment declarations are clamped on the way in**, from the editor and from an untrusted
+  backup alike: presets keep their canonical name, duplicates collapse, colours must be hex, and
+  a file name can never be a path.
+- **Per-variable difference states hold no values** — only which side moved — and are cleared on
+  lock like everything else derived from vault contents.
+
+### Compatibility
+
+- **Vaults and `.pstore` backups written by 1.2.x open unchanged.** A vault written by 1.3.0
+  stays readable by earlier versions: an environment declaration is organisation metadata only,
+  and the authoritative environment of a secret stays where it has always been, on the secret
+  itself. A workspace that declares nothing behaves exactly as it did before.
+- **A secret imported by an earlier version picks up its file's layout** the first time the file
+  is linked or pulled. Until then it renders as it always did.
+- **A link made by an earlier version has no per-variable baseline.** A variable that differs is
+  reported as diverged rather than attributed to a side that cannot be known; the next sync
+  records one.
+
 ## [1.2.0] - 2026-08-17
 
 ### Added
