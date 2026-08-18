@@ -367,6 +367,9 @@ extension VaultSnapshot {
             for field in item.fields where field.previousValues.count > 1_000 {
                 throw VaultCryptoError.vaultContentsTooLarge
             }
+            if let lineCount = item.envLayout?.lines.count, lineCount > EnvDocumentLayout.maximumLines {
+                throw VaultCryptoError.vaultContentsTooLarge
+            }
         }
 
         for template in customTemplates where template.fieldDefinitions.count > 2_000 {
@@ -607,7 +610,11 @@ final class VaultMemoryStore {
                 isArchived: $0.isArchived,
                 createdAt: $0.createdAt,
                 updatedAt: $0.updatedAt,
-                sortOrder: $0.sortOrder
+                sortOrder: $0.sortOrder,
+                // Nil rather than [] so a workspace that declares no environment encodes
+                // exactly as it did before 1.3.
+                environments: $0.environments.isEmpty ? nil : $0.environments,
+                linkedFolder: $0.linkedFolder
             )
         }
 
@@ -646,7 +653,8 @@ final class VaultMemoryStore {
                 },
                 changeHistory: item.changeHistory,
                 ignoredHealthIssues: item.ignoredHealthIssues,
-                linkedFile: item.linkedFile
+                linkedFile: item.linkedFile,
+                envLayout: item.envLayout
             )
         }
 
@@ -705,7 +713,11 @@ final class VaultMemoryStore {
                 isArchived: workspaceSnapshot.isArchived,
                 createdAt: workspaceSnapshot.createdAt,
                 updatedAt: workspaceSnapshot.updatedAt,
-                sortOrder: workspaceSnapshot.sortOrder
+                sortOrder: workspaceSnapshot.sortOrder,
+                // Snapshots also arrive from imported backups, which are untrusted input even
+                // after their password is accepted: clamp the list rather than store it as-is.
+                environments: WorkspaceEnvironment.sanitizedList(workspaceSnapshot.environments ?? []),
+                linkedFolder: workspaceSnapshot.linkedFolder
             )
             if workspaceMap[workspaceSnapshot.id] == nil {
                 workspaceMap[workspaceSnapshot.id] = workspace
@@ -796,7 +808,8 @@ final class VaultMemoryStore {
                     namespace: "item-history|\(itemID.uuidString)"
                 ),
                 ignoredHealthIssues: Self.uniqueIgnoredIssues(itemSnapshot.ignoredHealthIssues),
-                linkedFile: itemSnapshot.linkedFile
+                linkedFile: itemSnapshot.linkedFile,
+                envLayout: itemSnapshot.envLayout
             )
             var seenFieldIDs: Set<UUID> = []
             item.fields = itemSnapshot.fields.map { fieldSnapshot in

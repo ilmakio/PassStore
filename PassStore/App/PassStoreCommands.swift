@@ -74,12 +74,21 @@ struct PassStoreCommands: Commands {
             .keyboardShortcut("n", modifiers: [.command])
             .disabled(isLocked)
 
+            // Pointing at a repository is the path most workspaces should take, so it gets the
+            // shortcut; an empty one is right below it for a workspace that is not a codebase.
+            Button {
+                Task { await viewModel.beginWorkspaceFromFolder() }
+            } label: {
+                Label("New Workspace from Folder…", systemImage: "folder.badge.gearshape")
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .disabled(isLocked)
+
             Button {
                 viewModel.activeSheet = .newWorkspace
             } label: {
-                Label("New Workspace…", systemImage: "folder.badge.plus")
+                Label("New Empty Workspace…", systemImage: "folder.badge.plus")
             }
-            .keyboardShortcut("n", modifiers: [.command, .shift])
             .disabled(isLocked)
 
             Divider()
@@ -160,6 +169,14 @@ struct PassStoreCommands: Commands {
                     Label("Copy as .env", systemImage: "doc.plaintext")
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(!canUseClipboardActions)
+
+                Button {
+                    viewModel.copyEnvValuesOnly()
+                } label: {
+                    Label("Copy as .env (Values Only)", systemImage: "list.bullet.rectangle")
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift, .option])
                 .disabled(!canUseClipboardActions)
 
                 Button {
@@ -265,6 +282,26 @@ struct PassStoreCommands: Commands {
             }
             .keyboardShortcut(.downArrow, modifiers: [.option])
             .disabled(isLocked)
+
+            Divider()
+
+            // Moves along the environment tabs of the workspace being viewed, "All" included.
+            // Disabled outside a project view, where there are no tabs to move between.
+            Button {
+                viewModel.cycleEnvironment(by: -1)
+            } label: {
+                Label("Previous Environment", systemImage: "chevron.left")
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .disabled(isLocked || viewModel.environmentBarWorkspaceID == nil)
+
+            Button {
+                viewModel.cycleEnvironment(by: 1)
+            } label: {
+                Label("Next Environment", systemImage: "chevron.right")
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .disabled(isLocked || viewModel.environmentBarWorkspaceID == nil)
 
             Divider()
 

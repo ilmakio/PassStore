@@ -143,7 +143,10 @@ struct VaultViewModelTests {
         #expect(draft.title == "Imported .env")
         #expect(draft.type == .envGroup)
         #expect(draft.workspaceID == workspace.id)
-        #expect(draft.notes == "local config")
+        // The file's comments are kept in the layout, next to the variable each one is about,
+        // rather than flattened into the notes box.
+        #expect(draft.notes.isEmpty)
+        #expect(draft.envLayout?.outline.sections.first?.groups.first?.comments == ["local config"])
         #expect(draft.tags.isEmpty)
         #expect(draft.fieldDrafts.map(\.key) == ["API_URL", "SESSION_SECRET"])
         #expect(draft.fieldDrafts.last?.isSensitive == true)
@@ -518,6 +521,167 @@ struct VaultViewModelTests {
         #expect(viewModel.itemDeletionConfirmLabel == "Delete")
         // Postgres seed has a sensitive password field, so the warning should say so.
         #expect(viewModel.itemDeletionMessage.contains("stored secret"))
+    }
+
+    // MARK: - Following a secret's header links
+
+    @Test func openingAWorkspaceFromASecretShowsTheWorkspacePage() throws {
+        let container = AppContainer.preview()
+        let viewModel = VaultViewModel(container: container)
+        let item = try #require(viewModel.items.first(where: { $0.workspace != nil }))
+        let workspace = try #require(item.workspace)
+
+        viewModel.selectDestination(.library(.allItems))
+        viewModel.select(item)
+        viewModel.setSelectedType(item.type)
+        viewModel.searchText = item.title
+        #expect(viewModel.selectedItemID == item.id)
+
+        viewModel.openWorkspace(workspace.id)
+
+        #expect(viewModel.selectedDestination == .workspace(workspace.id))
+        // Cleared, so the detail pane falls through to the workspace's own page.
+        #expect(viewModel.selectedItemID == nil)
+        #expect(viewModel.searchText.isEmpty)
+        #expect(viewModel.selectedType == nil)
+    }
+
+    /// The environment link beside it is the other kind of request — narrow the list, stay on the
+    /// secret — and must not have been dragged along by the change above.
+    @Test func revealingAnEnvironmentFromASecretKeepsItOpen() throws {
+        let container = AppContainer.preview()
+        let viewModel = VaultViewModel(container: container)
+        let item = try #require(viewModel.items.first(where: { $0.workspace != nil }))
+        let workspace = try #require(item.workspace)
+
+        viewModel.selectDestination(.library(.allItems))
+        viewModel.select(item)
+
+        viewModel.revealDestinationKeepingSelection(
+            .workspaceEnvironment(workspace.id, item.environmentValue.title)
+        )
+
+        #expect(viewModel.selectedDestination == .workspaceEnvironment(workspace.id, item.environmentValue.title))
+        #expect(viewModel.selectedItemID == item.id)
+    }
+
+    // MARK: - Field value kinds
+
+    @Test func changingAFieldsKindToSecretProtectsIt() {
+        var field = FieldDraft(key: "token", label: "Token", value: "abc", kind: .text, isSensitive: false)
+        #expect(!field.isSensitive)
+        #expect(!field.isMasked)
+
+        field.applyKind(.secret)
+
+        #expect(field.kind == .secret)
+        #expect(field.isSensitive)
+        #expect(field.isMasked)
+        #expect(field.value == "abc")
+    }
+
+    /// One-way on purpose: coming back off Secret must not quietly un-mask a stored value.
+    @Test func changingAFieldsKindAwayFromSecretKeepsItProtected() {
+        var field = FieldDraft(
+            key: "token",
+            label: "Token",
+            value: "abc",
+            kind: .secret,
+            isSensitive: true,
+            isMasked: true
+        )
+
+        field.applyKind(.text)
+
+        #expect(field.kind == .text)
+        #expect(field.isSensitive)
+        #expect(field.isMasked)
+    }
+
+    @Test func changingAFieldsKindToANonSecretLeavesHandlingAlone() {
+        var field = FieldDraft(key: "notes", label: "Notes", value: "", kind: .text, isSensitive: false)
+
+        field.applyKind(.multiline)
+
+        #expect(field.kind == .multiline)
+        #expect(!field.isSensitive)
+        #expect(!field.isMasked)
+    }
+
+    // MARK: - Kind control on the creation form
+
+    @Test func applyTemplateChangeSwapsInTheChosenTemplatesFields() throws {
+        let container = AppContainer.preview()
+        let viewModel = VaultViewModel(container: container)
+        let databaseTemplate = try #require(viewModel.defaultTemplate(for: .database))
+        let apiTemplate = try #require(viewModel.defaultTemplate(for: .apiCredential))
+        let expectedKeys = apiTemplate.fieldDefinitions.sorted { $0.sortOrder < $1.sortOrder }.map(\.key)
+
+        var draft = viewModel.newItemDraft(template: databaseTemplate)
+        viewModel.applyTemplateChange(to: &draft, template: apiTemplate)
+
+        #expect(draft.type == .apiCredential)
+        #expect(draft.templateID == apiTemplate.id)
+        #expect(draft.fieldDrafts.map(\.key) == expectedKeys)
+    }
+
+    /// The reason the Kind control cannot just set the item type: a custom template and the
+    /// built-in it was duplicated from can both report the same `itemType`, so picking one by
+    /// type alone would bring in the other one's fields.
+    @Test func applyTemplateChangeHonoursACustomTemplateSharingAnItemType() throws {
+        let container = AppContainer.preview()
+        let viewModel = VaultViewModel(container: container)
+        let custom = try #require(viewModel.saveTemplate(TemplateDraft(
+            name: "Registry Login",
+            itemType: .customTemplate,
+            fieldDefinitions: [
+                TemplateFieldDraft(
+                    key: "registry",
+                    label: "Registry",
+                    kind: .url,
+                    isSensitive: false,
+                    isCopyable: true,
+                    isMaskedByDefault: false,
+                    sortOrder: 0
+                ),
+                TemplateFieldDraft(
+                    key: "robot_token",
+                    label: "Robot Token",
+                    kind: .secret,
+                    isSensitive: true,
+                    isCopyable: true,
+                    isMaskedByDefault: true,
+                    sortOrder: 1
+                )
+            ]
+        )))
+
+        var draft = viewModel.newItemDraft()
+        viewModel.applyTemplateChange(to: &draft, template: custom)
+
+        #expect(draft.type == .customTemplate)
+        #expect(draft.templateID == custom.id)
+        #expect(draft.fieldDrafts.map(\.key) == ["registry", "robot_token"])
+        #expect(draft.fieldDrafts.last?.isSensitive == true)
+    }
+
+    @Test func applyTemplateChangeKeepsFieldsThatAlreadyHoldAValue() throws {
+        let container = AppContainer.preview()
+        let viewModel = VaultViewModel(container: container)
+        let databaseTemplate = try #require(viewModel.defaultTemplate(for: .database))
+        let apiTemplate = try #require(viewModel.defaultTemplate(for: .apiCredential))
+
+        var draft = viewModel.newItemDraft(template: databaseTemplate)
+        let passwordIndex = try #require(draft.fieldDrafts.firstIndex(where: { $0.key == "password" }))
+        draft.fieldDrafts[passwordIndex].value = "stored-secret"
+        let keysBefore = draft.fieldDrafts.map(\.key)
+
+        viewModel.applyTemplateChange(to: &draft, template: apiTemplate)
+
+        #expect(draft.type == .apiCredential)
+        #expect(draft.templateID == apiTemplate.id)
+        #expect(draft.fieldDrafts.map(\.key) == keysBefore)
+        #expect(draft.fieldDrafts[passwordIndex].value == "stored-secret")
     }
 
     @Test func applyItemTypeChangeWithFilledFieldsPreservesFieldDrafts() throws {

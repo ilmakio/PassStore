@@ -55,7 +55,29 @@ enum FieldKind: String, CaseIterable, Codable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
-enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
+/// How a value was quoted in a `.env` file.
+///
+/// Kept per assignment so writing a new value back can use the quoting the owner already had.
+/// Double quotes are the safe default when a value needs escaping; they should not be imposed
+/// on a file that did without them.
+nonisolated enum EnvQuoteStyle: String, Codable, Hashable, Sendable {
+    case none
+    case single
+    case double
+
+    init(leadingCharacter: Character?) {
+        switch leadingCharacter {
+        case "\"": self = .double
+        case "'": self = .single
+        default: self = .none
+        }
+    }
+}
+
+/// The declared order is the lifecycle order — local, dev, staging, prod — and code relies on
+/// it: `WorkspaceEnvironment.canonicalRank(of:)` orders a workspace's environments by it, so
+/// reordering these cases reorders the UI.
+nonisolated enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
     case local
     case dev
     case staging
@@ -71,6 +93,22 @@ enum EnvironmentKind: String, CaseIterable, Codable, Identifiable {
         case .staging: "Staging"
         case .prod: "Prod"
         case .custom: "Custom"
+        }
+    }
+
+    /// How an environment is told apart from its siblings.
+    ///
+    /// Deliberately a glyph rather than a colour: colour already means "which workspace this
+    /// belongs to" everywhere else in the app, and giving environments their own palette made
+    /// two different things compete for the same signal. Every environment of a project is
+    /// drawn in the project's colour, and these tell them apart.
+    var systemImage: String {
+        switch self {
+        case .local: "laptopcomputer"
+        case .dev: "hammer.fill"
+        case .staging: "testtube.2"
+        case .prod: "globe.americas.fill"
+        case .custom: "circle.hexagongrid"
         }
     }
 }
@@ -230,6 +268,38 @@ enum LinkedFileStatus: Equatable {
     }
 }
 
+/// What happened to one variable since an item and its `.env` were last in sync.
+///
+/// `LinkedFileStatus` answers "has something changed?" for the whole file, which leaves the owner
+/// with one decision covering everything in it. This answers "what changed" per variable, so a
+/// value can be pulled or pushed on its own without touching anything else.
+///
+/// Deliberately carries no values: the state is cached per item while the vault is unlocked, and
+/// a cache of every linked file's secrets is not something to keep around. The value is read from
+/// the file at the moment it is applied.
+nonisolated enum EnvFieldDrift: String, Equatable, Sendable {
+    /// The file holds a different value; the item's has not moved since the last sync.
+    case fileChanged
+    /// The item's value has moved; the file's has not.
+    case vaultChanged
+    /// Both moved, or the link predates per-variable tracking and which side moved is unknown.
+    case diverged
+    /// The item has this variable and the file does not.
+    case onlyInVault
+    /// The file has this variable and the item does not.
+    case onlyInFile
+
+    /// Whether the file has a value that could be pulled in.
+    var canPull: Bool {
+        self != .onlyInVault
+    }
+
+    /// Whether the item has a value that could be written out.
+    var canPush: Bool {
+        self != .onlyInFile
+    }
+}
+
 enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
     case allItems
     case favorites
@@ -260,8 +330,24 @@ enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
 enum VaultDestination: Hashable {
     case library(LibrarySection)
     case workspace(UUID)
+    /// One environment of one workspace — "Acme API › Prod".
+    ///
+    /// Identified by environment *title* rather than by a declaration id, because an
+    /// environment can be in use without ever having been declared: every vault written before
+    /// 1.3 is in exactly that state, and navigation has to reach those items too.
+    case workspaceEnvironment(UUID, String)
     case tag(String)
+    /// The same environment across every workspace. Kept alongside the scoped case: "show me
+    /// everything in production" is a different and still useful question.
     case environment(String)
+
+    var workspaceID: UUID? {
+        switch self {
+        case let .workspace(id): id
+        case let .workspaceEnvironment(id, _): id
+        case .library, .tag, .environment: nil
+        }
+    }
 }
 
 enum VaultSheet: Identifiable {
@@ -278,6 +364,15 @@ enum VaultSheet: Identifiable {
     case importPreview
     /// Full audit trail and previous values for one item.
     case itemHistory(UUID)
+    /// A whole workspace proposed from a folder the owner picked: its name, its environments and
+    /// the `.env` files it will start with, all reviewable before anything is created.
+    case newWorkspaceFromFolder
+    /// The `.env` files found in a workspace's linked folder, before any of them is imported.
+    case envDiscovery(UUID)
+    /// Keys side by side across one workspace's environments.
+    case environmentMatrix(UUID)
+    /// Sending a secret into another environment, and choosing how much of it comes across.
+    case copyToEnvironment
 
     var id: String {
         switch self {
@@ -292,6 +387,10 @@ enum VaultSheet: Identifiable {
         case .bulkEdit: "bulk-edit"
         case .importPreview: "import-preview"
         case let .itemHistory(id): "item-history-\(id.uuidString)"
+        case .newWorkspaceFromFolder: "new-workspace-from-folder"
+        case let .envDiscovery(id): "env-discovery-\(id.uuidString)"
+        case let .environmentMatrix(id): "environment-matrix-\(id.uuidString)"
+        case .copyToEnvironment: "copy-to-environment"
         }
     }
 }

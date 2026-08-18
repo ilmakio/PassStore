@@ -638,10 +638,95 @@ struct PolishAndRecoveryTests {
         #expect(didWrite)
 
         let onDisk = try String(contentsOf: url, encoding: .utf8)
-        #expect(onDisk.contains("TOKEN=\"new\""))
+        // The line keeps the shape the file gave it: an unquoted value that is still safe
+        // unquoted is not re-quoted just because PassStore wrote it.
+        #expect(onDisk == "TOKEN=new\n")
         #expect(EnvImportService().parse(onDisk).entries.first(where: { $0.key == "TOKEN" })?.value == "new")
         let finalStatus = await viewModel.linkedFileStatus(for: saved)
         #expect(finalStatus == .upToDate)
+    }
+
+    /// A file that cannot be read cannot be merged into. Writing the regenerated document over
+    /// it instead — which is what the fallback used to do — deletes every comment and every
+    /// untracked variable in somebody's `.env`.
+    @Test func aWriteIsRefusedWhenTheLinkedFileCannotBeRead() async throws {
+        let container = makeContainer("EnvUnreadable")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("# keep me\nTOKEN=old\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let item = try await linkedEnvItem(viewModel, url: url, title: "Unreadable env")
+
+        // A byte that is not valid UTF-8 — a latin-1 accent pasted into the file, say.
+        let bytes = Data([0x54, 0x4F, 0x4B, 0x45, 0x4E, 0x3D, 0xFF, 0x0A])
+        try bytes.write(to: url)
+
+        let didWrite = await viewModel.writeLinkedFile(from: item, allowingFileChanges: true)
+        #expect(!didWrite)
+        let onDisk = try Data(contentsOf: url)
+        #expect(onDisk == bytes)
+        #expect(viewModel.alertMessage != nil)
+    }
+
+    /// Accepting an on-disk change means merging into what is on disk *now*. The precondition
+    /// for the write is the text that was merged, so a change arriving in between is refused
+    /// rather than silently replaced.
+    @Test func overwritingAChangedFileKeepsWhatOnlyTheFileHolds() async throws {
+        let container = makeContainer("EnvMergeBase")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("# header\nTOKEN=old\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let item = try await linkedEnvItem(viewModel, url: url, title: "Diverging env")
+
+        // The file gains a comment and a variable the item knows nothing about…
+        let editedOnDisk = "# header\n# added later\nTOKEN=old\nUNTRACKED=keep\n"
+        try editedOnDisk.write(to: url, atomically: true, encoding: .utf8)
+        // …while the stored value changes too.
+        var edit = viewModel.draft(forItemID: item.id)
+        edit.id = item.id
+        let tokenIndex = try #require(edit.fieldDrafts.firstIndex { $0.key == "TOKEN" })
+        edit.fieldDrafts[tokenIndex].value = "new"
+        viewModel.saveItem(edit)
+        let saved = try #require(viewModel.items.first { $0.id == item.id })
+        #expect(await viewModel.linkedFileStatus(for: saved) == .diverged)
+
+        // Without an explicit decision the on-disk edit is not written over.
+        #expect(!(await viewModel.writeLinkedFile(from: saved)))
+        #expect(try String(contentsOf: url, encoding: .utf8) == editedOnDisk)
+
+        #expect(await viewModel.writeLinkedFile(from: saved, allowingFileChanges: true))
+        #expect(try String(contentsOf: url, encoding: .utf8) == "# header\n# added later\nTOKEN=new\nUNTRACKED=keep\n")
+    }
+
+    @Test func writingWhenTheFileAlreadyMatchesLeavesItUntouched() async throws {
+        let container = makeContainer("EnvNoopWrite")
+        let viewModel = VaultViewModel(container: container)
+
+        let url = try writeTemporaryEnvFile("# header\nTOKEN=old\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let item = try await linkedEnvItem(viewModel, url: url, title: "Unchanged env")
+        let modifiedBefore = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+
+        #expect(await viewModel.writeLinkedFile(from: item, allowingFileChanges: true))
+
+        #expect(try String(contentsOf: url, encoding: .utf8) == "# header\nTOKEN=old\n")
+        let modifiedAfter = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        #expect(modifiedAfter == modifiedBefore)
+    }
+
+    /// Imports a `.env`, saves it and links the two, returning the stored item.
+    private func linkedEnvItem(
+        _ viewModel: VaultViewModel,
+        url: URL,
+        title: String
+    ) async throws -> SecretItemEntity {
+        let picked = try #require(viewModel.readEnvFile(at: url))
+        var draft = try #require(viewModel.prepareEnvImport(from: .pastedText(picked.contents), parseIntoEntries: true))
+        draft.title = title
+        let item = try #require(viewModel.saveNewItem(draft, linkingTo: nil, parsedIntoFields: true))
+        await viewModel.linkFile(at: url, to: item, parsedIntoFields: true, acceptCurrentContentsAsSynced: true)
+        return try #require(viewModel.items.first { $0.id == item.id })
     }
 
     @Test func aMissingLinkedFileIsReportedRatherThanFailingSilently() async throws {
@@ -832,7 +917,7 @@ struct EnvRoundTripTests {
         #expect(updated.contains("# Do not commit"))
         #expect(updated.contains("# Third-party"))
         #expect(updated.contains("\n\n"))
-        #expect(updated.contains("DB_HOST=\"new.example.dev\""))
+        #expect(updated.contains("DB_HOST=new.example.dev"))
         #expect(updated.contains("sk_new"))
         #expect(!updated.contains("old.example.dev"))
         #expect(!updated.contains("sk_old"))
@@ -842,6 +927,90 @@ struct EnvRoundTripTests {
         let hostLine = try? #require(updated.components(separatedBy: "\n").firstIndex { $0.hasPrefix("DB_HOST") })
         let stripeLine = try? #require(updated.components(separatedBy: "\n").firstIndex { $0.hasPrefix("STRIPE_KEY") })
         #expect((hostLine ?? 0) < (stripeLine ?? 0))
+    }
+
+    /// Every tracked assignment used to be rebuilt, so `LOG_LEVEL=info` came back as
+    /// `LOG_LEVEL="info"` and a single Write showed up as a diff on every line of the file.
+    @Test func updatingLeavesLinesWhoseValueDidNotChangeByteIdentical() {
+        let original = """
+        # ==========================
+        # DEV-ONLY — local convenience
+        # ==========================
+
+        LOG_LEVEL=info
+        DISABLE_SAFEGUARD=true
+
+        # REFLECTS USERS.md
+          export CURRENT_USER=LUKE
+        LITERAL='keep $me exactly'
+        PORT=5432 # the default
+        EMPTY=
+        MULTI="one
+        two"
+        """
+
+        let updated = CopyFormatter.envFileByUpdating(original, with: [
+            field("LOG_LEVEL", "info", order: 0),
+            field("DISABLE_SAFEGUARD", "true", order: 1),
+            field("CURRENT_USER", "LUKE", order: 2),
+            field("LITERAL", "keep $me exactly", order: 3),
+            field("PORT", "5432", order: 4),
+            field("EMPTY", "", order: 5),
+            field("MULTI", "one\ntwo", order: 6)
+        ])
+
+        #expect(updated == original)
+    }
+
+    @Test func updatingKeepsTheOriginalQuotingStyleWhenTheNewValueAllowsIt() {
+        let original = """
+        LOG_LEVEL=info
+        DSN=postgres://user@localhost:5432/app
+        LITERAL='old'
+        QUOTED="old"
+        """
+
+        let lines = CopyFormatter.envFileByUpdating(original, with: [
+            field("LOG_LEVEL", "debug", order: 0),
+            field("DSN", "postgres://user@localhost:6543/app", order: 1),
+            field("LITERAL", "new $HOME", order: 2),
+            field("QUOTED", "new", order: 3)
+        ]).components(separatedBy: "\n")
+
+        #expect(lines.contains("LOG_LEVEL=debug"))
+        #expect(lines.contains("DSN=postgres://user@localhost:6543/app"))
+        // Single quotes are literal, so `$HOME` needs no escaping and the style survives.
+        #expect(lines.contains("LITERAL='new $HOME'"))
+        #expect(lines.contains("QUOTED=\"new\""))
+    }
+
+    /// Preserving the file's shape must never win over keeping the file safe to source.
+    @Test func aValueThatNeedsQuotingIsQuotedEvenWhenTheFileHadItBare() {
+        let lines = CopyFormatter.envFileByUpdating("TOKEN=abc\nNOTE=plain\nEMPTIED=x\nWRAPS=y\n", with: [
+            field("TOKEN", "$(whoami)", order: 0),
+            field("NOTE", "two words # not a comment", order: 1),
+            field("EMPTIED", "", order: 2),
+            field("WRAPS", "a\nb", order: 3)
+        ]).components(separatedBy: "\n")
+
+        #expect(lines.contains("TOKEN=\"\\$(whoami)\""))
+        #expect(lines.contains("NOTE=\"two words # not a comment\""))
+        // An empty value is the exception: `KEY=` is unambiguous, and a file without quotes
+        // should not acquire a pair for a value that has nothing in it.
+        #expect(lines.contains("EMPTIED="))
+        #expect(lines.contains("WRAPS=\"a\\nb\""))
+    }
+
+    @Test func aValueLeftBareStillReadsBackAsItself() {
+        let updated = CopyFormatter.envFileByUpdating("A=one\nB=two\n", with: [
+            field("A", "a/b:c@d,e=f", order: 0),
+            field("B", "two", order: 1)
+        ])
+
+        let parsed = EnvImportService().parse(updated)
+        let byKey = Dictionary(parsed.entries.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first })
+        #expect(byKey["A"] == "a/b:c@d,e=f")
+        #expect(byKey["B"] == "two")
     }
 
     @Test func updatingKeepsUntrackedVariablesAndAppendsNewOnes() {
@@ -856,7 +1025,8 @@ struct EnvRoundTripTests {
         ])
 
         #expect(updated.contains("MANAGED_ELSEWHERE=leave-me"))
-        #expect(updated.contains("KNOWN=\"two\""))
+        #expect(updated.contains("KNOWN=two"))
+        // An appended variable has no shape to preserve, so it takes the safe quoted form.
         #expect(updated.contains("BRAND_NEW=\"three\""))
     }
 
