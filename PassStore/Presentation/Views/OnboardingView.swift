@@ -9,6 +9,17 @@ private enum OnboardingStep: Int, CaseIterable {
     case touchID
     case workspace
     case ready
+
+    /// One or two words for the progress trail. Short enough that four of them fit on a line.
+    var shortTitle: String {
+        switch self {
+        case .welcome: "Welcome"
+        case .masterPassword: "Password"
+        case .touchID: "Touch ID"
+        case .workspace: "Workspace"
+        case .ready: "Done"
+        }
+    }
 }
 
 // MARK: - OnboardingView
@@ -60,10 +71,7 @@ struct OnboardingView: View {
 
             VStack(spacing: 0) {
                 if currentStep != .welcome && currentStep != .ready {
-                    OnboardingStepIndicator(
-                        totalSteps: steps.count,
-                        currentIndex: currentIndex
-                    )
+                    OnboardingStepIndicator(steps: steps, currentIndex: currentIndex)
                     .padding(.top, 28)
                     .padding(.bottom, 8)
                 }
@@ -216,21 +224,65 @@ struct OnboardingView: View {
 
 // MARK: - Step Indicator
 
+/// Named steps in an opaque pill, rather than a row of dots.
+///
+/// The dots were six points tall and drawn straight onto the hero, so the inactive ones sat at
+/// dark grey on near-black with a glow drifting under them — invisible, and even when you found
+/// them they only said "three more of something". Words say what is left; the pill is the hero's
+/// own recipe for "must stay readable over the animation".
 private struct OnboardingStepIndicator: View {
-    let totalSteps: Int
+    let steps: [OnboardingStep]
     let currentIndex: Int
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(0..<totalSteps, id: \.self) { index in
-                Capsule(style: .continuous)
-                    .fill(index == currentIndex ? Color.vaultAccent : VaultHeroPalette.surfaceActive)
-                    .frame(width: index == currentIndex ? 20 : 6, height: 6)
-                    .animation(.spring(response: 0.32, dampingFraction: 0.82), value: currentIndex)
+        HStack(spacing: VaultSpacing.xs) {
+            ForEach(Array(steps.enumerated()), id: \.element) { index, step in
+                if index > 0 { connector(isDone: index <= currentIndex) }
+                label(for: step, at: index)
             }
         }
-        .accessibilityElement()
-        .accessibilityLabel("Step \(currentIndex + 1) of \(totalSteps)")
+        .padding(.horizontal, VaultSpacing.m)
+        .padding(.vertical, VaultSpacing.s)
+        .background(Capsule(style: .continuous).fill(VaultHeroPalette.surface))
+        .overlay(Capsule(style: .continuous).strokeBorder(VaultHeroPalette.stroke, lineWidth: 1))
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: currentIndex)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "Step \(currentIndex + 1) of \(steps.count): \(steps[currentIndex].shortTitle)"
+        )
+    }
+
+    private func connector(isDone: Bool) -> some View {
+        Capsule(style: .continuous)
+            .fill(isDone ? Color.vaultAccent.opacity(0.5) : Color.white.opacity(0.16))
+            .frame(width: 14, height: 1.5)
+            .accessibilityHidden(true)
+    }
+
+    /// The step you are on is black on the brand yellow — the same pairing every filled yellow
+    /// surface in the app uses, and the one thing here that cannot be missed.
+    @ViewBuilder
+    private func label(for step: OnboardingStep, at index: Int) -> some View {
+        if index == currentIndex {
+            Text(step.shortTitle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.black)
+                .padding(.horizontal, VaultSpacing.s)
+                .padding(.vertical, 3)
+                .background(Capsule(style: .continuous).fill(Color.vaultAccent))
+        } else if index < currentIndex {
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                Text(step.shortTitle)
+                    .font(.caption)
+            }
+            .foregroundStyle(Color.vaultAccent.opacity(0.75))
+        } else {
+            Text(step.shortTitle)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.38))
+        }
     }
 }
 
@@ -446,14 +498,14 @@ private struct WorkspaceStepView: View {
 
                     // Preview
                     HStack(spacing: 12) {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(hex: draft.colorHex).opacity(0.18))
-                            .frame(width: 40, height: 40)
-                            .overlay(
-                                Image(systemName: draft.icon)
-                                    .font(.system(size: 17, weight: .medium))
-                                    .foregroundStyle(Color(hex: draft.colorHex))
-                            )
+                        VaultGlyphTile(
+                            systemImage: draft.icon,
+                            tint: Color(hex: draft.colorHex),
+                            size: 40,
+                            cornerRadius: 10,
+                            glyphSize: 17,
+                            castsShadow: false
+                        )
                         VStack(alignment: .leading, spacing: 2) {
                             Text(draft.name.isEmpty ? "Workspace" : draft.name)
                                 .font(.headline)

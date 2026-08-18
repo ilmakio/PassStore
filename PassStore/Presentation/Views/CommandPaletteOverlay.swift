@@ -206,7 +206,7 @@ struct CommandPaletteOverlay: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+            .background(isSelected ? Color.vaultAccent.opacity(0.18) : Color.clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

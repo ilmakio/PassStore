@@ -34,10 +34,18 @@ final class LaunchReadinessUITests: XCTestCase {
         XCTAssertTrue(newItemMenuItem.waitForExistence(timeout: 2))
         newItemMenuItem.click()
 
-        let databaseTemplateCard = app.buttons.matching(identifier: "template-card-Database").firstMatch
-        XCTAssertTrue(databaseTemplateCard.waitForExistence(timeout: 2))
-        databaseTemplateCard.click()
+        // One page now: the name field is there the moment the sheet opens, and the kind is a
+        // control on the form rather than a gallery you have to get through first.
         XCTAssertTrue(app.textFields.matching(identifier: "editor-title-field").firstMatch.waitForExistence(timeout: 2))
+        // Matched by identifier without pinning an element type: a SwiftUI `Menu` surfaces as a
+        // pop-up or a menu button depending on the release, and the test should not care which.
+        for identifier in ["editor-workspace-picker", "editor-environment-picker", "editor-item-type-picker"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any).matching(identifier: identifier).firstMatch.exists,
+                "expected \(identifier) on the creation sheet"
+            )
+        }
+        XCTAssertTrue(app.textFields.matching(identifier: "editor-new-field-name").firstMatch.exists)
         app.buttons["Cancel"].firstMatch.click()
         app.terminate()
 

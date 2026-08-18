@@ -122,12 +122,15 @@ nonisolated enum PasswordStrength: Equatable, CaseIterable, Sendable {
         }
     }
 
+    /// Fair is the brand yellow rather than the system one: this bar sits a few points from a
+    /// yellow button on half the sheets it appears in, and two yellows that close together
+    /// read as a mistake.
     var color: Color {
         switch self {
         case .empty: .clear
         case .tooShort: .red
         case .weak: .orange
-        case .fair: .yellow
+        case .fair: .vaultAccent
         case .strong: .green
         case .veryStrong: .green
         }
@@ -272,51 +275,24 @@ struct PasswordStrengthBar: View {
     }
 }
 
-extension SecretFieldTemplateEntity {
-    var summaryText: String {
-        let labels = fieldDefinitions
-            .sorted { $0.sortOrder < $1.sortOrder }
-            .prefix(3)
-            .map(\.label)
-
-        if labels.isEmpty {
-            return "No predefined fields"
-        }
-
-        let summary = labels.joined(separator: " • ")
-        if fieldDefinitions.count > 3 {
-            return "\(summary) • +\(fieldDefinitions.count - 3)"
-        }
-        return summary
-    }
-}
-
-extension SecretItemType {
-    var templateDescription: String {
-        switch self {
-        case .generic:
-            "Single secret or token"
-        case .envGroup:
-            "Whole environment file"
-        case .database:
-            "Engine, host, database name and credentials"
-        case .apiCredential:
-            "API keys, client IDs and secrets"
-        case .s3Compatible:
-            "Bucket, endpoint and access keys"
-        case .serverSSH:
-            "SSH host, user, password and private key"
-        case .websiteService:
-            "Login or service credentials"
-        case .savedCommand:
-            "Shell commands, SQL and run context"
-        case .customTemplate:
-            "Custom field structure"
-        }
-    }
-}
-
 extension FieldDraft {
+    /// Applies a new value kind, along with the handling that kind implies.
+    ///
+    /// Calling a value "Secret" and leaving it neither sensitive nor masked contradicts itself, so
+    /// switching to Secret turns both on — the editor should not need a second trip through the
+    /// menu to make a secret behave like one.
+    ///
+    /// Deliberately one-way. Switching back to Text leaves the flags alone rather than quietly
+    /// un-protecting a value that may already be stored and shoulder-surfable; they are two
+    /// checkboxes away in the same menu for anyone who really meant it.
+    mutating func applyKind(_ newKind: FieldKind) {
+        guard kind != newKind else { return }
+        kind = newKind
+        guard newKind == .secret else { return }
+        isSensitive = true
+        isMasked = true
+    }
+
     var supportsGeneratedPassword: Bool {
         guard kind == .secret else { return false }
         return SecretFieldClassification.isPasswordLike(key: key, label: label)

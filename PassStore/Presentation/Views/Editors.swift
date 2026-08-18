@@ -36,17 +36,59 @@ private enum EnvImportSaveSupport {
     }
 }
 
+// MARK: - Editor header
+
+/// What the header of the new / edit sheet says about a draft.
+///
+/// Shared so the two sheets cannot drift apart, and so the header can carry the *destination*
+/// rather than restating the sheet's own title: the workspace's colour and its icon, with the
+/// breadcrumb underneath. Opening this from inside a workspace already files the secret there,
+/// and now the sheet looks like it.
+enum ItemEditorHeader {
+    static func workspace(for draft: SecretItemDraft, viewModel: VaultViewModel) -> WorkspaceEntity? {
+        draft.workspaceID.flatMap { viewModel.workspace(for: $0) }
+    }
+
+    static func tint(for draft: SecretItemDraft, viewModel: VaultViewModel) -> Color {
+        workspace(for: draft, viewModel: viewModel).map { Color(hex: $0.colorHex) } ?? .vaultAccent
+    }
+
+    /// The workspace's icon when there is one — it is the strongest answer to "where will this
+    /// end up?" — and the kind's glyph when the secret belongs to no project.
+    static func systemImage(for draft: SecretItemDraft, viewModel: VaultViewModel) -> String {
+        workspace(for: draft, viewModel: viewModel)?.icon ?? draft.type.systemImage
+    }
+
+    static func subtitle(for draft: SecretItemDraft, viewModel: VaultViewModel) -> String {
+        var parts: [String] = []
+        if let workspace = workspace(for: draft, viewModel: viewModel) {
+            parts.append(workspace.name)
+        } else {
+            parts.append("No workspace")
+        }
+        let environment = draft.environment.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !environment.isEmpty { parts.append(environment) }
+        parts.append(draft.type.title)
+        return parts.joined(separator: " · ")
+    }
+
+    /// A project's own colour for the confirming button, matching the header above it. Without a
+    /// workspace there is no colour to borrow and the brand yellow is the right answer.
+    static func saveRole(for draft: SecretItemDraft, viewModel: VaultViewModel) -> VaultButtonStyle.Role {
+        guard let workspace = workspace(for: draft, viewModel: viewModel) else { return .primary }
+        return .tinted(Color(hex: workspace.colorHex))
+    }
+}
+
 // MARK: - Creation Flow
 
 struct ItemCreationFlowSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @Bindable var viewModel: VaultViewModel
-    @State private var selectedTemplateID: UUID?
     @State private var draft: SecretItemDraft
     @State private var tagText = ""
     @State private var showWorkspaceSheet = false
-    @State private var showAdvancedFields = false
     @State private var envImportPasteBuffer = ""
     @State private var envImportParseIntoEntries = true
     @State private var envImportSuggestedTitleFromFile: String?
@@ -60,65 +102,40 @@ struct ItemCreationFlowSheet: View {
 
     var body: some View {
         VaultSheetScaffold(
-            title: selectedTemplate == nil ? "New Secret" : (selectedTemplate?.name ?? "New Secret"),
-            subtitle: selectedTemplate == nil
-                ? "Pick the shape of the thing you're storing."
-                : selectedTemplate?.itemType.templateDescription,
-            systemImage: selectedTemplate?.itemType.systemImage ?? "plus.rectangle.on.folder",
+            title: "New Secret",
+            subtitle: ItemEditorHeader.subtitle(for: draft, viewModel: viewModel),
+            systemImage: ItemEditorHeader.systemImage(for: draft, viewModel: viewModel),
+            tint: ItemEditorHeader.tint(for: draft, viewModel: viewModel),
             scrolls: false
         ) {
-            if selectedTemplate != nil {
-                Button("Back") {
-                    selectedTemplateID = nil
-                    resetEnvImportStaging()
-                }
-                .buttonStyle(VaultButtonStyle(.secondary))
-                .accessibilityIdentifier("creation-back-to-templates")
-            }
-
             Spacer(minLength: 0)
 
             Button("Cancel") { dismiss() }
                 .buttonStyle(VaultButtonStyle(.secondary))
                 .keyboardShortcut(.cancelAction)
 
-            if selectedTemplate != nil {
-                Button("Save") { save() }
-                    .buttonStyle(VaultButtonStyle(.primary))
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canSave)
-                    .accessibilityIdentifier("creation-save")
-            }
+            Button("Save") { save() }
+                .buttonStyle(VaultButtonStyle(ItemEditorHeader.saveRole(for: draft, viewModel: viewModel)))
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave)
+                .accessibilityIdentifier("creation-save")
         } content: {
-            Group {
-                if selectedTemplateID != nil {
-                    ItemEditorContent(
-                        viewModel: viewModel,
-                        availableWorkspaces: viewModel.workspaces,
-                        draft: $draft,
-                        tagText: $tagText,
-                        showWorkspaceSheet: $showWorkspaceSheet,
-                        showAdvancedFields: $showAdvancedFields,
-                        showEnvImportStaging: true,
-                        envImportPasteBuffer: $envImportPasteBuffer,
-                        envImportParseIntoEntries: $envImportParseIntoEntries,
-                        envImportSuggestedTitleFromFile: $envImportSuggestedTitleFromFile,
-                        envImportSourceURL: $envImportSourceURL,
-                        envImportLinkToFile: $envImportLinkToFile
-                    )
-                } else {
-                    TemplatePickerView(viewModel: viewModel) { template in
-                        selectedTemplateID = template.id
-                        draft = viewModel.newItemDraft(template: template)
-                        tagText = ""
-                        showAdvancedFields = false
-                        resetEnvImportStaging()
-                    }
-                }
-            }
+            ItemEditorContent(
+                viewModel: viewModel,
+                availableWorkspaces: viewModel.workspaces,
+                draft: $draft,
+                tagText: $tagText,
+                showWorkspaceSheet: $showWorkspaceSheet,
+                showEnvImportStaging: true,
+                envImportPasteBuffer: $envImportPasteBuffer,
+                envImportParseIntoEntries: $envImportParseIntoEntries,
+                envImportSuggestedTitleFromFile: $envImportSuggestedTitleFromFile,
+                envImportSourceURL: $envImportSourceURL,
+                envImportLinkToFile: $envImportLinkToFile
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 660, height: 620)
+        .frame(width: 680, height: 700)
         .sheet(isPresented: $showWorkspaceSheet) {
             WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: onSaveWorkspace)
         }
@@ -139,10 +156,6 @@ struct ItemCreationFlowSheet: View {
         dismiss()
     }
 
-    private var selectedTemplate: SecretFieldTemplateEntity? {
-        viewModel.template(for: selectedTemplateID)
-    }
-
     /// Mirrors the title `EnvImportSaveSupport.draftForSave` would produce, without re-parsing the
     /// staged `.env` text on every keystroke: staging always supplies a fallback title.
     private var canSave: Bool {
@@ -154,14 +167,6 @@ struct ItemCreationFlowSheet: View {
     private func onSaveWorkspace(_ workspaceDraft: WorkspaceDraft) {
         guard let workspace = viewModel.createWorkspace(workspaceDraft) else { return }
         draft.workspaceID = workspace.id
-    }
-
-    private func resetEnvImportStaging() {
-        envImportPasteBuffer = ""
-        envImportSuggestedTitleFromFile = nil
-        envImportParseIntoEntries = true
-        envImportSourceURL = nil
-        envImportLinkToFile = true
     }
 }
 
@@ -177,7 +182,6 @@ struct ItemEditorSheet: View {
     @State private var draft: SecretItemDraft
     @State private var tagText = ""
     @State private var showWorkspaceSheet = false
-    @State private var showAdvancedFields = false
 
     init(
         viewModel: VaultViewModel,
@@ -194,8 +198,9 @@ struct ItemEditorSheet: View {
     var body: some View {
         VaultSheetScaffold(
             title: title,
-            subtitle: draft.title.isEmpty ? nil : draft.title,
-            systemImage: draft.type.systemImage,
+            subtitle: ItemEditorHeader.subtitle(for: draft, viewModel: viewModel),
+            systemImage: ItemEditorHeader.systemImage(for: draft, viewModel: viewModel),
+            tint: ItemEditorHeader.tint(for: draft, viewModel: viewModel),
             scrolls: false
         ) {
             Spacer(minLength: 0)
@@ -208,7 +213,7 @@ struct ItemEditorSheet: View {
                 onSave(draft)
                 dismiss()
             }
-            .buttonStyle(VaultButtonStyle(.primary))
+            .buttonStyle(VaultButtonStyle(ItemEditorHeader.saveRole(for: draft, viewModel: viewModel)))
             .keyboardShortcut(.defaultAction)
             .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityIdentifier("editor-save")
@@ -219,7 +224,6 @@ struct ItemEditorSheet: View {
                 draft: $draft,
                 tagText: $tagText,
                 showWorkspaceSheet: $showWorkspaceSheet,
-                showAdvancedFields: $showAdvancedFields,
                 showEnvImportStaging: false,
                 envImportPasteBuffer: .constant(""),
                 envImportParseIntoEntries: .constant(true),
@@ -229,7 +233,7 @@ struct ItemEditorSheet: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 660, height: 620)
+        .frame(width: 680, height: 700)
         .sheet(isPresented: $showWorkspaceSheet) {
             WorkspaceEditorSheet(title: "New Workspace", draft: .empty, onSave: handleWorkspaceSave)
         }
@@ -238,129 +242,6 @@ struct ItemEditorSheet: View {
     private func handleWorkspaceSave(_ workspaceDraft: WorkspaceDraft) {
         guard let workspace = viewModel.createWorkspace(workspaceDraft) else { return }
         draft.workspaceID = workspace.id
-    }
-}
-
-// MARK: - Template Picker
-
-private struct TemplatePickerView: View {
-    @Bindable var viewModel: VaultViewModel
-    let onSelect: (SecretFieldTemplateEntity) -> Void
-
-    /// Two even columns. The cards are the surface here, so they are not wrapped in a card of
-    /// their own — a box drawn around a row of boxes reads as a mistake.
-    private static let columns = [
-        GridItem(.flexible(), spacing: VaultSpacing.m),
-        GridItem(.flexible(), spacing: VaultSpacing.m)
-    ]
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: VaultSpacing.xl) {
-                if !viewModel.featuredTemplates.isEmpty {
-                    templateGroup("Common", systemImage: "star", templates: viewModel.featuredTemplates)
-                }
-                templateGroup("Built-in", systemImage: "square.grid.2x2", templates: viewModel.standardBuiltInTemplates)
-                if !viewModel.customTemplates.isEmpty {
-                    templateGroup("Custom", systemImage: "wrench.and.screwdriver", templates: viewModel.customTemplates)
-                }
-            }
-            .padding(VaultSpacing.xl)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func templateGroup(
-        _ title: String,
-        systemImage: String,
-        templates: [SecretFieldTemplateEntity]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: VaultSpacing.m) {
-            VaultSectionHeader(title, systemImage: systemImage)
-
-            LazyVGrid(columns: Self.columns, spacing: VaultSpacing.m) {
-                ForEach(templates, id: \.id) { template in
-                    Button { onSelect(template) } label: {
-                        TemplateCard(template: template)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("template-card-\(template.name)")
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct TemplateCard: View {
-    let template: SecretFieldTemplateEntity
-
-    @State private var isHovering = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: VaultSpacing.s) {
-            HStack(alignment: .top) {
-                Image(systemName: template.itemType.systemImage)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Color.vaultAccentStrong)
-                    .frame(width: 30, height: 30)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.vaultAccent.opacity(isHovering ? 0.26 : 0.16))
-                    )
-                    .accessibilityHidden(true)
-
-                Spacer(minLength: 0)
-
-                if template.isBuiltIn {
-                    Text("Built-in")
-                        .font(.vaultBadge)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(template.name)
-                    .font(.vaultRowTitle)
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(template.itemType.templateDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            Spacer(minLength: 0)
-
-            Text(template.summaryText)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(VaultSpacing.m)
-        .frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
-        // Hovering is the only affordance a grid of cards has to say it is clickable, and this
-        // one had none: the accent edge is what tells you the card is a button.
-        .background(
-            RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous)
-                .fill(Color.primary.opacity(isHovering ? 0.08 : 0.045))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous)
-                .strokeBorder(
-                    isHovering ? Color.vaultAccent.opacity(0.55) : VaultChrome.hairline,
-                    lineWidth: 1
-                )
-        )
-        .contentShape(RoundedRectangle(cornerRadius: VaultRadius.card, style: .continuous))
-        .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
     }
 }
 
@@ -481,7 +362,7 @@ private struct EnvGroupImportSection: View {
                 sourceURL = nil
                 suggestedTitleFromFile = nil
             }
-            .buttonStyle(.link)
+            .buttonStyle(.vaultLink)
             .font(.vaultFootnote)
             .accessibilityLabel("Remove the staged file")
         }
@@ -503,7 +384,7 @@ private struct EnvGroupImportSection: View {
     private var importFilePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isImportDropTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+                .fill(isImportDropTargeted ? Color.vaultAccent.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
                 .frame(height: 120)
                 .overlay(
                     VStack(spacing: 8) {
@@ -546,7 +427,7 @@ private struct EnvGroupImportSection: View {
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .strokeBorder(
-                                    isPasteDropTargeted ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.06),
+                                    isPasteDropTargeted ? Color.vaultAccent.opacity(0.5) : Color.primary.opacity(0.06),
                                     lineWidth: isPasteDropTargeted ? 1.5 : 0.5
                                 )
                         )
@@ -611,6 +492,22 @@ private struct EnvGroupImportSection: View {
     }
 }
 
+/// Where the keyboard is, across the whole form.
+///
+/// Held by the form rather than by each control so adding a field can hand focus to the field it
+/// just made — the one thing the old "Add Field" button could not do, and the reason filling in a
+/// handful of fields meant reaching for the mouse between every one of them.
+private enum ItemEditorFocus: Hashable {
+    case name
+    case newFieldName
+    case value(UUID)
+}
+
+/// The one form behind both "New Secret" and "Edit Secret".
+///
+/// Three pickers, a name, the fields, then the optional extras. Creating something used to start
+/// on a separate page of template cards — a whole screen spent on one popup's worth of choice,
+/// before you were allowed to type a name.
 private struct ItemEditorContent: View {
     @Bindable var viewModel: VaultViewModel
     let availableWorkspaces: [WorkspaceEntity]
@@ -618,7 +515,6 @@ private struct ItemEditorContent: View {
     @Binding var draft: SecretItemDraft
     @Binding var tagText: String
     @Binding var showWorkspaceSheet: Bool
-    @Binding var showAdvancedFields: Bool
     /// Staging UI (drop / paste before first save) is only shown when creating a new `.env` item.
     let showEnvImportStaging: Bool
     @Binding var envImportPasteBuffer: String
@@ -627,65 +523,20 @@ private struct ItemEditorContent: View {
     @Binding var envImportSourceURL: URL?
     @Binding var envImportLinkToFile: Bool
 
+    /// Transient, and belongs to the form rather than to the draft: what is typed here is not
+    /// part of the item until Return or Add turns it into a field.
+    @State private var newFieldName = ""
+    @State private var newFieldKind: FieldKind = .text
+    @FocusState private var focus: ItemEditorFocus?
+
+    private var accent: Color {
+        selectedWorkspace.map { Color(hex: $0.colorHex) } ?? .vaultAccent
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VaultSection("Basics", systemImage: "textformat") {
-                    VaultField("Name") {
-                        TextField("", text: $draft.title, prompt: Text("Required"))
-                            .textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.leading)
-                            .accessibilityIdentifier("editor-title-field")
-                    }
-
-                    // Workspace and type sit side by side rather than stacked with a stray
-                    // button hanging off the first one.
-                    HStack(alignment: .top, spacing: VaultSpacing.m) {
-                        VaultField("Workspace") { workspaceMenu }
-                        VaultField("Type") { typeMenu }
-                    }
-
-                    Divider()
-
-                    VaultField("Environment") {
-                        Picker("", selection: Binding(
-                            get: { draft.environment.kind },
-                            set: { newKind in
-                                draft.environment = newKind == .custom
-                                    ? .custom(draft.environment.customName ?? "")
-                                    : .preset(newKind)
-                            }
-                        )) {
-                            ForEach(EnvironmentKind.allCases) { env in
-                                Text(env.title).tag(env)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                    }
-
-                    if draft.environment.kind == .custom {
-                        VaultField("Custom environment name") {
-                            TextField("", text: Binding(
-                                get: { draft.environment.customName ?? "" },
-                                set: { draft.environment = .custom($0) }
-                            ), prompt: Text("e.g. Staging EU"))
-                            .textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.leading)
-                        }
-                    }
-
-                    Divider()
-
-                    // A labelled checkbox rather than a bare star under a "Favorite" caption,
-                    // which read as a stray icon with no obvious state.
-                    Toggle(isOn: $draft.isFavorite) {
-                        Label("Add to favourites", systemImage: draft.isFavorite ? "star.fill" : "star")
-                            .foregroundStyle(draft.isFavorite ? Color.yellow : Color.primary)
-                    }
-                    .toggleStyle(.checkbox)
-                    .accessibilityIdentifier("editor-favorite-toggle")
-                }
+            VStack(alignment: .leading, spacing: VaultSpacing.xl) {
+                headerCard
 
                 if draft.type == .envGroup, showEnvImportStaging {
                     EnvGroupImportSection(
@@ -698,78 +549,80 @@ private struct ItemEditorContent: View {
                     )
                 }
 
-                VaultSection("Fields", systemImage: "list.bullet") {
-                    // The Advanced switch belongs in the section header, not floating above
-                    // the card in a hand-rolled row of its own.
-                    Toggle("Advanced", isOn: $showAdvancedFields)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .accessibilityIdentifier("editor-advanced-toggle")
-                } content: {
-                    if draft.fieldDrafts.isEmpty {
-                        VaultNote(text: showAdvancedFields
-                                  ? "No fields yet. Add one below."
-                                  : "This item has no fields. Turn on Advanced to add one.")
-                    }
+                fieldsSection
 
-                    ForEach(Array($draft.fieldDrafts.enumerated()), id: \.element.id) { index, $field in
-                        SimpleFieldEditor(
-                            field: $field,
-                            itemType: draft.type,
-                            showAdvanced: showAdvancedFields,
-                            onRemove: { removeField(id: field.id) },
-                            canMoveUp: index > 0,
-                            canMoveDown: index < draft.fieldDrafts.count - 1,
-                            onMoveUp: { moveField(from: index, to: index - 1) },
-                            onMoveDown: { moveField(from: index, to: index + 1) },
-                            onCopyGenerated: { viewModel.copyGeneratedPassword($0) }
-                        )
-                        if field.id != draft.fieldDrafts.last?.id {
-                            Divider()
-                        }
-                    }
+                // Everything above describes the secret. Below it is optional, and the rule says
+                // so — without it the last required card and the first optional one were the
+                // same twenty points apart as every other pair.
+                Rectangle()
+                    .fill(VaultChrome.hairline)
+                    .frame(height: 1)
+                    .padding(.vertical, VaultSpacing.xs)
 
-                    if showAdvancedFields {
-                        Button(action: addField) {
-                            Label("Add Field", systemImage: "plus.circle")
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityIdentifier("editor-add-field")
-                    }
-                }
-
-                VaultSection("Tags", systemImage: "tag") {
-                    VaultField("Add tags") {
-                        HStack(alignment: .center, spacing: VaultSpacing.s) {
-                            TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.leading)
-                                .onSubmit(addTag)
-                            Button("Add", action: addTag)
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(tagText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                    }
-
-                    if !draft.tags.isEmpty {
-                        FlowTagView(tags: draft.tags) { tag in
-                            draft.tags.removeAll { $0 == tag }
-                        }
-                    }
-                }
-
-                VaultSection("Notes", systemImage: "note.text") {
-                    VaultTextEditor(text: $draft.notes, placeholder: "Optional notes for this item")
-                }
+                extrasSection
             }
-            .padding(20)
+            .padding(VaultSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    // MARK: - Basics controls
+    // MARK: - Identity
+
+    /// Untitled on purpose. The three pickers and the name *are* the top of the form; giving them
+    /// a heading meant inventing a word for "the obvious part", and the header above already says
+    /// what the sheet is.
+    ///
+    /// Destination first because it decides where the secret will be when you go looking for it —
+    /// and because opening this from inside a workspace already files it there, which was true
+    /// before and impossible to see with the picker four controls down.
+    private var headerCard: some View {
+        VaultCard {
+            HStack(alignment: .top, spacing: VaultSpacing.m) {
+                VaultField("Workspace") { workspaceMenu }
+                VaultField("Environment") { environmentMenu }
+                VaultField("Type") { typeMenu }
+            }
+
+            if draft.environment.kind == .custom {
+                VaultField("Environment name") {
+                    TextField("", text: Binding(
+                        get: { draft.environment.customName ?? "" },
+                        set: { draft.environment = .custom($0) }
+                    ), prompt: Text("e.g. Staging EU"))
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
+                    .accessibilityIdentifier("editor-custom-environment-field")
+                }
+            }
+
+            VaultField("Name") {
+                HStack(spacing: VaultSpacing.s) {
+                    TextField("", text: $draft.title, prompt: Text("Required"))
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.leading)
+                        .focused($focus, equals: .name)
+                        .accessibilityIdentifier("editor-title-field")
+
+                    favouriteButton
+                }
+            }
+        }
+    }
+
+    /// A star on the end of the name, where you are already looking, instead of a checkbox
+    /// captioned "Add to favourites" taking a whole row of the form for a one-bit decision.
+    private var favouriteButton: some View {
+        Button {
+            draft.isFavorite.toggle()
+        } label: {
+            Image(systemName: draft.isFavorite ? "star.fill" : "star")
+        }
+        .buttonStyle(VaultIconButtonStyle(isActive: draft.isFavorite))
+        .help(draft.isFavorite ? "Remove from favourites" : "Add to favourites")
+        .accessibilityLabel("Favourite")
+        .accessibilityIdentifier("editor-favorite-toggle")
+    }
 
     private var selectedWorkspace: WorkspaceEntity? {
         availableWorkspaces.first { $0.id == draft.workspaceID }
@@ -777,9 +630,6 @@ private struct ItemEditorContent: View {
 
     /// Workspace chooser that shows the workspace's own icon and colour, and offers to make a
     /// new one from inside the same menu.
-    ///
-    /// This used to be a plain popup with a separate "New Workspace…" button nudged into
-    /// alignment with a hard-coded top padding.
     private var workspaceMenu: some View {
         Menu {
             Button {
@@ -806,34 +656,257 @@ private struct ItemEditorContent: View {
                 Label("New Workspace…", systemImage: "folder.badge.plus")
             }
         } label: {
-            HStack(spacing: VaultSpacing.s) {
-                Image(systemName: selectedWorkspace?.icon ?? "tray")
-                    .foregroundStyle(selectedWorkspace.map { Color(hex: $0.colorHex) } ?? .secondary)
-                Text(selectedWorkspace?.name ?? "No workspace")
-                    .foregroundStyle(selectedWorkspace == nil ? .secondary : .primary)
-                    .lineLimit(1)
-            }
+            menuLabel(
+                systemImage: selectedWorkspace?.icon ?? "tray",
+                title: selectedWorkspace?.name ?? "No workspace",
+                isPlaceholder: selectedWorkspace == nil
+            )
         }
         .accessibilityIdentifier("editor-workspace-picker")
     }
 
-    private var typeMenu: some View {
-        Picker(
-            "",
-            selection: Binding(
-                get: { draft.type },
-                set: { viewModel.applyItemTypeChange(to: &draft, newType: $0) }
-            )
-        ) {
-            ForEach(SecretItemType.allCases) { type in
-                Label(type.title, systemImage: type.systemImage)
-                    .tag(type)
-            }
+    /// The environments the *chosen workspace* actually has, first.
+    ///
+    /// This was a segmented control over the five global presets, which is not what a project
+    /// with "Local, Staging EU, Prod" has — so filing a secret in one of its own environments
+    /// meant picking Custom and typing the name again, exactly right, from memory.
+    private var offeredEnvironments: [ResolvedWorkspaceEnvironment] {
+        guard let id = draft.workspaceID else { return [] }
+        return viewModel.offeredEnvironments(inWorkspace: id)
+    }
+
+    private var otherPresetKinds: [EnvironmentKind] {
+        let taken = Set(offeredEnvironments.map { WorkspaceEnvironment.matchKey(for: $0.title) })
+        return EnvironmentKind.allCases.filter {
+            $0 != .custom && !taken.contains(WorkspaceEnvironment.matchKey(for: $0.title))
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
+    }
+
+    private var environmentMenu: some View {
+        Menu {
+            let offered = offeredEnvironments
+            if !offered.isEmpty {
+                Section("In this workspace") {
+                    ForEach(offered) { environment in
+                        Button {
+                            draft.environment = environment.environmentValue
+                        } label: {
+                            Label(environment.title, systemImage: environment.systemImage)
+                        }
+                    }
+                }
+            }
+
+            let others = otherPresetKinds
+            if !others.isEmpty {
+                // Unheaded when the workspace declared nothing, because then there is no
+                // "elsewhere" for these to be elsewhere *from* — they are the whole list.
+                if offered.isEmpty {
+                    ForEach(others) { kind in
+                        presetButton(kind)
+                    }
+                } else {
+                    Section("Elsewhere") {
+                        ForEach(others) { kind in
+                            presetButton(kind)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+            Button {
+                draft.environment = .custom(draft.environment.customName ?? "")
+            } label: {
+                Label("Custom Name…", systemImage: "pencil")
+            }
+        } label: {
+            menuLabel(
+                systemImage: draft.environment.kind.systemImage,
+                title: environmentLabel,
+                isPlaceholder: false
+            )
+        }
+        .accessibilityIdentifier("editor-environment-picker")
+    }
+
+    private func presetButton(_ kind: EnvironmentKind) -> some View {
+        Button {
+            draft.environment = .preset(kind)
+        } label: {
+            Label(kind.title, systemImage: kind.systemImage)
+        }
+    }
+
+    private var environmentLabel: String {
+        let title = draft.environment.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Custom" : title
+    }
+
+    /// Templates, not just item types: a custom template used to be reachable only from the page
+    /// of cards this sheet opened on, so removing that page would have hidden them for good.
+    private var typeMenu: some View {
+        Menu {
+            templateGroup("Common", viewModel.featuredTemplates)
+            templateGroup("Built-in", viewModel.standardBuiltInTemplates)
+            templateGroup("Custom", viewModel.customTemplates)
+        } label: {
+            menuLabel(
+                systemImage: draft.type.systemImage,
+                title: viewModel.template(for: draft.templateID)?.name ?? draft.type.title,
+                isPlaceholder: false
+            )
+        }
         .accessibilityIdentifier("editor-item-type-picker")
     }
+
+    @ViewBuilder
+    private func templateGroup(_ title: String, _ templates: [SecretFieldTemplateEntity]) -> some View {
+        if !templates.isEmpty {
+            Section(title) {
+                ForEach(templates, id: \.id) { template in
+                    Button {
+                        viewModel.applyTemplateChange(to: &draft, template: template)
+                    } label: {
+                        Label(template.name, systemImage: template.itemType.systemImage)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The three pickers read as one row of three of the same thing, so they are laid out by one
+    /// function rather than three near-identical `HStack`s.
+    private func menuLabel(systemImage: String, title: String, isPlaceholder: Bool) -> some View {
+        HStack(spacing: VaultSpacing.s) {
+            Image(systemName: systemImage)
+                .foregroundStyle(isPlaceholder ? AnyShapeStyle(.secondary) : AnyShapeStyle(accent.vaultInk))
+            Text(title)
+                .foregroundStyle(isPlaceholder ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    // MARK: - Fields
+
+    private var fieldsSection: some View {
+        VaultSection("Fields", systemImage: "list.bullet", tint: accent) {
+            if draft.fieldDrafts.isEmpty {
+                VaultNote(text: "This type has no predefined fields. Name one below to add it.")
+            }
+
+            ForEach(Array($draft.fieldDrafts.enumerated()), id: \.element.id) { index, $field in
+                SimpleFieldEditor(
+                    field: $field,
+                    itemType: draft.type,
+                    focus: $focus,
+                    onSubmitValue: { focusValueAfter(index) },
+                    onRemove: { removeField(id: field.id) },
+                    canMoveUp: index > 0,
+                    canMoveDown: index < draft.fieldDrafts.count - 1,
+                    onMoveUp: { moveField(from: index, to: index - 1) },
+                    onMoveDown: { moveField(from: index, to: index + 1) },
+                    onCopyGenerated: { viewModel.copyGeneratedPassword($0) }
+                )
+                if field.id != draft.fieldDrafts.last?.id {
+                    Divider()
+                }
+            }
+
+            Divider()
+
+            addFieldRow
+        }
+    }
+
+    /// Name it, pick what kind of value it holds, press Return.
+    ///
+    /// Adding a field used to mean finding a switch called "Advanced", turning it on — which also
+    /// unfolded three rows of controls under every existing field — then pressing "Add Field" to
+    /// get something called "New Field" that had to be renamed in yet another box. This is one
+    /// line, always visible, and Return moves to the value you were about to type rather than
+    /// leaving you here with a named but empty field.
+    private var addFieldRow: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+            HStack(alignment: .center, spacing: VaultSpacing.s) {
+                Image(systemName: "plus.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+
+                TextField("", text: $newFieldName, prompt: Text("New field name"))
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.leading)
+                    .focused($focus, equals: .newFieldName)
+                    .onSubmit(addNamedField)
+                    .accessibilityLabel("New field name")
+                    .accessibilityIdentifier("editor-new-field-name")
+
+                Picker("", selection: $newFieldKind) {
+                    ForEach(FieldKind.allCases) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .accessibilityLabel("New field kind")
+                .accessibilityIdentifier("editor-new-field-kind")
+
+                Button("Add", action: addNamedField)
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .controlSize(.small)
+                    .disabled(trimmedNewFieldName.isEmpty)
+                    .accessibilityIdentifier("editor-add-field")
+            }
+
+            VaultNote(text: "Return adds the field and moves to its value; Return there comes back here for the next one.")
+        }
+    }
+
+    private var trimmedNewFieldName: String {
+        newFieldName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Extras
+
+    /// Tags and notes in one card with a rule between them.
+    ///
+    /// They were two cards of their own, which gave two optional afterthoughts the same weight
+    /// as the fields.
+    private var extrasSection: some View {
+        VaultSection("Tags and Notes", systemImage: "tag", tint: accent) {
+            VaultField("Tags") {
+                VStack(alignment: .leading, spacing: VaultSpacing.s) {
+                    HStack(alignment: .center, spacing: VaultSpacing.s) {
+                        TextField("", text: $tagText, prompt: Text("Type a tag, then Add or press Return"))
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.leading)
+                            .onSubmit(addTag)
+                        Button("Add", action: addTag)
+                            .buttonStyle(VaultButtonStyle(.secondary))
+                            .controlSize(.small)
+                            .disabled(tagText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    if !draft.tags.isEmpty {
+                        FlowTagView(tags: draft.tags) { tag in
+                            draft.tags.removeAll { $0 == tag }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            VaultField("Notes") {
+                VaultTextEditor(text: $draft.notes, placeholder: "Optional notes for this item")
+            }
+        }
+    }
+
+    // MARK: - Mutations
 
     private func addTag() {
         let tag = tagText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -845,15 +918,45 @@ private struct ItemEditorContent: View {
         tagText = ""
     }
 
-    private func addField() {
-        let nextIndex = draft.fieldDrafts.count + 1
-        draft.fieldDrafts.append(.init(
-            key: uniqueFieldKey(base: "field\(nextIndex)"),
-            label: "New Field",
+    /// Adds the field named in the add row and puts the cursor in its value.
+    private func addNamedField() {
+        let label = trimmedNewFieldName
+        guard !label.isEmpty else { return }
+
+        var field = FieldDraft(
+            key: uniqueFieldKey(base: slugifiedFieldKey(from: label)),
+            label: label,
+            value: "",
             kind: .text,
             isSensitive: false,
             sortOrder: draft.fieldDrafts.count
-        ))
+        )
+        // Same rule as changing the kind of an existing field, rather than a second copy of it.
+        field.applyKind(newFieldKind)
+        draft.fieldDrafts.append(field)
+        newFieldName = ""
+        newFieldKind = .text
+        focusValue(field.id)
+    }
+
+    /// Focus has to wait for the row to exist: asking for it in the same pass that appends the
+    /// field aims at a text field SwiftUI has not built yet, and the request is dropped.
+    private func focusValue(_ id: UUID) {
+        Task { @MainActor in
+            await Task.yield()
+            focus = .value(id)
+        }
+    }
+
+    /// Return in a value goes to the next field's value, and off the end of the list back to the
+    /// add row — so a whole set of fields can be typed without touching the mouse.
+    private func focusValueAfter(_ index: Int) {
+        let next = index + 1
+        if draft.fieldDrafts.indices.contains(next) {
+            focus = .value(draft.fieldDrafts[next].id)
+        } else {
+            focus = .newFieldName
+        }
     }
 
     private func removeField(id: UUID) {
@@ -873,6 +976,19 @@ private struct ItemEditorContent: View {
         for index in draft.fieldDrafts.indices {
             draft.fieldDrafts[index].sortOrder = index
         }
+    }
+
+    private func slugifiedFieldKey(from label: String) -> String {
+        let slug = label
+            .folding(options: .diacriticInsensitive, locale: .current)
+            .lowercased()
+            .map { $0.isLetter || $0.isNumber ? $0 : "_" }
+            .reduce(into: "") { partial, character in
+                if character == "_", partial.last == "_" || partial.isEmpty { return }
+                partial.append(character)
+            }
+        let trimmed = slug.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return trimmed.isEmpty ? "field" : trimmed
     }
 
     /// Storage keys are the identity used when merging drafts back onto an item, so they must not collide.
@@ -944,14 +1060,14 @@ struct WorkspaceEditorSheet: View {
                 VStack(alignment: .leading, spacing: VaultSpacing.xl) {
                     VaultCard {
                         HStack(spacing: 14) {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color(hex: draft.colorHex).opacity(0.15))
-                                .frame(width: 46, height: 46)
-                                .overlay(
-                                    Image(systemName: draft.icon)
-                                        .font(.system(size: 20, weight: .medium))
-                                        .foregroundStyle(Color(hex: draft.colorHex))
-                                )
+                            VaultGlyphTile(
+                                systemImage: draft.icon,
+                                tint: Color(hex: draft.colorHex),
+                                size: 46,
+                                cornerRadius: 12,
+                                glyphSize: 20,
+                                castsShadow: false
+                            )
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(draft.name.isEmpty ? "New Workspace" : draft.name)
                                     .font(.headline)
@@ -1686,7 +1802,7 @@ struct EnvironmentMatrixSheet: View {
     }
 
     private var accent: Color {
-        viewModel.workspace(for: workspaceID).map { Color(hex: $0.colorHex) } ?? .accentColor
+        viewModel.workspace(for: workspaceID).map { Color(hex: $0.colorHex) } ?? .vaultAccent
     }
 
     var body: some View {
@@ -2014,6 +2130,8 @@ private struct DataSettingsPane: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                         Button("Delete All Previous Values…") { isConfirmingPurge = true }
+                            .buttonStyle(VaultButtonStyle(.destructive))
+                            .controlSize(.small)
                             .disabled(viewModel.storedPreviousValueCount == 0)
                             .accessibilityIdentifier("settings-purge-history")
                     }
@@ -2040,6 +2158,8 @@ private struct DataSettingsPane: View {
                         tone: .warning
                     )
                     Button("Erase Vault…") { isConfirmingErase = true }
+                        .buttonStyle(VaultButtonStyle(.destructive))
+                        .controlSize(.small)
                         .accessibilityIdentifier("settings-erase-vault")
                 }
 
@@ -2048,9 +2168,13 @@ private struct DataSettingsPane: View {
                         VaultNote(text: "A copy of your vault from before the last backup restore is on disk, taken \(Self.formatter.string(from: date)).")
                         HStack {
                             Button("Restore That Copy…") { isConfirmingRollback = true }
+                                .buttonStyle(VaultButtonStyle(.secondary))
+                                .controlSize(.small)
                                 .accessibilityIdentifier("settings-restore-rollback")
                             Spacer(minLength: 0)
                             Button("Discard Copy") { viewModel.discardRollbackCopy() }
+                                .buttonStyle(VaultButtonStyle(.secondary))
+                                .controlSize(.small)
                                 .accessibilityIdentifier("settings-discard-rollback")
                         }
                     } else {
@@ -2282,7 +2406,7 @@ struct VaultHealthSheet: View {
                 count: report.count(of: .stale),
                 label: "Stale",
                 systemImage: VaultHealthFinding.Kind.stale.systemImage,
-                tint: .yellow
+                tint: .vaultAccentStrong
             )
         }
         .frame(maxWidth: .infinity)
@@ -2405,7 +2529,7 @@ struct VaultHealthSheet: View {
                         viewModel.restoreIgnoredFinding(finding)
                         report = viewModel.vaultHealthReport()
                     }
-                    .buttonStyle(.link)
+                    .buttonStyle(.vaultLink)
                     .font(.caption)
                     .accessibilityIdentifier("health-restore-\(finding.id)")
                 }
@@ -2421,7 +2545,7 @@ struct VaultHealthSheet: View {
                     viewModel.restoreAllIgnoredFindings()
                     report = viewModel.vaultHealthReport()
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.vaultLink)
                 .font(.caption)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("health-restore-all")
@@ -2433,7 +2557,7 @@ struct VaultHealthSheet: View {
         switch kind {
         case .reused: .red
         case .weak: .orange
-        case .stale: .yellow
+        case .stale: .vaultAccentStrong
         }
     }
 }
@@ -2501,7 +2625,7 @@ struct BulkEditSheet: View {
                         .onSubmit(addTag)
                         .accessibilityIdentifier("bulk-edit-tag-field")
                     Button("Add", action: addTag)
-                        .buttonStyle(.bordered)
+                        .buttonStyle(VaultButtonStyle(.secondary))
                         .controlSize(.small)
                         .disabled(tagText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -2646,6 +2770,8 @@ struct PasswordGeneratorPanel: View {
                     } label: {
                         Label("Regenerate", systemImage: "arrow.triangle.2.circlepath")
                     }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .controlSize(.small)
                     .accessibilityIdentifier("generator-regenerate")
 
                     Button {
@@ -2654,6 +2780,8 @@ struct PasswordGeneratorPanel: View {
                     } label: {
                         Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                     }
+                    .buttonStyle(VaultButtonStyle(.secondary))
+                    .controlSize(.small)
                     .disabled(password.isEmpty)
                     .accessibilityIdentifier("generator-copy")
 
@@ -2825,7 +2953,7 @@ private struct MasterPasswordSection: View {
                 Button(isHistoryExpanded ? "Hide history" : "Show history (\(history.count))") {
                     isHistoryExpanded.toggle()
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.vaultLink)
                 .font(.caption)
                 .accessibilityIdentifier("master-password-history-toggle")
             }
@@ -3112,7 +3240,7 @@ private struct TemplateSettingsPane: View {
         .listRowBackground(
             isSelected
                 ? RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.12))
+                    .fill(Color.vaultAccent.opacity(0.12))
                 : nil
         )
     }
@@ -3140,7 +3268,7 @@ private struct TemplateSettingsPane: View {
         .listRowBackground(
             isSelected
                 ? RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.12))
+                    .fill(Color.vaultAccent.opacity(0.12))
                 : nil
         )
     }
@@ -3231,9 +3359,10 @@ private struct TemplateSettingsPane: View {
                                 sortOrder: draft.fieldDefinitions.count
                             ))
                         } label: {
-                            Label("Add field", systemImage: "plus.circle")
+                            Label("Add Field", systemImage: "plus.circle")
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(VaultButtonStyle(.secondary))
+                        .controlSize(.small)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -3548,6 +3677,8 @@ struct ImportEncryptedExportSheet: View {
                             .truncationMode(.middle)
                     }
                 }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .controlSize(.small)
                 .accessibilityIdentifier("import-choose-file")
 
                 VaultNote(text: "Legacy .json exports written by PassStore 1.0 also work.")
@@ -3610,7 +3741,7 @@ struct ImportPreviewSheet: View {
             title: "Restore Backup",
             subtitle: viewModel.importPreview?.fileName,
             systemImage: "arrow.down.doc",
-            tint: mode == .replace ? .orange : .accentColor
+            tint: mode == .replace ? .orange : .vaultAccent
         ) {
             Button("Cancel") {
                 viewModel.cancelStagedImport()
@@ -3828,10 +3959,20 @@ private struct FlowTagView: View {
 
 // MARK: - Simple Field Editor
 
+/// One field: its name, its value, and a menu holding everything you can do *to* it.
+///
+/// Everything in that menu used to be behind a switch called "Advanced" that lived in the
+/// section header and applied to every field at once — turning it on to rename one field
+/// unfolded a label box, a storage-key box, a kind popup and three checkboxes under *all* of
+/// them, and the form doubled in height. The controls are the same; they are now attached to the
+/// row they act on and stay out of the way until asked for.
 private struct SimpleFieldEditor: View {
     @Binding var field: FieldDraft
     let itemType: SecretItemType
-    let showAdvanced: Bool
+    /// Owned by the form, so adding a field can hand the keyboard straight to this row.
+    let focus: FocusState<ItemEditorFocus?>.Binding
+    /// Return in the value: the form decides where that goes next.
+    let onSubmitValue: () -> Void
     let onRemove: () -> Void
     let canMoveUp: Bool
     let canMoveDown: Bool
@@ -3841,17 +3982,19 @@ private struct SimpleFieldEditor: View {
     let onCopyGenerated: (String) -> Void
     @State private var isRevealed = false
     @State private var isPresentingGenerator = false
+    /// Opens the name and storage key for editing, for this field only.
+    @State private var isRenaming = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             fieldHeader
 
-            fieldValueRow
-
-            if showAdvanced {
-                advancedControls
-                    .padding(.top, 6)
+            if isRenaming {
+                renameControls
+                    .padding(.bottom, 2)
             }
+
+            fieldValueRow
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
@@ -3867,7 +4010,6 @@ private struct SimpleFieldEditor: View {
         }
     }
 
-    /// Basic mode shows the field name as a static caption, so filling in values is the only visible job.
     private var fieldHeader: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Text(displayLabel)
@@ -3881,41 +4023,56 @@ private struct SimpleFieldEditor: View {
                     .accessibilityLabel("Sensitive")
             }
             Spacer(minLength: 8)
-            if showAdvanced {
-                Button(action: onMoveUp) {
-                    Label("Move Up", systemImage: "chevron.up")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .disabled(!canMoveUp)
-                .help("Move this field up")
-                .accessibilityIdentifier("editor-move-up-\(field.key)")
-
-                Button(action: onMoveDown) {
-                    Label("Move Down", systemImage: "chevron.down")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .disabled(!canMoveDown)
-                .help("Move this field down")
-                .accessibilityIdentifier("editor-move-down-\(field.key)")
-
-                Button(role: .destructive, action: onRemove) {
-                    Label("Remove Field", systemImage: "minus.circle")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Remove this field")
-                .accessibilityIdentifier("editor-remove-field-\(field.key)")
-            }
+            fieldMenu
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var fieldMenu: some View {
+        Menu {
+            Button(isRenaming ? "Done Renaming" : "Rename…", systemImage: "pencil") {
+                isRenaming.toggle()
+            }
+
+            Menu("Value Kind") {
+                Picker("", selection: Binding(
+                    get: { field.kind },
+                    set: { field.applyKind($0) }
+                )) {
+                    ForEach(FieldKind.allCases) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.inline)
+            }
+
+            Section("Handling") {
+                Toggle("Sensitive", isOn: $field.isSensitive)
+                Toggle("Masked by default", isOn: $field.isMasked)
+                Toggle("Copy allowed", isOn: $field.isCopyable)
+            }
+
+            Section {
+                Button("Move Up", systemImage: "chevron.up", action: onMoveUp)
+                    .disabled(!canMoveUp)
+                Button("Move Down", systemImage: "chevron.down", action: onMoveDown)
+                    .disabled(!canMoveDown)
+            }
+
+            Divider()
+            Button("Remove Field", systemImage: "minus.circle", role: .destructive, action: onRemove)
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 11, weight: .semibold))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help("Rename, reorder or remove this field")
+        .accessibilityLabel("Field options for \(displayLabel)")
+        .accessibilityIdentifier("editor-field-menu-\(field.key)")
     }
 
     private var displayLabel: String {
@@ -3925,14 +4082,13 @@ private struct SimpleFieldEditor: View {
         return key.isEmpty ? "Untitled field" : key
     }
 
-    private var advancedControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Advanced")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            VaultField("Field label") {
+    /// Name and storage key, in place, only while renaming.
+    ///
+    /// The key follows the name until somebody edits it directly, so the common case never has
+    /// to think about it and the awkward case is still reachable.
+    private var renameControls: some View {
+        HStack(alignment: .top, spacing: VaultSpacing.s) {
+            VaultField("Name") {
                 TextField("", text: $field.label, prompt: Text("e.g. Password"))
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.leading)
@@ -3941,6 +4097,7 @@ private struct SimpleFieldEditor: View {
                             field.key = slugify(from: newValue)
                         }
                     }
+                    .accessibilityIdentifier("editor-field-label-\(field.key)")
             }
 
             VaultField("Storage key") {
@@ -3948,27 +4105,6 @@ private struct SimpleFieldEditor: View {
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.leading)
-            }
-
-            VaultField("Value kind") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("", selection: $field.kind) {
-                        ForEach(FieldKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    HStack(alignment: .top, spacing: 12) {
-                        Toggle("Sensitive", isOn: $field.isSensitive)
-                            .toggleStyle(.checkbox)
-                        Toggle("Copy allowed", isOn: $field.isCopyable)
-                            .toggleStyle(.checkbox)
-                        Toggle("Masked by default", isOn: $field.isMasked)
-                            .toggleStyle(.checkbox)
-                    }
-                    .font(.caption)
-                }
             }
         }
     }
@@ -4033,7 +4169,7 @@ private struct SimpleFieldEditor: View {
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Button("Reveal to edit") { isRevealed = true }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(VaultButtonStyle(.secondary))
                                 .controlSize(.small)
                         }
                         .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
@@ -4052,6 +4188,8 @@ private struct SimpleFieldEditor: View {
                             .scrollContentBackground(.hidden)
                             .font(.system(.body, design: field.kind == .json ? .monospaced : .default))
                             .multilineTextAlignment(.leading)
+                            // No `onSubmit` here: in a multi-line value Return is a newline.
+                            .focused(focus, equals: .value(field.id))
                             .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
                             .padding(8)
                             .background(
@@ -4066,7 +4204,7 @@ private struct SimpleFieldEditor: View {
 
                     if isConcealed, isRevealed {
                         Button("Hide") { isRevealed = false }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(VaultButtonStyle(.secondary))
                             .controlSize(.small)
                     }
                 }
@@ -4083,6 +4221,9 @@ private struct SimpleFieldEditor: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .multilineTextAlignment(.leading)
+                    .focused(focus, equals: .value(field.id))
+                    .onSubmit(onSubmitValue)
+                    .accessibilityIdentifier("editor-field-value-\(field.key)")
 
                     if field.kind == .secret || field.isSensitive {
                         Button {
@@ -4091,7 +4232,7 @@ private struct SimpleFieldEditor: View {
                             Label("Generate", systemImage: "wand.and.sparkles")
                                 .labelStyle(.iconOnly)
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(VaultButtonStyle(.secondary))
                         .controlSize(.small)
                         .help("Generate a strong password")
                         .accessibilityLabel("Generate password")
@@ -4102,7 +4243,7 @@ private struct SimpleFieldEditor: View {
                         Button(isRevealed ? "Hide" : "Reveal") {
                             isRevealed.toggle()
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(VaultButtonStyle(.secondary))
                         .controlSize(.small)
                     }
                 }

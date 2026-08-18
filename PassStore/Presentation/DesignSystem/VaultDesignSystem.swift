@@ -37,6 +37,17 @@ extension Color {
     /// appearance uses a dark gold; on a dark background the bright yellow is already fine and
     /// is kept. Fills never use this — they use `vaultAccent` with black content on top.
     static let vaultAccentStrong = Color("AccentStrong")
+
+    /// This tint, as it should be drawn when it is *ink* — a glyph, a label, a thin rule —
+    /// rather than something painted behind content.
+    ///
+    /// Only the brand yellow needs the swap, and it needs it everywhere: a caller that reaches
+    /// for `.accentColor` or `.vaultAccent` and puts it in a `foregroundStyle` gets bright
+    /// yellow type on a white sheet. Routing every tinted glyph through here is what keeps the
+    /// app to one yellow instead of the three it drifted into.
+    var vaultInk: Color {
+        self == .vaultAccent || self == .accentColor ? .vaultAccentStrong : self
+    }
 }
 
 enum VaultChrome {
@@ -138,7 +149,7 @@ struct VaultCard<Content: View>: View {
 struct VaultSection<Content: View, Accessory: View>: View {
     let title: String
     var systemImage: String?
-    var tint: Color = .accentColor
+    var tint: Color = .vaultAccent
     @ViewBuilder let accessory: () -> Accessory
     @ViewBuilder let content: () -> Content
 
@@ -161,20 +172,22 @@ struct VaultSection<Content: View, Accessory: View>: View {
 struct VaultSectionHeader<Accessory: View>: View {
     let title: String
     var systemImage: String?
-    var tint: Color = .accentColor
+    var tint: Color = .vaultAccent
     @ViewBuilder let accessory: () -> Accessory
 
     var body: some View {
         HStack(spacing: VaultSpacing.s) {
+            // Both the rule and the glyph are ink at this size — three points of brand yellow
+            // on a white sheet is not a rule, it is a gap.
             Capsule(style: .continuous)
-                .fill(tint.opacity(0.85))
+                .fill(tint.vaultInk.opacity(0.85))
                 .frame(width: VaultChrome.sectionRuleWidth, height: 12)
                 .accessibilityHidden(true)
 
             if let systemImage {
                 Image(systemName: systemImage)
                     .font(.caption)
-                    .foregroundStyle(tint)
+                    .foregroundStyle(tint.vaultInk)
                     .accessibilityHidden(true)
             }
 
@@ -192,7 +205,7 @@ struct VaultSectionHeader<Accessory: View>: View {
 }
 
 extension VaultSectionHeader where Accessory == EmptyView {
-    init(_ title: String, systemImage: String? = nil, tint: Color = .accentColor) {
+    init(_ title: String, systemImage: String? = nil, tint: Color = .vaultAccent) {
         self.init(title: title, systemImage: systemImage, tint: tint, accessory: { EmptyView() })
     }
 }
@@ -201,7 +214,7 @@ extension VaultSection where Accessory == EmptyView {
     init(
         _ title: String,
         systemImage: String? = nil,
-        tint: Color = .accentColor,
+        tint: Color = .vaultAccent,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.init(title: title, systemImage: systemImage, tint: tint, accessory: { EmptyView() }, content: content)
@@ -212,7 +225,7 @@ extension VaultSection {
     init(
         _ title: String,
         systemImage: String? = nil,
-        tint: Color = .accentColor,
+        tint: Color = .vaultAccent,
         @ViewBuilder accessory: @escaping () -> Accessory,
         @ViewBuilder content: @escaping () -> Content
     ) {
@@ -290,6 +303,20 @@ enum VaultNoteTone {
     case danger
     case success
 
+    /// Only warnings and errors are allowed to paint themselves.
+    ///
+    /// Everything else — "here is what this does", "everything matched" — is quiet grey text.
+    /// The app used to give each tone its own colour *and* its own glyph, so a single pane
+    /// could hold a green sentence, an amber one, a grey one and a yellow one, none of which
+    /// meant anything by being that colour. Two registers is the whole scale: something needs
+    /// you, or it does not.
+    var isAlert: Bool {
+        switch self {
+        case .warning, .danger: true
+        case .neutral, .success: false
+        }
+    }
+
     var tint: Color {
         switch self {
         case .neutral: .secondary
@@ -302,34 +329,105 @@ enum VaultNoteTone {
     var systemImage: String {
         switch self {
         case .neutral: "info.circle"
-        case .warning: "exclamationmark.triangle"
-        case .danger: "exclamationmark.octagon"
+        case .warning: "exclamationmark.triangle.fill"
+        case .danger: "exclamationmark.octagon.fill"
         case .success: "checkmark.circle"
         }
     }
 }
 
 /// The recurring "here is what this actually does" paragraph, in one consistent shape.
+///
+/// A quiet note is a line of secondary text and nothing else — no leading `(i)`, which was
+/// decoration on every explanatory sentence in the app and told you nothing you did not
+/// already know from the sentence being there. An alert gets a tinted band, a coloured glyph
+/// and *primary* text: the tint says how urgent it is, the words stay readable.
 struct VaultNote: View {
     let text: String
     var tone: VaultNoteTone = .neutral
+    /// Shown as given, in either register. Left off, only alerts draw a glyph.
     var systemImage: String?
+
+    private var glyph: String? {
+        systemImage ?? (tone.isAlert ? tone.systemImage : nil)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: VaultSpacing.s) {
-            Image(systemName: systemImage ?? tone.systemImage)
-                .font(.vaultFootnote)
-                .foregroundStyle(tone.tint)
-                .accessibilityHidden(true)
+            if let glyph {
+                Image(systemName: glyph)
+                    .font(.vaultFootnote)
+                    .foregroundStyle(tone.isAlert ? AnyShapeStyle(tone.tint) : AnyShapeStyle(.secondary))
+                    .accessibilityHidden(true)
+            }
+
             Text(text)
                 .font(.vaultFootnote)
-                .foregroundStyle(tone == .neutral ? .secondary : tone.tint)
+                .foregroundStyle(tone.isAlert ? AnyShapeStyle(Color.primary) : AnyShapeStyle(.secondary))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .padding(tone.isAlert ? VaultSpacing.s : 0)
+        .background {
+            if tone.isAlert {
+                RoundedRectangle(cornerRadius: VaultRadius.control, style: .continuous)
+                    .fill(tone.tint.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: VaultRadius.control, style: .continuous)
+                            .strokeBorder(tone.tint.opacity(0.22), lineWidth: 0.5)
+                    )
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Glyph tile
+
+/// The "this is what you are looking at" icon: the tint, solid, with a glyph on top of it.
+///
+/// The item detail pane had this and everything else had a 20%-wash version of the same tile,
+/// which on a pale tint came out looking like a disabled control — the one element meant to
+/// carry the colour was the palest thing on the screen. One tile, used by the detail header,
+/// the workspace pane, every sheet header and the template cards.
+struct VaultGlyphTile: View {
+    let systemImage: String
+    var tint: Color = .vaultAccent
+    var size: CGFloat = 50
+    var cornerRadius: CGFloat?
+    var glyphSize: CGFloat?
+    /// Off for tiles that sit inside a band or a card, where a drop shadow reads as grime.
+    var castsShadow = true
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius ?? size * 0.28, style: .continuous)
+    }
+
+    var body: some View {
+        shape
+            .fill(tint)
+            .overlay(
+                LinearGradient(
+                    colors: [.white.opacity(0.32), .white.opacity(0.04), .black.opacity(0.14)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(shape)
+            )
+            .overlay(shape.strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+            .frame(width: size, height: size)
+            .shadow(color: castsShadow ? tint.opacity(0.40) : .clear, radius: 9, y: 4)
+            .overlay(
+                // Black or white, from the tint's own luminance: a fixed white glyph vanishes
+                // on the brand yellow and a fixed black one vanishes on a deep plum.
+                Image(systemName: systemImage)
+                    .font(.system(size: glyphSize ?? size * 0.42, weight: .semibold))
+                    .foregroundStyle(tint.vaultContrastingGlyph)
+                    .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
+            )
+            .accessibilityHidden(true)
     }
 }
 
@@ -338,7 +436,7 @@ struct VaultNote: View {
 /// The monospaced box that holds a stored value, a generated password or a JSON blob.
 struct VaultValueBox<Content: View>: View {
     var isHighlighted = false
-    var highlightColor: Color = .accentColor
+    var highlightColor: Color = .vaultAccent
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -420,7 +518,7 @@ struct VaultChip: View {
                 .font(.caption)
                 .fontWeight(.medium)
         }
-        .foregroundStyle(color == .secondary ? Color.secondary : color)
+        .foregroundStyle(color == .secondary ? Color.secondary : color.vaultInk)
         .padding(.horizontal, VaultSpacing.s)
         .padding(.vertical, VaultSpacing.xs)
         .background(
@@ -511,10 +609,16 @@ struct VaultFlowLayout: Layout {
 /// fill's luminance, which against a yellow accent meant some buttons came out black and
 /// others white — which is what made the app look like it had two kinds of yellow button.
 struct VaultButtonStyle: ButtonStyle {
-    enum Role {
+    enum Role: Equatable {
         case primary
         case secondary
         case destructive
+        /// A primary in somebody else's colour — a workspace's, mostly.
+        ///
+        /// Inside a workspace the brand yellow is the wrong answer for "the main action here":
+        /// every other thing on the pane is already painted in the project's colour, and one
+        /// yellow button in the middle of it reads as belonging to a different screen.
+        case tinted(Color)
     }
 
     let role: Role
@@ -527,12 +631,34 @@ struct VaultButtonStyle: ButtonStyle {
     }
 
     private var isLarge: Bool { controlSize == .large || controlSize == .extraLarge }
+    /// `.small` / `.mini` give the inline capsule that sits next to a text field, so the
+    /// places that used a system `.bordered` button for the size can keep the size and still
+    /// be the same button as everything else.
+    private var isCompact: Bool { controlSize == .small || controlSize == .mini }
+
+    private var font: Font {
+        if isLarge { return .body.weight(.semibold) }
+        if isCompact { return .caption.weight(.semibold) }
+        return .callout.weight(.semibold)
+    }
+
+    private var verticalPadding: CGFloat {
+        if isLarge { return VaultSpacing.m }
+        if isCompact { return 5 }
+        return VaultSpacing.s
+    }
+
+    private var horizontalPadding: CGFloat {
+        if isLarge { return 32 }
+        if isCompact { return VaultSpacing.m }
+        return VaultSpacing.xl
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(isLarge ? .body.weight(.semibold) : .callout.weight(.semibold))
-            .padding(.vertical, isLarge ? VaultSpacing.m : VaultSpacing.s)
-            .padding(.horizontal, isLarge ? 32 : VaultSpacing.xl)
+            .font(font)
+            .padding(.vertical, verticalPadding)
+            .padding(.horizontal, horizontalPadding)
             .background(
                 Capsule(style: .continuous)
                     .fill(fill)
@@ -563,6 +689,7 @@ struct VaultButtonStyle: ButtonStyle {
         case .primary: return Color.vaultAccent
         case .secondary: return isOnHero ? VaultHeroPalette.surfaceRaised : Color.primary.opacity(0.08)
         case .destructive: return Color.red
+        case let .tinted(color): return color
         }
     }
 
@@ -571,14 +698,52 @@ struct VaultButtonStyle: ButtonStyle {
         return isOnHero ? VaultHeroPalette.stroke : Color.primary.opacity(0.13)
     }
 
+    /// Black on yellow, everywhere, in both appearances — and the same rule generalised for a
+    /// workspace colour, which can be anything from a pale amber to a deep plum.
     private var foreground: Color {
         guard isEnabled else { return isOnHero ? .white.opacity(0.35) : Color.secondary }
         switch role {
         case .primary: return .black
         case .destructive: return .white
         case .secondary: return .primary
+        case let .tinted(color): return color.vaultContrastingGlyph
         }
     }
+}
+
+/// Inline text action — "Use file value", "Add to item", "Show full history…" — the kind that
+/// lives inside a sentence rather than at the bottom of a sheet.
+///
+/// Replaces SwiftUI's `.link`, which paints its label with the app's tint: the brand yellow, at
+/// caption size, on a white sheet. That was both unreadable and a fourth colour of clickable
+/// text in an app that already had enough of them.
+struct VaultLinkButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        InlineLink(configuration: configuration)
+    }
+
+    /// Hover state has to live in a `View`; a `ButtonStyle` is not one and its property
+    /// wrappers are never updated.
+    private struct InlineLink: View {
+        let configuration: ButtonStyleConfiguration
+
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var isHovering = false
+
+        var body: some View {
+            configuration.label
+                .fontWeight(.medium)
+                .foregroundStyle(Color.vaultAccentStrong)
+                .underline(isHovering && isEnabled)
+                .opacity(isEnabled ? (configuration.isPressed ? 0.6 : 1) : 0.4)
+                .contentShape(Rectangle())
+                .onHover { isHovering = $0 }
+        }
+    }
+}
+
+extension ButtonStyle where Self == VaultLinkButtonStyle {
+    static var vaultLink: VaultLinkButtonStyle { VaultLinkButtonStyle() }
 }
 
 /// Compact icon button used in rows and toolbars (copy, reveal, generate…).
@@ -612,7 +777,7 @@ struct VaultSheetScaffold<Content: View, Footer: View>: View {
     let title: String
     var subtitle: String?
     var systemImage: String?
-    var tint: Color = .accentColor
+    var tint: Color = .vaultAccent
     /// Set false for sheets that manage their own scrolling (split views, lists).
     var scrolls = true
     @ViewBuilder let footer: () -> Footer
@@ -648,25 +813,14 @@ struct VaultSheetScaffold<Content: View, Footer: View>: View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: VaultSpacing.m) {
                 if let systemImage {
-                    RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [tint.opacity(0.30), tint.opacity(0.14)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(width: 36, height: 36)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
-                                .strokeBorder(tint.opacity(0.28), lineWidth: 0.5)
-                        )
-                        .overlay(
-                            Image(systemName: systemImage)
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(headerGlyph)
-                        )
-                        .accessibilityHidden(true)
+                    VaultGlyphTile(
+                        systemImage: systemImage,
+                        tint: tint,
+                        size: 36,
+                        cornerRadius: VaultRadius.value,
+                        glyphSize: 15,
+                        castsShadow: false
+                    )
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -699,12 +853,6 @@ struct VaultSheetScaffold<Content: View, Footer: View>: View {
                 .fill(VaultChrome.hairline)
                 .frame(height: 1)
         }
-    }
-
-    /// The brand yellow is too light to carry a glyph on a pale tile; every other tint is fine
-    /// as itself.
-    private var headerGlyph: Color {
-        tint == .accentColor || tint == .vaultAccent ? .vaultAccentStrong : tint
     }
 
     private var footerBar: some View {

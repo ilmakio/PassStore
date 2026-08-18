@@ -1625,6 +1625,19 @@ final class VaultViewModel {
         selectDestination(destination, keepingItemSelection: true)
     }
 
+    /// Follows a secret's workspace link all the way to the workspace itself.
+    ///
+    /// Unlike the environment link next to it, this one *does* close the secret: the workspace has
+    /// a page of its own now — what it holds, how its environments compare, what mirrors a file —
+    /// and clicking its name while keeping the secret open showed you none of it. Narrowing the
+    /// list to the project and opening the project are two different requests, and the name of the
+    /// project is the second one.
+    func openWorkspace(_ id: UUID) {
+        searchText = ""
+        selectedType = nil
+        selectDestination(.workspace(id))
+    }
+
     /// What a row in the item list should say about where its secret lives.
     ///
     /// Repeating the scope you are already inside is noise: in a workspace the workspace chip is
@@ -4330,6 +4343,23 @@ final class VaultViewModel {
             ?? templates.first(where: { $0.itemType == type })
     }
 
+    /// Switches a draft to `template`, keeping anything already filled in.
+    ///
+    /// What the editor's Kind control calls. It goes through `applyItemTypeChange` for the type
+    /// half and then applies the chosen template's own fields, because two templates can share
+    /// one item type — a custom template and the built-in it was duplicated from both report
+    /// `.customTemplate` — and the type alone would pick the wrong fields.
+    func applyTemplateChange(to draft: inout SecretItemDraft, template: SecretFieldTemplateEntity) {
+        guard draft.templateID != template.id || draft.type != template.itemType else { return }
+
+        applyItemTypeChange(to: &draft, newType: template.itemType)
+        draft.type = template.itemType
+        draft.templateID = template.id
+
+        guard !Self.draftHasAnyStoredFieldContent(draft) else { return }
+        draft.fieldDrafts = Self.fieldDrafts(for: template.fieldDefinitions, reusing: draft.fieldDrafts)
+    }
+
     /// Updates the draft's item type. When no field has stored content yet, replaces `fieldDrafts`
     /// with the default template for `newType`. When any value or secret reference is present,
     /// only `type` changes so existing data is never cleared.
@@ -4341,42 +4371,43 @@ final class VaultViewModel {
             return
         }
 
-        let oldByKey = Dictionary(draft.fieldDrafts.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         let template = defaultTemplate(for: newType)
-        let defs = template?.fieldDefinitions.sorted { $0.sortOrder < $1.sortOrder } ?? []
+        let defs = template?.fieldDefinitions ?? []
 
         draft.type = newType
         draft.templateID = template?.id
 
         guard !defs.isEmpty else { return }
+        draft.fieldDrafts = Self.fieldDrafts(for: defs, reusing: draft.fieldDrafts)
+    }
 
-        draft.fieldDrafts = defs.enumerated().map { index, def in
-            if let old = oldByKey[def.key] {
+    /// The field drafts a set of template definitions produces, carrying over anything the draft
+    /// already had under the same storage key.
+    ///
+    /// The carry-over is what keeps a field's identity — and so its persisted record — stable
+    /// across a kind change that happens to keep the same key.
+    private static func fieldDrafts(
+        for definitions: [SecretFieldDefinitionEntity],
+        reusing existing: [FieldDraft]
+    ) -> [FieldDraft] {
+        let byKey = Dictionary(existing.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        return definitions
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .enumerated()
+            .map { index, def in
                 FieldDraft(
-                    id: old.id,
+                    id: byKey[def.key]?.id ?? UUID(),
                     key: def.key,
                     label: def.label,
-                    value: old.value,
+                    value: byKey[def.key]?.value ?? "",
                     kind: def.kind,
                     isSensitive: def.isSensitive,
                     isCopyable: def.isCopyable,
                     isMasked: def.isMaskedByDefault,
                     sortOrder: index,
-                    secretReference: old.secretReference
-                )
-            } else {
-                FieldDraft(
-                    key: def.key,
-                    label: def.label,
-                    value: "",
-                    kind: def.kind,
-                    isSensitive: def.isSensitive,
-                    isCopyable: def.isCopyable,
-                    isMasked: def.isMaskedByDefault,
-                    sortOrder: index
+                    secretReference: byKey[def.key]?.secretReference
                 )
             }
-        }
     }
 
     private static func draftHasAnyStoredFieldContent(_ draft: SecretItemDraft) -> Bool {
