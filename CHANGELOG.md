@@ -190,6 +190,11 @@ All notable changes to PassStore are documented here.
 - **A variable the secret no longer holds renders as no line at all** rather than as an empty
   assignment, and one added in PassStore is appended. An empty value keeps the bare `KEY=` form
   when that is what the file used.
+- **Setting the vault up again no longer leaves a black window.** Erasing the vault takes the
+  lock screen straight to onboarding, so for the length of the crossfade both are on screen —
+  and each was saving and restoring the window's title bar on its own, which meant the incoming
+  one recorded the outgoing one's black as the state to put back. The vault then came up after
+  setup with a black window that stayed black until PassStore was quit.
 - **The lock screen has no hairline in its top-left corner.** The invisible spacer that holds the
   title bar at its normal height — so the window buttons do not move — was being given the
   toolbar's own background, and drew as a one-point sliver of chrome.
