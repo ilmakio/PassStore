@@ -2,6 +2,161 @@
 
 All notable changes to PassStore are documented here.
 
+## [1.4.0] - 2026-08-22
+
+### Added
+
+- **One-time codes.** A field can now hold a 2FA setup key — the `otpauth://` link behind the QR
+  code, or the base32 key printed beside it — and the detail pane shows the code it currently
+  produces with the seconds it has left. Copying such a field copies the six digits, never the seed
+  behind them: that rule lives in one place, so the detail pane, the list's hover button, ⇧⌘T, the
+  command palette and the menu bar all obey it. Only an explicit reveal shows the seed, because the
+  value box gets hovered on the way to clicking it. A key can be pasted, read from a QR code in an
+  image file, or read from the clipboard — where a screenshot of the setup page already is.
+  Capturing the screen would need Screen Recording, which a password manager should not be asking
+  for. SHA-1, SHA-256 and SHA-512 are supported, and the generator is pinned to the published test
+  vectors of RFC 4226 and RFC 6238 rather than to values it produced itself: a code that is wrong by
+  one time step or one digit looks exactly like a correct one and fails only at the moment somebody
+  is locked out of their account. Counter-based (HOTP) links are refused with a reason instead of
+  silently producing a code that is already spent.
+- **Expiry dates.** For the credentials that stop working on a date somebody else chose: API keys
+  with a lifetime, certificates, rotation deadlines. Vault Health reports them, with expired
+  outranking every other finding — an expired credential has already stopped working, while
+  everything else in that report is a judgement about how good a secret is. The warning starts a
+  month out, which is the shortest window in which rotating a key is a task you can schedule rather
+  than an emergency. Off by default and one toggle away: most secrets have no expiry, and a date
+  picker demanding a value for all of them would be answered with a lie.
+- **Recently Deleted.** Deleting was final, softened only by one level of in-memory undo that died
+  with the session. An item now waits thirty days: long enough that "I deleted the wrong one"
+  survives a holiday, short enough that a vault does not accumulate the secrets of former projects
+  forever — which here is a liability rather than a convenience. Putting an item back returns it to
+  its workspace and its favourite star, not somewhere tidier. Deleting from the trash is permanent
+  and says so. The window is emptied on unlock, because nothing in this app runs on a timer and a
+  vault that is not open is not accumulating anything.
+- **Generators for more than passwords.** `openssl rand -hex 32` meant leaving the app. The
+  generator now also makes passphrases, hex, base64, URL-safe base64 and UUIDs, and states how many
+  bits of randomness each draw actually spends. The passphrase word list is written into PassStore
+  rather than taken from a published one, so this carries no third-party licence for the sake of an
+  array of nouns; its size is never hard-coded, so a repeated word cannot overstate a passphrase's
+  strength. Any sensitive field can be filled from it, not only ones called "password" — an API key
+  wants 32 random bytes, not something pronounceable.
+- **Choose where the vault file lives.** PassStore keeps one encrypted file and syncs nothing, and
+  it is not going to. But refusing to say *where* that file goes turned that into "you cannot have
+  this vault on two Macs at all", which is a worse promise than the one it was protecting. Point it
+  at a folder something else already syncs — iCloud Drive, Dropbox, a repository — and the same
+  vault opens on your other Macs. Moving copies the vault, proves the copy actually decrypts, and
+  only then removes the original: a vault lost to a half-finished move is not recoverable. Opening a
+  vault that is already in a folder is a separate command that copies nothing, locks, and drops the
+  biometric key, because this install has no business assuming its key opens somebody else's vault.
+- **A prompt when two Macs disagree.** The half that makes the above safe. Every save carries a
+  counter only PassStore increments, and a save whose counter is not the one this session read is
+  refused: you are told the vault changed underneath you and you pick — keep this version, or take
+  the other one. Nothing is merged silently and nothing is discarded without being asked. A vault
+  that came back from a sync conflict with an older counter is treated the same way, because a
+  counter that can go backwards cannot be compared.
+- **Check a folder for secrets you are also storing.** "Is a secret I keep properly also sitting in
+  my repository?" is a question only a password manager can answer, because it is the only thing
+  that knows both halves. Vault ▸ Scan a Folder for Secrets reads the files inside a folder and
+  reports which stored secrets appear in them, by file and line. Only sensitive values long enough
+  to mean something are searched for; `.git`, `node_modules`, build directories and binaries are
+  skipped — not as an optimisation, but because one leak copied a thousand times through
+  `node_modules` is a report nobody reads. Hidden files *are* scanned, since `.env.local` is exactly
+  where a leaked secret lives. The report says plainly that deleting the line is not enough — rotate
+  at the service, store the new secret, then edit the file — and Copy List gives you the whole thing
+  as text to work through. It is kept until the vault locks, so following one row does not mean
+  scanning the folder again.
+- **Import from the files developer tools keep credentials in.** An `~/.aws/credentials` and a
+  `.netrc` are plaintext credential stores everybody has and nobody thinks about; reading them is
+  the first step to being able to delete them. AWS credentials and config, `.netrc`, Docker
+  `config.json`, unencrypted Bitwarden exports, any file of `KEY=value` lines, and any JSON object of
+  names and values. The format is worked out from the contents rather than the filename, because
+  `config.json` is the most reused filename in software. Sensitivity is decided per field and
+  unrecognised keys are treated as secret: an AWS region is not a credential and must not be stored
+  as one, but an unknown `aws_*` key might be, and guessing that it is harmless is the more
+  dangerous mistake. Docker's base64 `auth` is decoded into a username and password, with a note
+  saying that base64 is not encryption — anybody with that file has the password. It goes through a
+  preview showing exactly which fields each item will have, as one transaction and one undo step,
+  and the file itself is never touched.
+- **A remappable global shortcut.** It was ⌘⌥P and nothing else, so an app that already owned that
+  chord left PassStore with no shortcut and no way to move it. It is now recorded from a real key
+  press, which is the only way to get it right on a keyboard that is not US ANSI. A chord with no
+  Command, Option or Control is refused: registered system-wide, a bare letter would be intercepted
+  in every application, which from the outside is indistinguishable from a password manager logging
+  keystrokes.
+- **Open at login, and an optional menu-bar-only mode.** Opening at login is handed to the system
+  rather than installed as a login item of PassStore's own — the system owns the list, you can revoke
+  it in System Settings, and the toggle reads the system's answer rather than a stored preference, so
+  revoking it there is reflected here. Menu-bar-only drops the Dock icon and the ⌘-Tab entry while
+  the window is closed and puts them back when it opens, so every menu command stays reachable
+  whenever there is a window to use it on.
+
+### Changed
+
+- **Secret strength is measured in bits, not in character classes.** The old ladder called
+  `Password123!` twelve characters of four classes and therefore respectable. Counting bits is
+  harsher where that was flattering and no softer anywhere that mattered, and two models are
+  computed with the lower one winning — a character model flatters a passphrase, and a word model
+  cannot describe a random token at all. Obvious structure is still checked first, because no
+  arithmetic about alphabets can see that a password is one word with the usual decorations. Some
+  secrets that used to read as Fair now read as Weak; they always were.
+- **Deleting an item moves it to Recently Deleted.** The button is in the same place and the dialog
+  changes its words rather than its position: the warning about how many stored secrets are about to
+  be destroyed now belongs to the deletion that destroys.
+- **Vault Health leaves alone what nobody can fix.** A one-time code seed is machine-generated
+  base32, not a password somebody chose, and a token issued by AWS, GitHub, Stripe, Slack, npm,
+  OpenAI or Google cannot be made stronger by its holder. Neither is scored for strength any more.
+  Reuse is still reported for both, because the same value in two items means one of them keeps
+  working after the other is revoked. An item that states when it expires is no longer also nagged
+  for being old: it is already tracked by a date its owner chose.
+- **The item detail pane names a credential it recognises.** "Looks like a GitHub token" answers the
+  question somebody actually has when they open an old item and find a forty-character string.
+- **The generator is one sheet, built like the others.** It was a bare stack with its own padding and
+  its own idea of where a Done button goes, and next to every other sheet in the app it showed.
+- **Field kinds are spelled properly.** "URL" and "JSON" rather than "Url" and "Json".
+
+### Fixed
+
+- **Unlocking read the vault through an in-process cache.** A vault rewritten since that cache was
+  filled would unlock showing stale contents, and then refuse to save them. Harmless while the vault
+  could only ever be local; not harmless at all once it can live in a folder something else syncs, so
+  unlock now reads the file.
+- **Copying a one-time code confirms it like every other value.** It set the highlight but not the
+  Copied badge, so the one field whose value changes every thirty seconds was also the only one that
+  gave no sign the click had worked.
+- **A large scan report no longer crawls.** The list was inside a second scroll view, and a lazy list
+  handed unbounded height builds every row regardless. The report is grouped once, off the main
+  actor, and only what is on screen is drawn.
+
+### Security
+
+- **A one-time code field copies the code, not the seed.** Pasting the seed where a code was wanted
+  hands over permanent access instead of something that expires in half a minute.
+- **The plaintext vault metadata gained no new information about you.** Multi-device safety needs a
+  writer marker, and that marker is a random per-install identifier — never the machine's name.
+  `vault.meta` sits unencrypted next to the ciphertext, and which Macs hold a copy of a vault is
+  nobody's business.
+- **Neither new report contains a secret.** The scan report carries the secret's identity and where
+  it was seen, never its value, because it gets screenshotted and pasted into tickets. The import
+  preview lists field names only: a sheet enumerating the very secrets it is about to take charge of,
+  on screen, before anything is encrypted, is the one thing that preview must not be.
+- **Recently Deleted keeps deleted secrets recoverable for thirty days.** That is the point of it and
+  also the trade-off: until the window closes, or you empty it by hand, a deleted secret is still in
+  the vault. Emptying it destroys the values outright.
+- **A QR code that is not a one-time code is refused without quoting it back.** An unexpected QR code
+  can hold anything, including a credential, and an error message is the one place a secret must
+  never appear.
+
+### Compatibility
+
+- **A vault written by 1.4.0 still opens in 1.3.0.** Everything added to the vault format this
+  release is optional: an expiry, a deletion date, a write counter, a writer identifier. An older
+  build reads a one-time code field as ordinary text, and ignores the rest.
+- **A vault written by an older build opens here unchanged.** No expiry, nothing in the trash, and a
+  write counter that starts at zero and becomes meaningful on the first save this version performs.
+- **Editing the same vault with an older build is noticed rather than lost.** An older PassStore does
+  not know about the write counter and resets it, which this version reports as "changed somewhere
+  else" — which is exactly what happened.
+
 ## [1.3.0] - 2026-08-19
 
 ### Added
