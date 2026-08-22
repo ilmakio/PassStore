@@ -82,10 +82,17 @@ private struct MenuBarItemRow: View {
                 Button {
                     onCopy(field)
                 } label: {
-                    Label(field.label, systemImage: field.isSensitive ? "lock.doc" : "doc.on.doc")
+                    Label(field.label, systemImage: Self.glyph(for: field))
                 }
             }
         }
+    }
+
+    /// A one-time code copies six digits rather than what is stored, so it should not look like
+    /// every other locked value in the list.
+    private static func glyph(for field: FieldResolvedValue) -> String {
+        if field.kind == .totp { return "clock.badge.checkmark" }
+        return field.isSensitive ? "lock.doc" : "doc.on.doc"
     }
 
     private var itemMenuTitle: String {

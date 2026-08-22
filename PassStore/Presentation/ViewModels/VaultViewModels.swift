@@ -19,6 +19,13 @@ final class VaultViewModel {
 
     var workspaces: [WorkspaceEntity] = []
     var items: [SecretItemEntity] = []
+    /// The trash, newest first.
+    ///
+    /// Held apart from `items` rather than filtered out of it at every call site. Search, the
+    /// sidebar counts, the command palette, the menu bar and the health report all read `items`,
+    /// and every one of them would have had to remember to exclude the deleted — which is the kind
+    /// of thing that is remembered in nine places and forgotten in the tenth.
+    var deletedItems: [SecretItemEntity] = []
     var templates: [SecretFieldTemplateEntity] = []
 
     var selectedDestination: VaultDestination = .library(.allItems)
@@ -61,6 +68,8 @@ final class VaultViewModel {
 
     var selectedItem: SecretItemEntity? {
         items.first(where: { $0.id == selectedItemID })
+            // Standing in the trash, the selected row is a deleted item and must still resolve.
+            ?? deletedItems.first(where: { $0.id == selectedItemID })
     }
 
     var selectedFields: [FieldResolvedValue] {
@@ -180,7 +189,19 @@ final class VaultViewModel {
     }
 
     func itemCount(in section: LibrarySection) -> Int {
-        items.count { Self.matches(section: section, item: $0) }
+        guard section != .recentlyDeleted else { return deletedItems.count }
+        return items.count { Self.matches(section: section, item: $0) }
+    }
+
+    /// Which library rows the sidebar draws.
+    ///
+    /// The trash earns its row by having something in it. An always-present empty one is a
+    /// permanent reminder of a feature most vaults never use — but it stays while you are standing
+    /// in it, because a row disappearing from under the selection is worse than an empty row.
+    var visibleLibrarySections: [LibrarySection] {
+        LibrarySection.allCases.filter { section in
+            section != .recentlyDeleted || !deletedItems.isEmpty || isViewingTrash
+        }
     }
 
     func itemCount(inWorkspace id: UUID) -> Int {
@@ -1396,8 +1417,10 @@ final class VaultViewModel {
     /// selection syncing and keyboard navigation all ask for it — and each miss was two
     /// passes plus a sort over the whole vault.
     var filteredItems: [SecretItemEntity] {
-        // Touch `items` so SwiftUI still registers the dependency on a cache hit.
-        let all = items
+        // Touch both so SwiftUI still registers the dependency on a cache hit.
+        let all = isViewingTrash ? deletedItems : items
+        _ = items
+        _ = deletedItems
         let key = FilterFingerprint(
             destination: selectedDestination,
             type: selectedType,
@@ -1456,6 +1479,8 @@ final class VaultViewModel {
             "Items you create or edit will show up here."
         case .library(.archived):
             "Nothing is archived. Archived items stay recoverable."
+        case .library(.recentlyDeleted):
+            "Nothing has been deleted recently. Items you delete wait here for \(SecretItemRepository.trashRetentionDays) days."
         case .workspace:
             "This workspace has no items yet."
         case let .workspaceEnvironment(_, environment):
@@ -1487,7 +1512,11 @@ final class VaultViewModel {
             vaultGeneration &+= 1
             filteredCache = nil
             workspaces = try container.workspaceRepository.fetchAll(includeArchived: false)
-            items = try container.itemRepository.fetchAll(includeArchived: true)
+            let allItems = try container.itemRepository.fetchAll(includeArchived: true)
+            items = allItems.filter { !$0.isDeleted }
+            deletedItems = allItems
+                .filter(\.isDeleted)
+                .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
             templates = try container.templateRepository.fetchAll()
             normalizeSelection()
         } catch {
@@ -1539,6 +1568,10 @@ final class VaultViewModel {
         newWorkspaceFromFolder = nil
         // Holds field names and, once a value is ticked to come across, plaintext on the way.
         environmentCopy = nil
+        // Kept across closing its sheet so jumping to a secret does not mean scanning again — which
+        // means locking is what has to end it. It names items and files, and both are the owner's
+        // business only.
+        clearSecretScanReport()
 
         workspaces = []
         items = []
@@ -2180,14 +2213,28 @@ final class VaultViewModel {
         itemsPendingDeletion = []
     }
 
+    /// True when confirming will destroy the items outright rather than trash them.
+    ///
+    /// The same command means both things depending on where it is used, which is how the Finder
+    /// behaves and what people expect: delete from the vault puts it in the trash, delete from the
+    /// trash means it.
+    var pendingDeletionIsPermanent: Bool {
+        itemsPendingDeletion.contains(where: \.isDeleted)
+    }
+
     func confirmItemDeletion() {
         let targets = itemsPendingDeletion
         guard !targets.isEmpty else { return }
+        let permanently = pendingDeletionIsPermanent
         let deletedIDs = Set(targets.map(\.id))
         do {
             try container.memoryStore.performTransaction {
                 for item in targets {
-                    try container.itemRepository.deleteItem(item)
+                    if permanently {
+                        try container.itemRepository.deleteItem(item)
+                    } else {
+                        try container.itemRepository.trashItem(item)
+                    }
                 }
             }
             itemsPendingDeletion = []
@@ -2196,24 +2243,48 @@ final class VaultViewModel {
                 self.selectedItemID = nil
             }
             reload()
+            lastActionMessage = permanently
+                ? nil
+                : (targets.count == 1
+                    ? "Moved “\(targets[0].title)” to Recently Deleted."
+                    : "Moved \(targets.count) items to Recently Deleted.")
         } catch {
             handleMutationFailure(error)
         }
     }
 
     var itemDeletionTitle: String {
+        let permanently = pendingDeletionIsPermanent
         switch itemsPendingDeletion.count {
-        case 0: "Delete item?"
-        case 1: "Delete “\(itemsPendingDeletion[0].title)”?"
-        default: "Delete \(itemsPendingDeletion.count) items?"
+        case 0:
+            return permanently ? "Delete item forever?" : "Delete item?"
+        case 1:
+            return permanently
+                ? "Delete “\(itemsPendingDeletion[0].title)” forever?"
+                : "Delete “\(itemsPendingDeletion[0].title)”?"
+        default:
+            return permanently
+                ? "Delete \(itemsPendingDeletion.count) items forever?"
+                : "Delete \(itemsPendingDeletion.count) items?"
         }
     }
 
     var itemDeletionConfirmLabel: String {
-        itemsPendingDeletion.count > 1 ? "Delete \(itemsPendingDeletion.count) Items" : "Delete"
+        if pendingDeletionIsPermanent {
+            return itemsPendingDeletion.count > 1
+                ? "Delete \(itemsPendingDeletion.count) Items Forever"
+                : "Delete Forever"
+        }
+        return itemsPendingDeletion.count > 1 ? "Delete \(itemsPendingDeletion.count) Items" : "Delete"
     }
 
     var itemDeletionMessage: String {
+        guard pendingDeletionIsPermanent else {
+            let plural = itemsPendingDeletion.count > 1
+            return plural
+                ? "They move to Recently Deleted, where they stay for \(SecretItemRepository.trashRetentionDays) days before PassStore removes them."
+                : "It moves to Recently Deleted, where it stays for \(SecretItemRepository.trashRetentionDays) days before PassStore removes it."
+        }
         let secretCount = itemsPendingDeletion.reduce(0) { total, item in
             total + Self.visibleFields(in: resolvedFields(for: item)).filter(\.isSensitive).count
         }
@@ -2222,7 +2293,76 @@ final class VaultViewModel {
             : "This item and all its fields will be permanently deleted."
         guard secretCount > 0 else { return "\(base) This cannot be undone." }
         let noun = secretCount == 1 ? "stored secret" : "stored secrets"
-        return "\(base) That includes \(secretCount) \(noun). This cannot be undone — consider archiving instead."
+        return "\(base) That includes \(secretCount) \(noun). This cannot be undone."
+    }
+
+    // MARK: - Recently Deleted
+
+    var trashCount: Int { deletedItems.count }
+
+    /// Takes items back out of the trash, where they were before.
+    func restoreFromTrash(_ items: [SecretItemEntity]) {
+        guard !items.isEmpty else { return }
+        do {
+            try container.memoryStore.performTransaction {
+                for item in items {
+                    try container.itemRepository.restoreItemFromTrash(item)
+                }
+            }
+            reload()
+            lastActionMessage = items.count == 1
+                ? "Recovered “\(items[0].title)”."
+                : "Recovered \(items.count) items."
+        } catch {
+            handleMutationFailure(error)
+        }
+    }
+
+    func restoreSelectedItemFromTrash() {
+        guard let selectedItem, selectedItem.isDeleted else { return }
+        restoreFromTrash([selectedItem])
+    }
+
+    /// Set while the owner is being asked whether to empty the trash.
+    var isConfirmingEmptyTrash = false
+
+    func requestEmptyTrash() {
+        guard !deletedItems.isEmpty else { return }
+        isConfirmingEmptyTrash = true
+    }
+
+    /// Destroys everything in the trash now, rather than waiting for the window to close.
+    func emptyTrash() {
+        isConfirmingEmptyTrash = false
+        guard !deletedItems.isEmpty else { return }
+        captureUndo("Empty Recently Deleted")
+        let targets = deletedItems
+        do {
+            try container.memoryStore.performTransaction {
+                for item in targets {
+                    try container.itemRepository.deleteItem(item)
+                }
+            }
+            selectedItemID = nil
+            multiSelectedIDs = []
+            reload()
+            lastActionMessage = "Recently Deleted is empty."
+        } catch {
+            handleMutationFailure(error)
+        }
+    }
+
+    /// Empties whatever has outstayed the retention window. Called once per unlock.
+    func purgeExpiredTrash() {
+        guard container.sessionManager.lockState == .unlocked else { return }
+        do {
+            let purged = try container.itemRepository.purgeExpiredTrash()
+            guard purged > 0 else { return }
+            reload()
+        } catch {
+            // Nothing the owner asked for failed, so this stays quiet rather than raising an alert
+            // about housekeeping they did not request.
+        }
     }
 
     // MARK: - Vault health
@@ -2234,7 +2374,7 @@ final class VaultViewModel {
     /// Findings the owner dismissed are moved to `ignoredFindings` rather than dropped, so the
     /// sheet can still say how many are hidden and offer to bring them back.
     func vaultHealthReport() -> VaultHealthReport {
-        let active = items.filter { !$0.isArchived }
+        let active = items.filter { !$0.isArchived && !$0.isDeleted }
         var findings: [VaultHealthFinding] = []
 
         // Group sensitive values to spot reuse. Hashed so plaintext never lands in the report.
@@ -2245,6 +2385,16 @@ final class VaultViewModel {
             for field in fields where field.isSensitive {
                 let digest = Self.digest(field.value)
                 occurrencesByDigest[digest, default: []].append((item, field.key, field.label))
+
+                // Two reasons a value is not worth scoring for strength, both of which would
+                // otherwise fill the report with problems nobody can fix. Reuse is still checked
+                // above for both, because the same value in two items is a real finding either way.
+                //
+                // A one-time code seed is machine-generated base32, not a password somebody chose.
+                guard field.kind != .totp else { continue }
+                // A token a service issued is not a password somebody chose either, and telling its
+                // holder it is weak asks them to change something they do not control.
+                if SecretShape.detect(in: field.value)?.isIssuedCredential == true { continue }
 
                 let strength = PasswordStrength.evaluate(field.value)
                 if strength.needsAttention {
@@ -2290,8 +2440,43 @@ final class VaultViewModel {
             }
         }
 
+        // Expiry first: a credential past its date has already stopped working, which is a fact
+        // rather than an opinion about how good it is.
+        let now = Date()
+        for item in active {
+            guard let expiry = item.expiresAt else { continue }
+            if expiry <= now {
+                findings.append(
+                    VaultHealthFinding(
+                        id: "expired-\(item.id.uuidString)",
+                        kind: .expired,
+                        itemID: item.id,
+                        itemTitle: item.title,
+                        detail: "Expired \(Self.expiryRelativeDescription(expiry, from: now))",
+                        valueDigest: Self.digest(SecretItemRepository.expiryDigestSource(expiry)),
+                        referenceDate: expiry
+                    )
+                )
+            } else if expiry.timeIntervalSince(now) <= VaultHealthFinding.expiryWarningWindow {
+                findings.append(
+                    VaultHealthFinding(
+                        id: "expiring-\(item.id.uuidString)",
+                        kind: .expiring,
+                        itemID: item.id,
+                        itemTitle: item.title,
+                        detail: "Expires \(Self.expiryRelativeDescription(expiry, from: now))",
+                        valueDigest: Self.digest(SecretItemRepository.expiryDigestSource(expiry)),
+                        referenceDate: expiry
+                    )
+                )
+            }
+        }
+
         let staleCutoff = Date().addingTimeInterval(-Self.staleItemInterval)
         for item in active {
+            // An item that states when it expires is already being tracked by a date its owner
+            // chose. Adding "and it is also old" says nothing they have not been told.
+            guard item.expiresAt == nil else { continue }
             // Dated from the password's own rotation when history knows it, so editing a
             // title no longer makes a years-old credential look freshly reviewed.
             let reference = item.healthReferenceDate
@@ -2370,6 +2555,13 @@ final class VaultViewModel {
     }
 
     /// Items untouched for a year are surfaced as worth rotating or retiring.
+    /// "in 12 days" / "3 months ago", which is what somebody wants to know about a key.
+    static func expiryRelativeDescription(_ date: Date, from reference: Date = Date()) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: reference)
+    }
+
     private static let staleItemInterval: TimeInterval = 365 * 24 * 3600
 
     /// Must stay the same function the repository uses to prune dismissals — a mismatch
@@ -3114,7 +3306,17 @@ final class VaultViewModel {
         container.clipboard.copy(password, label: "Generated password")
     }
 
+    /// Copying a one-time code field means the digits, never the seed.
+    ///
+    /// The rule lives here rather than in the views so that every route to a copy — the detail
+    /// pane, the item list's hover button, ⇧⌘C, the command palette, the menu bar — obeys it
+    /// without each of them having to know what a TOTP field is. Pasting the seed where a code
+    /// was wanted would hand over permanent access instead of something that expires.
     func copyField(_ field: FieldResolvedValue) {
+        guard field.kind != .totp else {
+            copyOneTimeCode(field)
+            return
+        }
         maybeWarnForSensitiveCopy(isSensitive: field.isSensitive)
         container.clipboard.copy(field.value, label: field.label)
     }
@@ -3126,6 +3328,425 @@ final class VaultViewModel {
               let item = items.first(where: { $0.id == itemID }),
               let field = resolvedFields(for: item).first(where: { $0.id == fieldID }) else { return }
         copyField(field)
+    }
+
+    // MARK: - One-time codes
+
+    /// Reads a TOTP field's stored setup key, or nil when it is empty or malformed.
+    ///
+    /// Parsing on demand rather than caching keeps exactly one copy of the decoded seed alive —
+    /// the one inside the returned value — and it dies with the caller's stack frame.
+    func oneTimeCodeConfiguration(for field: FieldResolvedValue) -> OneTimeCodeConfiguration? {
+        guard field.kind == .totp else { return nil }
+        return try? OneTimeCodeParser.parse(field.value)
+    }
+
+    /// The item's first usable one-time code, for the menu command and the palette.
+    func oneTimeCodeField(for item: SecretItemEntity) -> FieldResolvedValue? {
+        resolvedFields(for: item).first { $0.kind == .totp && oneTimeCodeConfiguration(for: $0) != nil }
+    }
+
+    var selectedItemHasOneTimeCode: Bool {
+        guard let selectedItem else { return false }
+        return oneTimeCodeField(for: selectedItem) != nil
+    }
+
+    /// Copies the current digits, never the seed they come from.
+    ///
+    /// The seed is the credential: pasting it where a code was wanted hands over permanent
+    /// access instead of a value that expires in half a minute.
+    func copyOneTimeCode(_ field: FieldResolvedValue) {
+        guard let configuration = oneTimeCodeConfiguration(for: field) else {
+            alertMessage = "“\(field.label)” doesn\u{2019}t hold a one-time code PassStore can read."
+            return
+        }
+        maybeWarnForSensitiveCopy(isSensitive: true)
+        container.clipboard.copy(
+            OneTimeCodeGenerator.code(for: configuration),
+            label: field.label
+        )
+    }
+
+    func copyOneTimeCode(itemID: UUID, fieldID: UUID) {
+        guard container.sessionManager.lockState == .unlocked,
+              let item = items.first(where: { $0.id == itemID }),
+              let field = resolvedFields(for: item).first(where: { $0.id == fieldID }) else { return }
+        copyOneTimeCode(field)
+    }
+
+    func copyOneTimeCodeOfSelectedItem() {
+        guard let selectedItem else { return }
+        guard let field = oneTimeCodeField(for: selectedItem) else {
+            alertMessage = "“\(selectedItem.title)” has no one-time code."
+            return
+        }
+        copyOneTimeCode(field)
+        lastActionMessage = "Copied the one-time code from “\(selectedItem.title)”."
+    }
+
+    // MARK: - Vault location
+
+    var vaultLocationPath: String { container.relocation.currentDirectoryPath }
+    var isVaultInCustomLocation: Bool { container.relocation.isUsingCustomDirectory }
+    var canRelocateVault: Bool { container.relocation.canRelocate }
+    var vaultLocationProblemMessage: String? { container.relocation.locationProblem?.message }
+
+    /// Moves this vault into a folder the owner picks — typically one another tool already syncs.
+    func moveVaultToChosenFolder() {
+        guard container.sessionManager.lockState == .unlocked else {
+            alertMessage = VaultCryptoError.vaultLocked.localizedDescription
+            return
+        }
+        guard let folder = pickVaultFolder(
+            prompt: "Move Vault",
+            message: "Choose the folder to keep your vault in. PassStore will write vault.package into it, and read it from there from now on."
+        ) else { return }
+
+        do {
+            try container.relocation.moveVault(to: folder)
+            lastActionMessage = "Vault moved to \(container.relocation.currentDirectoryPath)."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// Points PassStore at a vault that is already in a folder — the second Mac.
+    func openVaultInChosenFolder() {
+        guard let folder = pickVaultFolder(
+            prompt: "Open Vault",
+            message: "Choose the folder that already holds a PassStore vault. PassStore will lock, so you can unlock that vault with its own master password."
+        ) else { return }
+
+        do {
+            try container.relocation.openVault(in: folder)
+            clearUnlockedState()
+            lastActionMessage = "PassStore is now using the vault in \(container.relocation.currentDirectoryPath)."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func moveVaultBackToDefaultLocation() {
+        guard container.sessionManager.lockState == .unlocked else {
+            alertMessage = VaultCryptoError.vaultLocked.localizedDescription
+            return
+        }
+        do {
+            try container.relocation.moveVaultToDefaultLocation()
+            lastActionMessage = "Vault moved back to its default location."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    private func pickVaultFolder(prompt: String, message: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.showsHiddenFiles = true
+        panel.prompt = prompt
+        panel.message = message
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    // MARK: - Scanning a folder for leaked secrets
+
+    /// The last scan, or nil when none has been run this session. Never persisted.
+    var secretScanReport: SecretScanReport?
+    var isScanningForSecrets = false
+    @ObservationIgnored private var secretScanTask: Task<Void, Never>?
+
+    /// Every sensitive value the vault holds, flattened for the scanner.
+    ///
+    /// Built on the main actor because that is where the entity graph lives, then handed over as
+    /// plain values. Archived items are included on purpose: a secret you have stopped using is
+    /// exactly the one most likely to still be sitting in a file.
+    private func secretScanCandidates() -> [SecretScanCandidate] {
+        items.flatMap { item in
+            resolvedFields(for: item).map { field in
+                SecretScanCandidate(
+                    itemID: item.id,
+                    itemTitle: item.title,
+                    fieldKey: field.key,
+                    fieldLabel: field.label,
+                    value: field.value,
+                    isSensitive: field.isSensitive
+                )
+            }
+        }
+    }
+
+    /// Asks for a folder and reports which of the vault's secrets are sitting in it in plaintext.
+    func scanFolderForLeakedSecrets() {
+        guard container.sessionManager.lockState == .unlocked else { return }
+        guard let folder = pickScanFolder() else { return }
+        scanForLeakedSecrets(in: folder)
+    }
+
+    /// Scans a folder PassStore already has access to — a workspace's project folder, say.
+    func scanForLeakedSecrets(in folder: URL) {
+        guard container.sessionManager.lockState == .unlocked, !isScanningForSecrets else { return }
+
+        let needles = SecretScanner.needles(from: secretScanCandidates())
+        guard !needles.isEmpty else {
+            alertMessage = "There are no stored secrets long enough to search for yet."
+            return
+        }
+
+        secretScanReport = nil
+        isScanningForSecrets = true
+        activeSheet = .secretScan
+
+        let generation = container.sessionManager.captureSecurityGeneration()
+        secretScanTask?.cancel()
+        secretScanTask = Task { [weak self] in
+            // A folder reached through a stored bookmark needs its scoped access held for as long as
+            // the walk runs. A folder just chosen in a panel is already granted, and asking again is
+            // harmless.
+            let heldAccess = folder.startAccessingSecurityScopedResource()
+            defer { if heldAccess { folder.stopAccessingSecurityScopedResource() } }
+
+            // Walking a repository is disk-bound and can take a moment; the window has to keep
+            // drawing, and the plaintext needles must not be touched from the main actor while it
+            // happens.
+            let report = await Task.detached(priority: .userInitiated) {
+                SecretScanner.scan(root: folder, needles: needles) { Task.isCancelled }
+            }.value
+
+            guard let self, !Task.isCancelled else { return }
+            // A lock while the scan was running means the results describe a vault this session no
+            // longer holds, and they name its items.
+            guard self.container.sessionManager.isSecurityGenerationCurrent(generation) else {
+                self.isScanningForSecrets = false
+                self.secretScanReport = nil
+                return
+            }
+            self.secretScanReport = report
+            self.isScanningForSecrets = false
+        }
+    }
+
+    /// The findings as plain text, for pasting into a ticket or working through in an editor.
+    ///
+    /// Written straight to the pasteboard rather than through the clipboard service: it holds paths
+    /// and item names, no secret values, so the auto-clear that protects a copied password would
+    /// only throw away the list you were about to act on.
+    func copySecretScanReport() {
+        guard let report = secretScanReport, !report.findings.isEmpty else { return }
+        var lines = ["Secrets found in \((report.root as NSString).abbreviatingWithTildeInPath)"]
+        for finding in report.findings {
+            lines.append("\(finding.relativePath):\(finding.line)  —  \(finding.itemTitle) › \(finding.fieldLabel)")
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(lines.joined(separator: "\n"), forType: .string)
+        lastActionMessage = "Copied the list of \(report.findings.count) \(report.findings.count == 1 ? "finding" : "findings")."
+    }
+
+    /// Copies one file's path. The common next step is opening it in an editor.
+    func copyScanFilePath(_ path: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(path, forType: .string)
+        lastActionMessage = "Copied the file path."
+    }
+
+    func cancelSecretScan() {
+        secretScanTask?.cancel()
+        secretScanTask = nil
+        isScanningForSecrets = false
+    }
+
+    var hasSecretScanReport: Bool { secretScanReport != nil }
+
+    /// Brings the last report back without walking the folder again.
+    func showLastSecretScanReport() {
+        guard secretScanReport != nil else { return }
+        activeSheet = .secretScan
+    }
+
+    /// Forgets the results. Called on lock rather than on closing the sheet: a list naming which of
+    /// your secrets is in which file should not outlive the session, but it should outlive a click
+    /// on one of its own rows.
+    func clearSecretScanReport() {
+        cancelSecretScan()
+        secretScanReport = nil
+    }
+
+    /// The folder a workspace is already pointed at, when the current destination has one.
+    ///
+    /// Reuses the permission the owner already granted that workspace, so scanning a project does
+    /// not ask for the same folder twice.
+    var scannableWorkspaceFolder: URL? {
+        guard let workspaceID = selectedDestination.workspaceID,
+              let workspace = workspace(for: workspaceID),
+              let folder = workspace.linkedFolder else { return nil }
+        return try? container.envDiscovery.resolve(folder).url
+    }
+
+    private func pickScanFolder() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.prompt = "Scan"
+        panel.message = "Choose a folder to check. PassStore reads the files inside it looking for its own secrets, and writes nothing."
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    // MARK: - Changed on another Mac
+
+    /// True while a save has been refused because the vault moved underneath this session.
+    var hasForeignVaultChange: Bool { container.sessionManager.hasForeignChange }
+
+    func dismissForeignVaultChangeNotice() {
+        container.sessionManager.dismissForeignChangeNotice()
+    }
+
+    /// Discards this session's edits and takes the version on disk.
+    func reloadVaultFromDisk() {
+        do {
+            try container.sessionManager.reloadFromDisk()
+            reload()
+            lastActionMessage = "Reloaded the vault from disk."
+        } catch {
+            clearUnlockedState()
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    /// Keeps this session's edits and writes over the version on disk.
+    func overwriteVaultOnDisk() {
+        do {
+            try container.sessionManager.overwriteForeignChange()
+            lastActionMessage = "Your version of the vault was saved."
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Importing from developer tools
+
+    /// What was parsed out of a config file, waiting for a decision. Never persisted.
+    var pendingDeveloperImport: [ImportedCredential] = []
+    var pendingDeveloperImportFormat: DeveloperCredentialFormat?
+    /// Where the imported items should land. Nil means no workspace.
+    var developerImportWorkspaceID: UUID?
+
+    /// Why the last file could not be read. Shown in the sheet rather than as an alert, so the
+    /// explanation sits next to the list of what is accepted.
+    var developerImportProblem: String?
+    /// The file that was read, for the preview's subtitle.
+    var developerImportFileName: String?
+
+    /// Opens the import sheet, which explains what it can read before asking for a file.
+    ///
+    /// An `~/.aws/credentials` and a `.netrc` are plaintext credential stores everybody has and
+    /// nobody thinks about. Importing them is the first step to being able to delete them — but only
+    /// if it is clear what can be handed over, which a file picker with a wall of text in its header
+    /// was not.
+    func importDeveloperCredentials() {
+        guard container.sessionManager.lockState == .unlocked else { return }
+        cancelDeveloperImport()
+        activeSheet = .developerCredentialImport
+    }
+
+    /// Asks for a file and parses it into the pending preview.
+    func chooseDeveloperCredentialFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        // These files are all in hidden directories.
+        panel.showsHiddenFiles = true
+        panel.prompt = "Read"
+        panel.message = "Choose a credentials file."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let contents = try Self.readDeveloperCredentialFile(at: url)
+            let parsed = try DeveloperCredentialImporter.parse(contents: contents, fileName: url.lastPathComponent)
+            pendingDeveloperImport = parsed.credentials
+            pendingDeveloperImportFormat = parsed.format
+            developerImportFileName = url.lastPathComponent
+            developerImportWorkspaceID = preferredWorkspaceID
+            developerImportProblem = nil
+        } catch {
+            pendingDeveloperImport = []
+            pendingDeveloperImportFormat = nil
+            developerImportFileName = url.lastPathComponent
+            developerImportProblem = error.localizedDescription
+        }
+    }
+
+    private static func readDeveloperCredentialFile(at url: URL) throws -> String {
+        let gotAccess = url.startAccessingSecurityScopedResource()
+        defer { if gotAccess { url.stopAccessingSecurityScopedResource() } }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: DeveloperCredentialImporter.maximumFileBytes + 1) ?? Data()
+        guard data.count <= DeveloperCredentialImporter.maximumFileBytes else {
+            throw TransferError.importFileTooLarge
+        }
+        guard let contents = String(data: data, encoding: .utf8) else {
+            throw DeveloperCredentialImportError.unrecognisedFormat
+        }
+        return contents
+    }
+
+    /// Creates an item per parsed credential. One transaction, one undo step.
+    func confirmDeveloperImport() {
+        let credentials = pendingDeveloperImport
+        guard !credentials.isEmpty else { return }
+        captureUndo("Import from \(pendingDeveloperImportFormat?.title ?? "a file")")
+
+        let workspaceID = developerImportWorkspaceID
+        let environment = preferredEnvironment
+        do {
+            try container.memoryStore.performTransaction {
+                for credential in credentials {
+                    var draft = SecretItemDraft.empty
+                    draft.title = credential.title
+                    draft.type = credential.type
+                    draft.workspaceID = workspaceID
+                    draft.environment = environment
+                    draft.notes = credential.notes
+                    draft.fieldDrafts = credential.fields.enumerated().map { index, field in
+                        FieldDraft(
+                            key: field.key,
+                            label: field.label,
+                            value: field.value,
+                            kind: field.kind,
+                            isSensitive: field.isSensitive,
+                            isCopyable: true,
+                            isMasked: field.isSensitive,
+                            sortOrder: index
+                        )
+                    }
+                    try container.itemRepository.saveItem(draft)
+                }
+            }
+            let count = credentials.count
+            cancelDeveloperImport()
+            activeSheet = nil
+            reload()
+            lastActionMessage = "Imported \(count) \(count == 1 ? "credential" : "credentials")."
+        } catch {
+            handleMutationFailure(error)
+        }
+    }
+
+    func cancelDeveloperImport() {
+        pendingDeveloperImport = []
+        pendingDeveloperImportFormat = nil
+        developerImportWorkspaceID = nil
+        developerImportProblem = nil
+        developerImportFileName = nil
     }
 
     /// Copies the selected item's password, or its first secret when it has no password.
@@ -4522,6 +5143,7 @@ final class VaultViewModel {
             tags: item.tags,
             isFavorite: item.isFavorite,
             isArchived: item.isArchived,
+            expiresAt: item.expiresAt,
             fieldDrafts: resolvedFields(for: item).enumerated().map { index, field in
                 FieldDraft(
                     id: field.id,
@@ -4748,6 +5370,10 @@ final class VaultViewModel {
         alertMessage = "Copied secrets go through the macOS system clipboard and can be read by clipboard managers or other apps while present."
     }
 
+    var isViewingTrash: Bool {
+        selectedDestination == .library(.recentlyDeleted)
+    }
+
     private func matchesDestination(_ item: SecretItemEntity) -> Bool {
         switch selectedDestination {
         case let .library(section):
@@ -4772,17 +5398,22 @@ final class VaultViewModel {
     /// Shared by the list filter and the sidebar badges so a count can never disagree with
     /// what clicking it shows.
     private static func matches(section: LibrarySection, item: SecretItemEntity) -> Bool {
+        // A deleted item belongs to exactly one place. Checked first so no section has to
+        // remember to exclude it.
+        guard !item.isDeleted else { return section == .recentlyDeleted }
         switch section {
         case .allItems:
-            !item.isArchived
+            return !item.isArchived
         case .favorites:
-            item.isFavorite && !item.isArchived
+            return item.isFavorite && !item.isArchived
         // "Recent" used to be an exact copy of "All Items" with a different sort — same rows,
         // same badge. It now means what it says: things actually opened.
         case .recent:
-            !item.isArchived && item.lastAccessedAt != nil
+            return !item.isArchived && item.lastAccessedAt != nil
         case .archived:
-            item.isArchived
+            return item.isArchived
+        case .recentlyDeleted:
+            return false
         }
     }
 
@@ -4953,6 +5584,9 @@ final class MenuBarViewModel {
         vault.resolvedFields(for: item)
             .filter(\.isCopyable)
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            // A malformed setup key would copy nothing and raise an alert on a window the menu
+            // bar may not even have open, so it is left out rather than offered and broken.
+            .filter { $0.kind != .totp || vault.oneTimeCodeConfiguration(for: $0) != nil }
     }
 
     var canUnlockWithBiometrics: Bool {

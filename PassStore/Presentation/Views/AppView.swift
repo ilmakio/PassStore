@@ -93,6 +93,10 @@ struct AppView: View {
             viewModel.onImportExportSheetDismissed()
         }) { sheet in
             switch sheet {
+            case .developerCredentialImport:
+                DeveloperImportSheet(viewModel: viewModel)
+            case .secretScan:
+                SecretScanSheet(viewModel: viewModel)
             case .newItemFlow:
                 ItemCreationFlowSheet(viewModel: viewModel)
             case let .editItem(itemID):
@@ -148,6 +152,9 @@ struct AppView: View {
                 Task { @MainActor in
                     await Task.yield()
                     viewModel.reload()
+                    // Housekeeping, once per unlock. Nothing in this app runs on a timer, and a
+                    // vault that is not open is not accumulating anything to clear out.
+                    viewModel.purgeExpiredTrash()
                 }
             case .locked:
                 // Sensitive view-model state is cleared synchronously by the session's lock
@@ -160,6 +167,21 @@ struct AppView: View {
                 withAnimation(.easeOut(duration: 0.3)) { showOnboarding = true }
             }
         }
+        .confirmationDialog(
+            "Empty Recently Deleted?",
+            isPresented: Binding(
+                get: { viewModel.isConfirmingEmptyTrash },
+                set: { if !$0 { viewModel.isConfirmingEmptyTrash = false } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete \(viewModel.trashCount) \(viewModel.trashCount == 1 ? "Item" : "Items") Forever", role: .destructive) {
+                viewModel.emptyTrash()
+            }
+            Button("Cancel", role: .cancel) { viewModel.isConfirmingEmptyTrash = false }
+        } message: {
+            Text("Everything in Recently Deleted is destroyed, along with every secret it holds. ⌘Z can still put it back until the vault locks.")
+        }
         .alert("PassStore", isPresented: Binding(
             get: { viewModel.alertMessage != nil },
             set: { if !$0 { viewModel.alertMessage = nil } }
@@ -167,6 +189,19 @@ struct AppView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(viewModel.alertMessage ?? "")
+        }
+        // A vault in a synced folder can be open on two Macs. Whichever saves second lands here,
+        // and gets to say which version survives — rather than finding out afterwards that it did
+        // not.
+        .alert("This vault changed somewhere else", isPresented: Binding(
+            get: { viewModel.hasForeignVaultChange },
+            set: { if !$0 { viewModel.dismissForeignVaultChangeNotice() } }
+        )) {
+            Button("Keep My Version") { viewModel.overwriteVaultOnDisk() }
+            Button("Use the Other Version", role: .destructive) { viewModel.reloadVaultFromDisk() }
+            Button("Decide Later", role: .cancel) { viewModel.dismissForeignVaultChangeNotice() }
+        } message: {
+            Text("Another copy of PassStore wrote this vault after you unlocked it. Keeping your version replaces theirs; using theirs discards the changes you have made since unlocking.")
         }
         .confirmationDialog(
             viewModel.workspacePendingDeletion.map { "Delete “\($0.name)”?" } ?? "Delete workspace?",
@@ -235,7 +270,7 @@ private struct SidebarView: View {
                         return s.rawValue
                     }()
                         ReorderableRows(
-                            items: LibrarySection.allCases.map { section in
+                            items: viewModel.visibleLibrarySections.map { section in
                                 let count = viewModel.itemCount(in: section)
                                 return SidebarReorderItem(
                                     id: section.rawValue,
@@ -253,7 +288,7 @@ private struct SidebarView: View {
                             viewModel.setSelectedType(nil)
                         }
                     )
-                    .sidebarSectionRows(count: LibrarySection.allCases.count)
+                    .sidebarSectionRows(count: viewModel.visibleLibrarySections.count)
                 }
 
                 if !viewModel.workspaces.isEmpty {
@@ -1059,6 +1094,14 @@ private struct ItemRow: View {
                             .accessibilityLabel("Favourite")
                     }
 
+                    // An expiry is only worth a glyph once it is close enough to act on.
+                    if let expiry = expiryBadge {
+                        Image(systemName: expiry.systemImage)
+                            .font(.system(size: 9))
+                            .foregroundStyle(expiry.color)
+                            .accessibilityLabel(expiry.label)
+                    }
+
                     if item.linkedFile != nil {
                         Image(systemName: viewModel.itemsWithOutdatedLinks.contains(item.id)
                               ? "arrow.down.doc.fill"
@@ -1085,6 +1128,26 @@ private struct ItemRow: View {
         .padding(.vertical, VaultSpacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    /// Nil for the items that have nothing to say about expiry, which is most of them.
+    private var expiryBadge: (systemImage: String, color: Color, label: String)? {
+        switch item.expiryState {
+        case let .expired(date):
+            (
+                "calendar.badge.exclamationmark",
+                .red,
+                "Expired \(VaultViewModel.expiryRelativeDescription(date))"
+            )
+        case let .expiring(date):
+            (
+                "calendar.badge.clock",
+                .orange,
+                "Expires \(VaultViewModel.expiryRelativeDescription(date))"
+            )
+        case .current, .none:
+            nil
+        }
     }
 
     /// The type, as a glyph and a word rather than a `Label`.
@@ -1153,6 +1216,23 @@ private struct ItemRow: View {
 
     @ViewBuilder
     private var singleItemContextMenu: some View {
+        if item.isDeleted {
+            // Nothing else applies to something in the trash: editing, copying and archiving a
+            // deleted secret are all questions with no good answer.
+            Button("Put Back", systemImage: "arrow.uturn.backward") {
+                viewModel.restoreFromTrash([item])
+            }
+            Divider()
+            Button("Delete Forever…", systemImage: "trash.slash", role: .destructive) {
+                viewModel.requestDeletion(of: item)
+            }
+        } else {
+            activeItemContextMenu
+        }
+    }
+
+    @ViewBuilder
+    private var activeItemContextMenu: some View {
         Button("Edit Item", systemImage: "square.and.pencil") {
             viewModel.edit(item)
         }
@@ -2869,6 +2949,63 @@ private struct FieldRow: View {
         return isRevealPinned || isHoveringValue
     }
 
+    /// The parsed one-time code for this field, or nil for every other kind.
+    ///
+    /// Parsed on demand rather than passed in: it is a pure function of the stored value, and
+    /// threading it through both call sites would only give the two of them a way to disagree.
+    private var oneTimeCode: OneTimeCodeConfiguration? {
+        guard field.kind == .totp else { return nil }
+        return try? OneTimeCodeParser.parse(field.value)
+    }
+
+    /// Only the explicit reveal shows the seed behind a one-time code.
+    ///
+    /// Everywhere else hovering the value reveals it, which is right when the value *is* what you
+    /// came for. Here the value box holds the code and gets hovered on the way to clicking it —
+    /// flashing the permanent secret each time would be the opposite of what the field is for.
+    private var showsOneTimeCodeSeed: Bool {
+        canRevealSecrets && isRevealPinned
+    }
+
+    /// The value, or the live code when this field is a one-time code.
+    @ViewBuilder
+    private var valueArea: some View {
+        if field.kind == .totp {
+            VStack(alignment: .leading, spacing: VaultSpacing.s) {
+                if let oneTimeCode {
+                    OneTimeCodeValueBox(
+                        configuration: oneTimeCode,
+                        isCopied: isCopied,
+                        onCopy: onCopy
+                    )
+
+                    if showsOneTimeCodeSeed {
+                        VStack(alignment: .leading, spacing: VaultSpacing.hair) {
+                            Text("Setup key")
+                                .font(.vaultFieldLabel)
+                                .foregroundStyle(.secondary)
+                            Text(field.value)
+                                .font(.vaultValueSmall)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityIdentifier("detail-onetimecode-seed-\(field.key)")
+                    }
+                } else if field.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    OneTimeCodeProblemBox(message: "No setup key yet. Edit this item to add one.")
+                } else {
+                    OneTimeCodeProblemBox(
+                        message: "This setup key cannot be read as a one-time code. Edit the item to paste it again."
+                    )
+                }
+            }
+        } else {
+            valueBox
+        }
+    }
+
     /// Spaced by hand rather than by one stack spacing: a name and the value under it are one
     /// thing and sit all but touching, while what follows the value — a note, a difference to
     /// resolve — is a separate statement and needs the room to say so.
@@ -2876,7 +3013,7 @@ private struct FieldRow: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            valueBox
+            valueArea
                 .padding(.top, VaultSpacing.hair)
 
             // Directly under the value it is about: this is a statement about that one value and
@@ -2890,6 +3027,14 @@ private struct FieldRow: View {
                     onPush: onPushField
                 )
                 .padding(.top, VaultSpacing.s)
+            }
+
+            if let shape = SecretShape.detect(in: field.value) {
+                Label("Looks like a \(shape.title.lowercased())", systemImage: "tag")
+                    .font(.vaultFootnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, VaultSpacing.xs)
+                    .accessibilityIdentifier("detail-field-shape-\(field.key)")
             }
 
             if let note, !note.isEmpty {
@@ -3028,33 +3173,7 @@ private struct FieldRow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .contentShape(Rectangle())
-        .overlay {
-            if isCopied {
-                copiedFeedbackBadge
-                    .allowsHitTesting(false)
-                    .transition(.scale(scale: 0.92).combined(with: .opacity))
-            }
-        }
-        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: isCopied)
-    }
-
-    private var copiedFeedbackBadge: some View {
-        HStack(spacing: VaultSpacing.xs) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.body.weight(.semibold))
-                .symbolRenderingMode(.hierarchical)
-            Text("Copied")
-                .font(.subheadline.weight(.semibold))
-        }
-        .foregroundStyle(.primary)
-        .padding(.horizontal, VaultSpacing.m)
-        .padding(.vertical, VaultSpacing.s - 1)
-        .background {
-            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
-                .fill(.thickMaterial)
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-        }
-        .accessibilityHidden(true)
+        .vaultCopiedFeedback(isCopied: isCopied)
     }
 
     /// Reveals on hover, and shows the pointing hand only while the value is actually

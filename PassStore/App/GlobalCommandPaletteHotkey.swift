@@ -3,11 +3,13 @@ import Carbon.HIToolbox
 import Foundation
 
 extension Notification.Name {
-    /// Posted when `AppSettingsStore.globalCommandPaletteHotkeyEnabled` changes.
+    /// Posted when the global shortcut is switched on or off, or remapped.
     static let passStoreGlobalHotkeySettingsChanged = Notification.Name("passStoreGlobalHotkeySettingsChanged")
+    /// Posted when the Dock-icon preference changes.
+    static let passStoreActivationPolicyChanged = Notification.Name("passStoreActivationPolicyChanged")
 }
 
-/// Registers ⌘⌥P to activate PassStore and open the command palette.
+/// Registers the global shortcut that activates PassStore and opens the command palette.
 ///
 /// This used to install an `NSEvent` global monitor, which meant PassStore asked for
 /// Accessibility and then received every keystroke typed in every application. For a password
@@ -125,9 +127,14 @@ final class GlobalCommandPaletteHotkey {
         }
 
         let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: Self.hotKeyID)
+        // Whatever the owner recorded, or the default when they have not. `RegisterEventHotKey`
+        // fails when another application already owns the chord, which is exactly the case that
+        // made a fixed shortcut useless.
+        let keyCode = UInt32(settings?.globalHotkeyKeyCode ?? AppSettingsStore.defaultHotkeyKeyCode)
+        let modifiers = UInt32(settings?.globalHotkeyModifiers ?? AppSettingsStore.defaultHotkeyModifiers)
         let status = RegisterEventHotKey(
-            UInt32(kVK_ANSI_P),
-            UInt32(cmdKey | optionKey),
+            keyCode,
+            modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,

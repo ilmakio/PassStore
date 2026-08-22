@@ -66,13 +66,57 @@ final class AppSettingsStore {
         didSet { defaults.set(itemSortOrderRawValue, forKey: Keys.itemSortOrder) }
     }
 
-    /// When false, the global ⌘⌥P shortcut is not registered.
+    /// When false, no global shortcut is registered at all.
     var globalCommandPaletteHotkeyEnabled: Bool {
         didSet {
             defaults.set(globalCommandPaletteHotkeyEnabled, forKey: Keys.globalCommandPaletteHotkeyEnabled)
             NotificationCenter.default.post(name: .passStoreGlobalHotkeySettingsChanged, object: nil)
         }
     }
+
+    /// Virtual key code of the global shortcut. ⌘⌥P was hard-wired until 1.4, which meant an app
+    /// that already owned that chord left PassStore with no shortcut and no way to move it.
+    var globalHotkeyKeyCode: Int {
+        didSet {
+            defaults.set(globalHotkeyKeyCode, forKey: Keys.globalHotkeyKeyCode)
+            NotificationCenter.default.post(name: .passStoreGlobalHotkeySettingsChanged, object: nil)
+        }
+    }
+
+    /// Carbon modifier mask (`cmdKey`, `optionKey`, `controlKey`, `shiftKey`).
+    var globalHotkeyModifiers: Int {
+        didSet {
+            defaults.set(globalHotkeyModifiers, forKey: Keys.globalHotkeyModifiers)
+            NotificationCenter.default.post(name: .passStoreGlobalHotkeySettingsChanged, object: nil)
+        }
+    }
+
+    /// How the chord is written on screen, captured when it was recorded.
+    ///
+    /// Stored rather than derived: turning a virtual key code back into the character printed on
+    /// the key means consulting the active keyboard layout, and the layout that recorded it is the
+    /// one that got it right.
+    var globalHotkeyDisplay: String {
+        didSet { defaults.set(globalHotkeyDisplay, forKey: Keys.globalHotkeyDisplay) }
+    }
+
+    /// Start PassStore when you log in. Managed by the system, not by a login item we install.
+    var launchesAtLogin: Bool {
+        didSet { defaults.set(launchesAtLogin, forKey: Keys.launchesAtLogin) }
+    }
+
+    /// Live in the menu bar with no Dock icon.
+    var showsInMenuBarOnly: Bool {
+        didSet {
+            defaults.set(showsInMenuBarOnly, forKey: Keys.showsInMenuBarOnly)
+            NotificationCenter.default.post(name: .passStoreActivationPolicyChanged, object: nil)
+        }
+    }
+
+    /// The chord PassStore ships with.
+    nonisolated static let defaultHotkeyKeyCode = 35 // kVK_ANSI_P
+    nonisolated static let defaultHotkeyModifiers = 0x0100 | 0x0800 // cmdKey | optionKey
+    nonisolated static let defaultHotkeyDisplay = "⌘⌥P"
 
     private let defaults: UserDefaults
 
@@ -140,6 +184,11 @@ final class AppSettingsStore {
         static let keepsSecretValueHistory = "settings.keepsSecretValueHistory"
         static let checksLinkedFilesOnFocus = "settings.checksLinkedFilesOnFocus"
         static let itemSortOrder = "settings.itemSortOrder"
+        static let globalHotkeyKeyCode = "settings.globalHotkeyKeyCode"
+        static let globalHotkeyModifiers = "settings.globalHotkeyModifiers"
+        static let globalHotkeyDisplay = "settings.globalHotkeyDisplay"
+        static let launchesAtLogin = "settings.launchesAtLogin"
+        static let showsInMenuBarOnly = "settings.showsInMenuBarOnly"
 
         static let all: [String] = [
             autoLockInterval,
@@ -160,7 +209,12 @@ final class AppSettingsStore {
             locksOnSystemLock,
             keepsSecretValueHistory,
             checksLinkedFilesOnFocus,
-            itemSortOrder
+            itemSortOrder,
+            globalHotkeyKeyCode,
+            globalHotkeyModifiers,
+            globalHotkeyDisplay,
+            launchesAtLogin,
+            showsInMenuBarOnly
         ]
     }
 
@@ -203,6 +257,15 @@ final class AppSettingsStore {
         self.itemSortOrderRawValue = ItemSortOrder(
             rawValue: defaults.string(forKey: Keys.itemSortOrder) ?? ""
         )?.rawValue ?? ItemSortOrder.title.rawValue
+        self.globalHotkeyKeyCode = defaults.object(forKey: Keys.globalHotkeyKeyCode) as? Int
+            ?? Self.defaultHotkeyKeyCode
+        self.globalHotkeyModifiers = Self.sanitizedHotkeyModifiers(
+            defaults.object(forKey: Keys.globalHotkeyModifiers) as? Int ?? Self.defaultHotkeyModifiers
+        )
+        self.globalHotkeyDisplay = defaults.string(forKey: Keys.globalHotkeyDisplay)?.nilIfEmptyValue
+            ?? Self.defaultHotkeyDisplay
+        self.launchesAtLogin = defaults.bool(forKey: Keys.launchesAtLogin)
+        self.showsInMenuBarOnly = defaults.bool(forKey: Keys.showsInMenuBarOnly)
     }
 
     var itemSortOrder: ItemSortOrder {
@@ -306,6 +369,50 @@ final class AppSettingsStore {
         return allowed.min { abs($0 - value) < abs($1 - value) } ?? allowed[0]
     }
 
+    /// Keeps a recorded chord to something that can be a global shortcut.
+    ///
+    /// At least one of Command, Option or Control has to be in it. A bare letter — or one with only
+    /// Shift — registered system-wide would intercept that key in every application, which for a
+    /// password manager is indistinguishable from a keylogger by anybody watching.
+    nonisolated static func sanitizedHotkeyModifiers(_ raw: Int) -> Int {
+        let allowed = raw & (cmdKeyMask | optionKeyMask | controlKeyMask | shiftKeyMask)
+        guard allowed & (cmdKeyMask | optionKeyMask | controlKeyMask) != 0 else {
+            return defaultHotkeyModifiers
+        }
+        return allowed
+    }
+
+    /// Carbon modifier bits, spelled out so this file does not have to import Carbon.
+    nonisolated static let cmdKeyMask = 0x0100
+    nonisolated static let shiftKeyMask = 0x0200
+    nonisolated static let optionKeyMask = 0x0800
+    nonisolated static let controlKeyMask = 0x1000
+
+    var isUsingDefaultHotkey: Bool {
+        globalHotkeyKeyCode == Self.defaultHotkeyKeyCode
+            && globalHotkeyModifiers == Self.defaultHotkeyModifiers
+    }
+
+    func resetHotkeyToDefault() {
+        globalHotkeyKeyCode = Self.defaultHotkeyKeyCode
+        globalHotkeyModifiers = Self.defaultHotkeyModifiers
+        globalHotkeyDisplay = Self.defaultHotkeyDisplay
+    }
+
+    /// Records a chord, rejecting one with no usable modifier.
+    @discardableResult
+    func setHotkey(keyCode: Int, modifiers: Int, display: String) -> Bool {
+        let sanitized = Self.sanitizedHotkeyModifiers(modifiers)
+        guard sanitized == modifiers & (Self.cmdKeyMask | Self.optionKeyMask | Self.controlKeyMask | Self.shiftKeyMask),
+              !display.isEmpty else {
+            return false
+        }
+        globalHotkeyKeyCode = keyCode
+        globalHotkeyModifiers = sanitized
+        globalHotkeyDisplay = display
+        return true
+    }
+
     private static func sanitizedOrder(_ values: [String]) -> [String] {
         var seen: Set<String> = []
         var result: [String] = []
@@ -347,6 +454,11 @@ final class AppSettingsStore {
         keepsSecretValueHistory = true
         checksLinkedFilesOnFocus = true
         itemSortOrderRawValue = ItemSortOrder.title.rawValue
+        globalHotkeyKeyCode = Self.defaultHotkeyKeyCode
+        globalHotkeyModifiers = Self.defaultHotkeyModifiers
+        globalHotkeyDisplay = Self.defaultHotkeyDisplay
+        launchesAtLogin = false
+        showsInMenuBarOnly = false
 
         for key in Keys.all {
             defaults.removeObject(forKey: key)
@@ -391,6 +503,14 @@ final class VaultSessionManager {
     private let memoryStore: VaultMemoryStore
     private var activeVaultKey: Data?
     private var metadata: VaultMetadata?
+    /// Identifies this install in the metadata it writes. See `VaultMetadata.lastWriterID`.
+    private let installIdentifier: String
+    /// The write counter this session last read or wrote. Anything else on disk means another
+    /// copy of PassStore wrote the vault while this one had it open.
+    private var loadedWriteCounter = 0
+    /// Set when a save was refused because the vault moved underneath us, so the UI can offer the
+    /// two ways out instead of only reporting a failure.
+    private(set) var hasForeignChange = false
     private var lastInteractionAt = Date()
     private var timer: Timer?
     private var eventMonitor: Any?
@@ -413,8 +533,10 @@ final class VaultSessionManager {
         cryptoService: VaultCryptoService,
         vaultStore: EncryptedVaultStore,
         keyStore: VaultKeyStore,
-        memoryStore: VaultMemoryStore
+        memoryStore: VaultMemoryStore,
+        installIdentifier: String = UUID().uuidString
     ) {
+        self.installIdentifier = installIdentifier
         self.defaults = defaults
         self.settings = settings
         self.cryptoService = cryptoService
@@ -503,7 +625,7 @@ final class VaultSessionManager {
         let envelope = try cryptoService.encryptVault(initialSnapshot, using: vaultKey)
         _ = syncBiometricState(using: vaultKey, metadata: &metadata)
         do {
-            try vaultStore.save(metadata: metadata, envelope: envelope)
+            metadata = try writeVault(metadata: metadata, envelope: envelope)
         } catch {
             let operationError = error
             var recoveryFailures: [String] = []
@@ -542,7 +664,10 @@ final class VaultSessionManager {
         isBusy = true
         defer { finishExclusiveSecurityOperation(operation) }
         do {
-            let metadata = try vaultStore.loadMetadata()
+            // Read the file rather than the cache. A vault in a synced folder can have been
+            // rewritten since this process last looked, and unlocking a stale copy would show the
+            // wrong contents and then refuse to save them.
+            let metadata = try vaultStore.loadMetadataFromStorage()
             guard metadata.version == 1 else { throw VaultCryptoError.unsupportedVaultVersion }
             let envelope = try vaultStore.loadEnvelope()
             var opened = try await cryptoService.openVaultOffMain(
@@ -583,7 +708,7 @@ final class VaultSessionManager {
         guard !isBusy, lockState == .locked else { return false }
         _ = beginExclusiveSecurityOperation()
         do {
-            let metadata = try vaultStore.loadMetadata()
+            let metadata = try vaultStore.loadMetadataFromStorage()
             guard metadata.version == 1 else { throw VaultCryptoError.unsupportedVaultVersion }
             let envelope = try vaultStore.loadEnvelope()
             var vaultKey = try cryptoService.unwrapVaultKey(metadata.wrappedVaultKey, password: password)
@@ -618,6 +743,10 @@ final class VaultSessionManager {
         snapshot: VaultSnapshot,
         rewrappedKey: WrappedVaultKey?
     ) throws {
+        // Adopt the version that was just read before anything is written from it. The migration
+        // write below is based on this metadata, and comparing it against a counter left over from
+        // before the last lock would report a conflict with nobody.
+        loadedWriteCounter = metadata.writeCounter
         var updatedMetadata = metadata
         if let rewrappedKey {
             updatedMetadata.wrappedVaultKey = rewrappedKey
@@ -629,7 +758,7 @@ final class VaultSessionManager {
             // fully locked instead of returning `false` with an activated memory store.
             updatedMetadata.updatedAt = .now
             do {
-                try vaultStore.save(metadata: updatedMetadata, envelope: envelope)
+                updatedMetadata = try writeVault(metadata: updatedMetadata, envelope: envelope)
             } catch {
                 let operationError = error
                 var recoveryFailures: [String] = []
@@ -708,7 +837,7 @@ final class VaultSessionManager {
         defer { finishExclusiveSecurityOperation(operation, clearsBiometricPrompt: true) }
 
         do {
-            let metadata = try vaultStore.loadMetadata()
+            let metadata = try vaultStore.loadMetadataFromStorage()
             guard metadata.version == 1 else { throw VaultCryptoError.unsupportedVaultVersion }
             guard metadata.biometricUnlockEnabled else {
                 lastErrorMessage = "Biometric unlock is not configured."
@@ -810,7 +939,9 @@ final class VaultSessionManager {
         restoredSnapshot.privateSidebarTagsOrder = settings.sidebarTagsOrder
         restoredSnapshot.privateSidebarEnvironmentsOrder = settings.sidebarEnvironmentsOrder
         let securedEnvelope = try cryptoService.encryptVault(restoredSnapshot, using: activeVaultKey)
-        try vaultStore.save(metadata: restoredMetadata, envelope: securedEnvelope)
+        // Deliberately replaces whatever is on disk — that is the whole point of a rollback — so
+        // the foreign-write check is skipped rather than blocking the way out of a bad import.
+        try writeVault(metadata: restoredMetadata, envelope: securedEnvelope, checkingForForeignWrite: false)
         try vaultStore.discardRollbackCopy()
         lastErrorMessage = biometricWarning
     }
@@ -878,6 +1009,8 @@ final class VaultSessionManager {
         }
         activeVaultKey = nil
         metadata = nil
+        loadedWriteCounter = 0
+        hasForeignChange = false
         let cleanupError: Error?
         do {
             try performResetCleanup(requiringCompleteKeychainCleanup: true)
@@ -1010,7 +1143,8 @@ final class VaultSessionManager {
                         currentSnapshotIncludingPrivateSettings(),
                         using: currentKey
                     )
-                    try vaultStore.save(metadata: previousMetadata, envelope: previousEnvelope)
+                    // A repair write putting back the state that was already there.
+                    try writeVault(metadata: previousMetadata, envelope: previousEnvelope, checkingForForeignWrite: false)
                 } catch {
                     recoveryFailures.append("encrypted vault: \(error.localizedDescription)")
                 }
@@ -1097,7 +1231,8 @@ final class VaultSessionManager {
                     currentSnapshotIncludingPrivateSettings(),
                     using: activeVaultKey
                 )
-                try vaultStore.save(metadata: previousMetadata, envelope: previousEnvelope)
+                // A repair write putting back the state that was already there.
+                try writeVault(metadata: previousMetadata, envelope: previousEnvelope, checkingForForeignWrite: false)
             } catch {
                 recoveryFailures.append("encrypted vault: \(error.localizedDescription)")
                 settings.biometricsEnabled = false
@@ -1138,6 +1273,10 @@ final class VaultSessionManager {
         }
         activeVaultKey = nil
         metadata = nil
+        // Forget which version was held. The next unlock adopts whatever is on disk then — without
+        // this, unlocking a vault a sync client had rolled back would look like a conflict.
+        loadedWriteCounter = 0
+        hasForeignChange = false
         memoryStore.clear()
         settings.securelyClearPrivateSidebarOrders()
         // The failed-attempt penalty is deliberately left alone: a successful unlock clears
@@ -1155,6 +1294,127 @@ final class VaultSessionManager {
         lastInteractionAt = .now
     }
 
+    /// Writes out anything this session still owes before the vault file is copied or moved.
+    func flushPendingWrites() {
+        memoryStore.flushPendingPersist()
+    }
+
+    /// Re-reads the situation after the store has been pointed at a different vault file.
+    ///
+    /// The biometric Keychain entry is dropped on purpose: it holds the key to the vault being
+    /// left behind, and offering Touch ID for a vault it cannot open produces a decryption failure
+    /// that looks like corruption. One password unlock re-establishes it.
+    func refreshAfterVaultFileChange() {
+        try? keyStore.deleteVaultKey()
+        loadedWriteCounter = 0
+        hasForeignChange = false
+        lastErrorMessage = nil
+        clearLockout()
+        lockState = vaultStore.hasVault() ? .locked : .setupRequired
+        refreshBiometricAvailability()
+    }
+
+    // MARK: - Writing, and who wrote last
+    //
+    // A vault in a synced folder can be open on two Macs at once. Neither of them can see the
+    // other, so the only thing that stops the second save from throwing away the first is a
+    // marker in the file itself. Every write this session performs goes through `writeVault`, so
+    // the counter can never be skipped — a skipped bump makes the *next* save look like somebody
+    // else's work and reports a conflict that never happened.
+
+    /// Stamps this install's marker on the metadata and writes it.
+    ///
+    /// The counter only ever goes up, including when adopting a file that came back from a sync
+    /// conflict with a lower one: a counter that can go backwards cannot be compared.
+    @discardableResult
+    private func writeVault(
+        metadata: VaultMetadata,
+        envelope: VaultEnvelope,
+        checkingForForeignWrite: Bool = true
+    ) throws -> VaultMetadata {
+        if checkingForForeignWrite {
+            try requireNoForeignWrite()
+        }
+        var stamped = metadata
+        stamped.writeCounter = max(loadedWriteCounter, onDiskWriteCounter ?? 0) + 1
+        stamped.lastWriterID = installIdentifier
+        try vaultStore.save(metadata: stamped, envelope: envelope)
+        loadedWriteCounter = stamped.writeCounter
+        hasForeignChange = false
+        return stamped
+    }
+
+    /// Puts the notice away without choosing. The conflict itself is unresolved, so the next save
+    /// raises it again — which is better than pretending it went away.
+    func dismissForeignChangeNotice() {
+        hasForeignChange = false
+    }
+
+    private var onDiskWriteCounter: Int? {
+        (try? vaultStore.loadMetadataFromStorage())?.writeCounter
+    }
+
+    /// Throws when the vault on disk is not the one this session read.
+    private func requireNoForeignWrite() throws {
+        // No file yet means this is the creating write, which cannot conflict with anything.
+        guard let onDisk = try? vaultStore.loadMetadataFromStorage() else { return }
+        guard onDisk.writeCounter != loadedWriteCounter else { return }
+        hasForeignChange = true
+        throw VaultCryptoError.vaultChangedElsewhere
+    }
+
+    /// Confirms the vault sitting on disk right now opens with the key this session holds.
+    ///
+    /// Used after copying a vault to a new folder, so nothing is deleted from the old one until
+    /// the copy has been proven to work.
+    func verifyOnDiskVaultReadable() throws {
+        guard let activeVaultKey else { throw VaultCryptoError.vaultLocked }
+        let metadata = try vaultStore.loadMetadataFromStorage()
+        guard metadata.version == 1 else { throw VaultCryptoError.unsupportedVaultVersion }
+        let envelope = try vaultStore.loadEnvelope()
+        _ = try cryptoService.decryptVault(envelope, using: activeVaultKey)
+    }
+
+    /// Takes what is on disk and discards what this session holds in memory.
+    ///
+    /// The way out of a conflict for somebody who would rather keep the other Mac's work. It does
+    /// not need the master password again, because the vault key is unchanged unless the password
+    /// itself was rotated elsewhere — and that case locks instead of guessing.
+    func reloadFromDisk() throws {
+        guard let activeVaultKey else { throw VaultCryptoError.vaultLocked }
+        let metadata = try vaultStore.loadMetadataFromStorage()
+        guard metadata.version == 1 else { throw VaultCryptoError.unsupportedVaultVersion }
+        let envelope = try vaultStore.loadEnvelope()
+
+        let snapshot: VaultSnapshot
+        do {
+            snapshot = try cryptoService.decryptVault(envelope, using: activeVaultKey)
+        } catch {
+            // Whatever is on disk was wrapped under a different password. Nothing this session
+            // holds can open it, so the honest outcome is to lock and let them unlock it.
+            memoryStore.discardPendingPersist()
+            lock()
+            throw VaultCryptoError.vaultChangedElsewhereAndRelocked
+        }
+
+        // The in-memory graph is about to be replaced; a queued write from it must not land.
+        memoryStore.discardPendingPersist()
+        hasForeignChange = false
+        loadedWriteCounter = metadata.writeCounter
+        let warning = activate(snapshot: snapshot, key: activeVaultKey, metadata: metadata)
+        lastErrorMessage = warning
+    }
+
+    /// Keeps this session's version and writes over the other one.
+    func overwriteForeignChange() throws {
+        guard activeVaultKey != nil else { throw VaultCryptoError.vaultLocked }
+        // Adopt whatever is on disk as the floor, so the write lands above it and the other Mac
+        // sees a conflict in turn rather than silently losing this one too.
+        loadedWriteCounter = max(loadedWriteCounter, onDiskWriteCounter ?? 0)
+        hasForeignChange = false
+        try saveCurrentVault()
+    }
+
     func saveCurrentVault(metadataOverride: VaultMetadata? = nil) throws {
         guard let activeVaultKey else { throw VaultCryptoError.vaultLocked }
         let metadata = metadataOverride ?? self.metadata
@@ -1162,7 +1422,7 @@ final class VaultSessionManager {
         metadata.updatedAt = .now
         let snapshot = currentSnapshotIncludingPrivateSettings()
         let envelope = try cryptoService.encryptVault(snapshot, using: activeVaultKey)
-        try vaultStore.save(metadata: metadata, envelope: envelope)
+        metadata = try writeVault(metadata: metadata, envelope: envelope)
         self.metadata = metadata
         // Early 1.2 builds wrote user-defined tag/environment labels to UserDefaults. Once
         // any encrypted save succeeds, the migrated values are durable and the plaintext
@@ -1188,6 +1448,10 @@ final class VaultSessionManager {
         )
         activeVaultKey = key
         self.metadata = metadata
+        // `max` rather than assignment: a creating or migrating write has already stamped a higher
+        // counter than the metadata this was called with, and the copy that came back from a sync
+        // conflict may carry a lower one. Either way the counter must not go backwards.
+        loadedWriteCounter = max(loadedWriteCounter, metadata.writeCounter)
         memoryStore.activate(snapshot: snapshot) { [weak self] in
             try self?.saveCurrentVault()
         }
@@ -1428,4 +1692,11 @@ final class ClipboardService {
         ownedChangeCount = nil
         lastCopiedDescription = ""
     }
+}
+
+
+private nonisolated extension String {
+    /// Nil for an empty string, so a blank recorded shortcut falls back to the default rather than
+    /// showing nothing.
+    var nilIfEmptyValue: String? { isEmpty ? nil : self }
 }

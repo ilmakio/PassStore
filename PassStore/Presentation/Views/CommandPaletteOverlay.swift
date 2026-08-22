@@ -470,6 +470,24 @@ extension VaultViewModel {
                     )
                 )
             }
+
+            // A one-time code is wanted at a very specific moment — the login form is already
+            // open and waiting — which is exactly when reaching for the palette beats navigating
+            // to the item.
+            if let code = oneTimeCodeField(for: item) {
+                let fieldID = code.id
+                dynamic.append(
+                    .init(
+                        id: "copy.onetimecode.\(id).\(code.key)",
+                        title: "Copy One-Time Code — \(item.title)",
+                        subtitle: subtitleParts.joined(separator: " · "),
+                        keywords: ["copy", "code", "otp", "totp", "2fa", "two-factor", "authenticator", item.title] + item.tags,
+                        isEnabled: true,
+                        priority: 25,
+                        perform: wrap { self.copyOneTimeCode(itemID: itemID, fieldID: fieldID) }
+                    )
+                )
+            }
         }
 
         return staticCommands + dynamic

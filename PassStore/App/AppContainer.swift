@@ -3,6 +3,8 @@ import Foundation
 @MainActor
 final class AppContainer {
     let settings: AppSettingsStore
+    let locationStore: VaultLocationStore
+    let relocation: VaultRelocationService
     let sessionManager: VaultSessionManager
     let clipboard: ClipboardService
     let envImport: EnvImportService
@@ -19,9 +21,14 @@ final class AppContainer {
         inMemory: Bool = false,
         defaults: UserDefaults = .standard,
         keyStore: VaultKeyStore? = nil,
-        encryptedVaultStore: EncryptedVaultStore? = nil
+        encryptedVaultStore: EncryptedVaultStore? = nil,
+        locationStore: VaultLocationStore? = nil
     ) {
         self.settings = AppSettingsStore(defaults: defaults)
+        // Resolved before the store is built: where the vault lives has to be known before
+        // anything tries to read it.
+        let locationStore = locationStore ?? VaultLocationStore(defaults: defaults)
+        self.locationStore = locationStore
         let cryptoService = VaultCryptoService(
             defaultIterations: inMemory ? 20_000 : 600_000,
             defaultOpsLimit: inMemory ? 1 : 3,
@@ -29,14 +36,24 @@ final class AppContainer {
         )
         self.memoryStore = VaultMemoryStore()
         let activeKeyStore = keyStore ?? (inMemory ? InMemoryVaultKeyStore() : KeychainVaultKeyStore())
-        let activeVaultStore = encryptedVaultStore ?? (inMemory ? InMemoryEncryptedVaultStore() : FileEncryptedVaultStore())
-        self.sessionManager = VaultSessionManager(
+        let activeVaultStore = encryptedVaultStore
+            ?? (inMemory
+                ? InMemoryEncryptedVaultStore()
+                : FileEncryptedVaultStore(baseDirectory: locationStore.activeDirectory))
+        let sessionManager = VaultSessionManager(
             defaults: defaults,
             settings: settings,
             cryptoService: cryptoService,
             vaultStore: activeVaultStore,
             keyStore: activeKeyStore,
-            memoryStore: memoryStore
+            memoryStore: memoryStore,
+            installIdentifier: locationStore.installIdentifier
+        )
+        self.sessionManager = sessionManager
+        self.relocation = VaultRelocationService(
+            locationStore: locationStore,
+            sessionManager: sessionManager,
+            vaultStore: activeVaultStore
         )
         self.clipboard = ClipboardService(settings: settings)
         self.envImport = EnvImportService()

@@ -519,7 +519,16 @@ struct VaultViewModelTests {
         viewModel.requestDeletion(of: item)
         #expect(viewModel.itemDeletionTitle.contains("Primary Postgres"))
         #expect(viewModel.itemDeletionConfirmLabel == "Delete")
-        // Postgres seed has a sensitive password field, so the warning should say so.
+        // Deleting is reversible now, so the dialog says where it goes rather than warning about
+        // losing anything.
+        #expect(viewModel.itemDeletionMessage.contains("Recently Deleted"))
+
+        // The warning about what is being destroyed belongs to the deletion that destroys. The
+        // Postgres seed has a sensitive password field, so emptying it from the trash should say so.
+        viewModel.confirmItemDeletion()
+        let trashed = try #require(viewModel.deletedItems.first { $0.title == "Primary Postgres" })
+        viewModel.requestDeletion(of: trashed)
+        #expect(viewModel.itemDeletionConfirmLabel == "Delete Forever")
         #expect(viewModel.itemDeletionMessage.contains("stored secret"))
     }
 

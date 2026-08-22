@@ -33,6 +33,11 @@ struct PassStoreApp: App {
                 GlobalCommandPaletteHotkey.shared.configure(viewModel: viewModel, settings: container.settings)
             }
         }
+        // A UI-test instance must not go Dock-less, and the delegate has no settings store of its
+        // own to read.
+        PassStoreAppDelegate.showsInMenuBarOnly = isUITesting
+            ? { false }
+            : { MainActor.assumeIsolated { container.settings.showsInMenuBarOnly } }
         PassStoreAppDelegate.terminationHandler = {
             MainActor.assumeIsolated { container.memoryStore.flushPendingPersist() }
         }

@@ -49,10 +49,31 @@ enum FieldKind: String, CaseIterable, Codable, Identifiable {
     case number
     case multiline
     case json
+    /// A time-based one-time code. The stored value is the shared secret — a base32 setup key
+    /// or the whole `otpauth://` URI — and never the six digits themselves.
+    case totp
 
     var id: String { rawValue }
 
-    var title: String { rawValue.capitalized }
+    /// Spelled out rather than derived from the raw value, which produced "Url", "Json" and
+    /// would have produced "Totp".
+    var title: String {
+        switch self {
+        case .text: "Text"
+        case .secret: "Secret"
+        case .url: "URL"
+        case .number: "Number"
+        case .multiline: "Multiline"
+        case .json: "JSON"
+        case .totp: "One-time code"
+        }
+    }
+
+    /// True for kinds whose stored value is a credential by definition, whatever the field is
+    /// called. Switching to one of these turns the sensitivity flags on.
+    var isInherentlySecret: Bool {
+        self == .secret || self == .totp
+    }
 }
 
 /// How a value was quoted in a `.env` file.
@@ -123,6 +144,8 @@ enum SecretItemChangeKind: String, Codable, CaseIterable {
     case typeChanged
     case environmentChanged
     case workspaceChanged
+    /// The expiry date was set, moved or cleared.
+    case expiryChanged
     case fieldAdded
     case fieldRemoved
     case fieldValueChanged
@@ -132,6 +155,10 @@ enum SecretItemChangeKind: String, Codable, CaseIterable {
     case favoriteDisabled
     case archived
     case restored
+    /// Moved to the trash, which is reversible.
+    case trashed
+    /// Taken back out of the trash.
+    case untrashed
 
     var title: String {
         switch self {
@@ -140,6 +167,7 @@ enum SecretItemChangeKind: String, Codable, CaseIterable {
         case .typeChanged: "Type changed"
         case .environmentChanged: "Environment changed"
         case .workspaceChanged: "Workspace changed"
+        case .expiryChanged: "Expiry changed"
         case .fieldAdded: "Field added"
         case .fieldRemoved: "Field removed"
         case .fieldValueChanged: "Value changed"
@@ -148,6 +176,8 @@ enum SecretItemChangeKind: String, Codable, CaseIterable {
         case .favoriteEnabled: "Added to favorites"
         case .favoriteDisabled: "Removed from favorites"
         case .archived: "Archived"
+        case .trashed: "Moved to Recently Deleted"
+        case .untrashed: "Recovered from Recently Deleted"
         case .restored: "Restored"
         }
     }
@@ -159,6 +189,7 @@ enum SecretItemChangeKind: String, Codable, CaseIterable {
         case .typeChanged: "square.on.square"
         case .environmentChanged: "circle.hexagongrid"
         case .workspaceChanged: "shippingbox"
+        case .expiryChanged: "calendar.badge.clock"
         case .fieldAdded: "plus.square"
         case .fieldRemoved: "minus.square"
         case .fieldValueChanged: "pencil.line"
@@ -167,6 +198,8 @@ enum SecretItemChangeKind: String, Codable, CaseIterable {
         case .favoriteEnabled: "star.fill"
         case .favoriteDisabled: "star.slash"
         case .archived: "archivebox"
+        case .trashed: "trash"
+        case .untrashed: "arrow.uturn.backward"
         case .restored: "tray.and.arrow.up"
         }
     }
@@ -305,6 +338,8 @@ enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
     case favorites
     case recent
     case archived
+    /// The trash. Kept for `SecretItemRepository.trashRetention` and then emptied on its own.
+    case recentlyDeleted
 
     var id: String { rawValue }
 
@@ -314,6 +349,7 @@ enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
         case .favorites: "Favorites"
         case .recent: "Recent"
         case .archived: "Archived"
+        case .recentlyDeleted: "Recently Deleted"
         }
     }
 
@@ -323,6 +359,7 @@ enum LibrarySection: String, CaseIterable, Hashable, Identifiable {
         case .favorites: "star"
         case .recent: "clock"
         case .archived: "archivebox"
+        case .recentlyDeleted: "trash"
         }
     }
 }
@@ -364,6 +401,10 @@ enum VaultSheet: Identifiable {
     case importPreview
     /// Full audit trail and previous values for one item.
     case itemHistory(UUID)
+    /// What was found in a developer tool's config file, before anything is created.
+    case developerCredentialImport
+    /// What a folder on disk holds in plaintext that the vault also holds.
+    case secretScan
     /// A whole workspace proposed from a folder the owner picked: its name, its environments and
     /// the `.env` files it will start with, all reviewable before anything is created.
     case newWorkspaceFromFolder
@@ -387,6 +428,8 @@ enum VaultSheet: Identifiable {
         case .bulkEdit: "bulk-edit"
         case .importPreview: "import-preview"
         case let .itemHistory(id): "item-history-\(id.uuidString)"
+        case .developerCredentialImport: "developer-credential-import"
+        case .secretScan: "secret-scan"
         case .newWorkspaceFromFolder: "new-workspace-from-folder"
         case let .envDiscovery(id): "env-discovery-\(id.uuidString)"
         case let .environmentMatrix(id): "environment-matrix-\(id.uuidString)"

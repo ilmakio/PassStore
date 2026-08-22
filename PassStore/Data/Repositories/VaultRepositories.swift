@@ -362,6 +362,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         item.tags = draft.tags
         item.isFavorite = draft.isFavorite
         item.isArchived = draft.isArchived
+        item.expiresAt = draft.expiresAt
         // Bumped only for changes the owner would call an edit. Starring an item or archiving
         // it used to move `updatedAt`, which pushed it to the top of "Recent" and reset the
         // staleness clock the health audit reads.
@@ -490,6 +491,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         if previous.workspaceID != draft.workspaceID { return true }
         if previous.templateID != draft.templateID { return true }
         if previous.tags != draft.tags { return true }
+        if previous.expiresAt != draft.expiresAt { return true }
         if previous.linkedFile != draft.linkedFile { return true }
 
         let incoming = Dictionary(
@@ -521,13 +523,39 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
                 .filter(\.isSensitive)
                 .map { "\($0.fieldKey)|\(Self.digest($0.plainValue))" }
         )
+        let expiryDigest = Self.digest(Self.expiryDigestSource(item.expiresAt))
         item.ignoredHealthIssues.removeAll { ignored in
-            // An item-level dismissal is measured against the item's own timeline, and this
-            // save just moved it — so the dismissal is out of date by definition.
-            guard ignored.kindRawValue != VaultHealthFinding.Kind.stale.rawValue else { return true }
-            return !liveDigests.contains("\(ignored.fieldKey)|\(ignored.valueDigest)")
+            switch VaultHealthFinding.Kind(rawValue: ignored.kindRawValue) {
+            case .stale:
+                // Measured against the item's own timeline, and this save just moved it — so the
+                // dismissal is out of date by definition.
+                return true
+            case .expired, .expiring:
+                // Pinned to the expiry date, so it survives an ordinary edit and dies the moment
+                // that date is moved.
+                return ignored.valueDigest != expiryDigest
+            case .weak, .reused:
+                return !liveDigests.contains("\(ignored.fieldKey)|\(ignored.valueDigest)")
+            case nil:
+                // A kind this version does not know about cannot be matched to a finding again.
+                return true
+            }
         }
     }
+
+    /// What an expiry dismissal is keyed to. Empty for an item with no expiry, so clearing the date
+    /// invalidates the dismissal too.
+    static func expiryDigestSource(_ date: Date?) -> String {
+        date.map { String($0.timeIntervalSince1970) } ?? ""
+    }
+
+    /// Dates in the audit trail read as dates, not as timestamps.
+    private static let expiryDetailFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 
     static func digest(_ value: String) -> String {
         Data(SHA256.hash(data: Data(value.utf8))).base64EncodedString()
@@ -546,6 +574,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         let templateID: UUID?
         let tags: [String]
         let linkedFile: LinkedFileReference?
+        let expiresAt: Date?
         let isFavorite: Bool
         let isArchived: Bool
         let fields: [String: FieldState]
@@ -569,6 +598,7 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             templateID = item.template?.id
             tags = item.tags
             linkedFile = item.linkedFile
+            expiresAt = item.expiresAt
             isFavorite = item.isFavorite
             isArchived = item.isArchived
             fields = Dictionary(
@@ -633,6 +663,16 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         }
         if previous.workspaceID != item.workspace?.id {
             entries.append(SecretItemChangeEntry(kind: .workspaceChanged, detail: item.workspace?.name))
+        }
+        if previous.expiresAt != item.expiresAt {
+            // A date is not a secret, so it is safe in the trail — and knowing when an expiry was
+            // moved is exactly the kind of thing an audit trail is for.
+            entries.append(
+                SecretItemChangeEntry(
+                    kind: .expiryChanged,
+                    detail: item.expiresAt.map(Self.expiryDetailFormatter.string(from:))
+                )
+            )
         }
         if previous.isFavorite != item.isFavorite {
             entries.append(SecretItemChangeEntry(kind: item.isFavorite ? .favoriteEnabled : .favoriteDisabled))
@@ -748,6 +788,8 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
             notes: item.notes,
             tags: item.tags,
             isFavorite: false,
+            // A copy of a credential expires when the original does; the copy is the same key.
+            expiresAt: item.expiresAt,
             fieldDrafts: resolved.enumerated().map { index, field in
                 FieldDraft(
                     key: field.key,
@@ -768,6 +810,76 @@ final class SecretItemRepository: SecretItemRepositoryProtocol {
         return try saveItem(duplicateDraft)
     }
 
+    /// How long the trash keeps something before emptying itself.
+    ///
+    /// Thirty days is long enough that "I deleted the wrong one" is recoverable after a holiday,
+    /// and short enough that a vault does not accumulate the secrets of former projects forever —
+    /// which for a password manager is a liability, not a convenience.
+    static let trashRetention: TimeInterval = 30 * 24 * 3_600
+
+    /// The same window, for interface copy that has to say it in words.
+    static var trashRetentionDays: Int { Int(trashRetention / (24 * 3_600)) }
+
+    /// Moves an item to the trash. Reversible until the retention window closes.
+    func trashItem(_ item: SecretItemEntity) throws {
+        try store.performTransaction {
+            try trashItemMutation(item)
+        }
+    }
+
+    private func trashItemMutation(_ item: SecretItemEntity) throws {
+        try store.requireUnlocked()
+        guard let storedItem = store.items.first(where: { $0.id == item.id }), !storedItem.isDeleted else { return }
+        storedItem.deletedAt = .now
+        // Its favourite star and its place in a workspace are kept: recovering it should put it
+        // back where it was, not somewhere tidier.
+        storedItem.changeHistory = Array(
+            ([SecretItemChangeEntry(kind: .trashed)] + storedItem.changeHistory).prefix(Self.historyLimit)
+        )
+        rebuildWorkspaceItems()
+        try store.persist()
+    }
+
+    /// Takes an item back out of the trash, exactly where it was.
+    func restoreItemFromTrash(_ item: SecretItemEntity) throws {
+        try store.performTransaction {
+            try restoreItemFromTrashMutation(item)
+        }
+    }
+
+    private func restoreItemFromTrashMutation(_ item: SecretItemEntity) throws {
+        try store.requireUnlocked()
+        guard let storedItem = store.items.first(where: { $0.id == item.id }), storedItem.isDeleted else { return }
+        storedItem.deletedAt = nil
+        storedItem.changeHistory = Array(
+            ([SecretItemChangeEntry(kind: .untrashed)] + storedItem.changeHistory).prefix(Self.historyLimit)
+        )
+        rebuildWorkspaceItems()
+        try store.persist()
+    }
+
+    /// Empties whatever has been in the trash longer than the retention window.
+    ///
+    /// Called on unlock rather than on a timer: nothing in this app runs in the background, and a
+    /// vault that is not open is not accumulating anything.
+    @discardableResult
+    func purgeExpiredTrash(now: Date = Date()) throws -> Int {
+        try store.requireUnlocked()
+        let cutoff = now.addingTimeInterval(-Self.trashRetention)
+        let doomed = store.items.filter { item in
+            guard let deletedAt = item.deletedAt else { return false }
+            return deletedAt <= cutoff
+        }
+        guard !doomed.isEmpty else { return 0 }
+        try store.performTransaction {
+            for item in doomed {
+                try deleteItemMutation(item)
+            }
+        }
+        return doomed.count
+    }
+
+    /// Destroys an item outright, wiping its values. No way back from here.
     func deleteItem(_ item: SecretItemEntity) throws {
         try store.performTransaction {
             try deleteItemMutation(item)

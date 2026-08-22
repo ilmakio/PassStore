@@ -159,23 +159,29 @@ nonisolated enum PasswordStrength: Equatable, CaseIterable, Sendable {
         guard !password.isEmpty else { return .empty }
         guard password.count >= 8 else { return .tooShort }
 
-        // Length and character classes alone were far too generous: "password1234" is twelve
-        // characters with two classes, which used to score Fair — good enough that the vault
-        // health audit stayed quiet about it. Obvious structure is now checked first.
+        // Structure first. No amount of arithmetic about alphabets can see that "Password123!" is
+        // one word with the obvious decorations, and it is twelve characters of four classes —
+        // which the old length-and-classes ladder scored as respectable.
         if isObviouslyGuessable(password) { return .weak }
 
-        let hasUpper = password.contains(where: \.isUppercase)
-        let hasLower = password.contains(where: \.isLowercase)
-        let hasDigit = password.contains(where: \.isNumber)
-        let hasSymbol = password.contains(where: { !$0.isLetter && !$0.isNumber })
-        let classes = [hasUpper, hasLower, hasDigit, hasSymbol].filter(\.self).count
-
-        if password.count >= 20, classes >= 4 { return .veryStrong }
-        if password.count >= 16, classes >= 3 { return .strong }
-        if password.count >= 12, classes >= 2 { return .fair }
-        if classes >= 3 { return .fair }
+        // Then bits, rather than classes. Counting classes rewards adding one symbol to a short
+        // secret as much as doubling its length, which is backwards.
+        let bits = SecretEntropy.bits(of: password)
+        if bits >= Self.veryStrongBits { return .veryStrong }
+        if bits >= Self.strongBits { return .strong }
+        if bits >= Self.fairBits { return .fair }
         return .weak
     }
+
+    /// Where the labels change.
+    ///
+    /// 45 bits is where an offline attack stops being trivial and starts being an expense; 65 is
+    /// past what a well-funded attacker gets through casually; 90 is not being brute-forced by
+    /// anybody. They are round numbers on purpose — the estimate underneath is not precise enough
+    /// to justify pretending otherwise.
+    static let fairBits: Double = 45
+    static let strongBits: Double = 65
+    static let veryStrongBits: Double = 90
 
     /// Cheap local checks for the shapes that make a long password worthless.
     ///
@@ -285,10 +291,13 @@ extension FieldDraft {
     /// Deliberately one-way. Switching back to Text leaves the flags alone rather than quietly
     /// un-protecting a value that may already be stored and shoulder-surfable; they are two
     /// checkboxes away in the same menu for anyone who really meant it.
+    ///
+    /// One-time codes are covered by the same rule: the value behind a TOTP field is the shared
+    /// seed, which is a credential whatever the field happens to be called.
     mutating func applyKind(_ newKind: FieldKind) {
         guard kind != newKind else { return }
         kind = newKind
-        guard newKind == .secret else { return }
+        guard newKind.isInherentlySecret else { return }
         isSensitive = true
         isMasked = true
     }
