@@ -18,6 +18,14 @@ enum VaultCryptoError: LocalizedError, Equatable {
     case securityOperationInProgress
     case unsupportedVaultVersion
     case vaultContentsTooLarge
+    /// The vault on disk was written by something else since this session opened it — the case a
+    /// synced folder creates when the same vault is open on two Macs.
+    case vaultChangedElsewhere
+    /// Same, and the copy on disk can no longer be opened with the key this session holds, which
+    /// means the master password was changed wherever it was written.
+    case vaultChangedElsewhereAndRelocked
+    case vaultAlreadyPresentInFolder
+    case noVaultInFolder
 
     var errorDescription: String? {
         switch self {
@@ -47,6 +55,14 @@ enum VaultCryptoError: LocalizedError, Equatable {
             "This vault was created by a newer PassStore version. Update PassStore before opening it."
         case .vaultContentsTooLarge:
             "The vault contains more data than PassStore can load safely."
+        case .vaultChangedElsewhere:
+            "This vault was changed somewhere else since you unlocked it. Saving now would discard those changes."
+        case .vaultChangedElsewhereAndRelocked:
+            "This vault was changed somewhere else, and its master password no longer matches the one you unlocked with. PassStore has locked so you can open the current version."
+        case .vaultAlreadyPresentInFolder:
+            "That folder already holds a PassStore vault. Use “Open Vault in Another Folder” to open it instead of moving this one on top of it."
+        case .noVaultInFolder:
+            "That folder does not hold a PassStore vault."
         }
     }
 }
@@ -632,6 +648,8 @@ final class VaultMemoryStore {
                 createdAt: item.createdAt,
                 updatedAt: item.updatedAt,
                 lastAccessedAt: item.lastAccessedAt,
+                expiresAt: item.expiresAt,
+                deletedAt: item.deletedAt,
                 workspaceID: item.workspace?.id,
                 templateID: item.template?.id,
                 fields: item.fields.map {
@@ -801,6 +819,8 @@ final class VaultMemoryStore {
                 createdAt: itemSnapshot.createdAt,
                 updatedAt: itemSnapshot.updatedAt,
                 lastAccessedAt: itemSnapshot.lastAccessedAt,
+                expiresAt: itemSnapshot.expiresAt,
+                deletedAt: itemSnapshot.deletedAt,
                 workspace: itemSnapshot.workspaceID.flatMap { workspaceMap[$0] },
                 template: itemSnapshot.templateID.flatMap { templatesByID[$0] },
                 changeHistory: Self.uniqueChangeHistory(
@@ -994,13 +1014,18 @@ final class VaultMemoryStore {
     }
 }
 
-final class FileEncryptedVaultStore: EncryptedVaultStore {
+final class FileEncryptedVaultStore: EncryptedVaultStore, RelocatableVaultStore {
     private static let maximumVaultFileSize = 256 * 1_024 * 1_024
-    private let directoryURL: URL
-    private let envelopeURL: URL
-    private let metadataURL: URL
-    private let primaryPackageURL: URL
+    /// Not `let`: the owner can move the vault to a folder of their choosing, and the live store
+    /// has to follow it without the app being relaunched.
+    private var directoryURL: URL
     private var cachedPrimaryPackage: PrimaryPackage?
+
+    /// Derived rather than stored, so moving the vault is one assignment and cannot leave one
+    /// path pointing at the old folder.
+    private var envelopeURL: URL { directoryURL.appendingPathComponent("vault.enc", isDirectory: false) }
+    private var metadataURL: URL { directoryURL.appendingPathComponent("vault.meta", isDirectory: false) }
+    private var primaryPackageURL: URL { directoryURL.appendingPathComponent("vault.package", isDirectory: false) }
 
     private struct PrimaryPackage: Codable {
         let metadata: VaultMetadata
@@ -1008,13 +1033,79 @@ final class FileEncryptedVaultStore: EncryptedVaultStore {
     }
 
     init(fileManager: FileManager = .default, baseDirectory: URL? = nil, bundleIdentifier: String = Bundle.main.bundleIdentifier ?? "app.makio.PassStore") {
-        let rootDirectory = baseDirectory
+        self.directoryURL = baseDirectory
             ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
                 .appendingPathComponent(bundleIdentifier, isDirectory: true)
-        self.directoryURL = rootDirectory
-        self.envelopeURL = rootDirectory.appendingPathComponent("vault.enc", isDirectory: false)
-        self.metadataURL = rootDirectory.appendingPathComponent("vault.meta", isDirectory: false)
-        self.primaryPackageURL = rootDirectory.appendingPathComponent("vault.package", isDirectory: false)
+    }
+
+    // MARK: - Relocation
+
+    var currentDirectory: URL { directoryURL }
+
+    /// Every file that makes up a vault, in the order they should be copied. The package is
+    /// authoritative; the rest are the downgrade mirror and the rollback copy, which are worth
+    /// bringing along but not worth failing a move over.
+    private var artifactNames: [(name: String, isRequired: Bool)] {
+        [
+            ("vault.package", true),
+            ("vault.meta", false),
+            ("vault.enc", false),
+            ("vault.rollback", false),
+            ("vault.meta.rollback", false),
+            ("vault.enc.rollback", false)
+        ]
+    }
+
+    /// Copies the vault into `destination` without touching what is already here.
+    ///
+    /// Deliberately a copy and not a move: the original stays put until the caller has opened the
+    /// copy and satisfied itself that it works. Losing a vault to a half-finished move is not a
+    /// recoverable mistake.
+    @discardableResult
+    func copyArtifacts(to destination: URL) throws -> [URL] {
+        let fm = FileManager.default
+        try fm.createDirectory(
+            at: destination,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destination.path)
+
+        var written: [URL] = []
+        do {
+            for artifact in artifactNames {
+                let source = directoryURL.appendingPathComponent(artifact.name, isDirectory: false)
+                guard fm.fileExists(atPath: source.path) else {
+                    if artifact.isRequired { throw VaultCryptoError.metadataMissing }
+                    continue
+                }
+                let target = destination.appendingPathComponent(artifact.name, isDirectory: false)
+                if fm.fileExists(atPath: target.path) {
+                    try fm.removeItem(at: target)
+                }
+                try fm.copyItem(at: source, to: target)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+                written.append(target)
+            }
+        } catch {
+            // Leave nothing half-written behind in somebody's Dropbox folder.
+            for url in written { try? fm.removeItem(at: url) }
+            throw error
+        }
+        return written
+    }
+
+    /// Removes the vault files from the folder the store is currently pointing at.
+    func removeArtifactsFromCurrentDirectory() throws {
+        let urls = artifactNames.map { directoryURL.appendingPathComponent($0.name, isDirectory: false) }
+        cachedPrimaryPackage = nil
+        try removeExistingFiles(urls)
+    }
+
+    /// Points the store at another folder. The cache is dropped because it describes the old one.
+    func relocate(to destination: URL) {
+        directoryURL = destination
+        cachedPrimaryPackage = nil
     }
 
     func hasVault() -> Bool {
@@ -1029,6 +1120,12 @@ final class FileEncryptedVaultStore: EncryptedVaultStore {
         }
         let data = try readBoundedData(from: metadataURL)
         return try JSONDecoder.vaultDecoder.decode(VaultMetadata.self, from: data)
+    }
+
+    /// Re-reads the package from disk, discarding the cached copy first.
+    func loadMetadataFromStorage() throws -> VaultMetadata {
+        cachedPrimaryPackage = nil
+        return try loadMetadata()
     }
 
     func loadEnvelope() throws -> VaultEnvelope {

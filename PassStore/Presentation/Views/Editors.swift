@@ -559,6 +559,8 @@ private struct ItemEditorContent: View {
                     .frame(height: 1)
                     .padding(.vertical, VaultSpacing.xs)
 
+                expirySection
+
                 extrasSection
             }
             .padding(VaultSpacing.xl)
@@ -875,6 +877,55 @@ private struct ItemEditorContent: View {
     ///
     /// They were two cards of their own, which gave two optional afterthoughts the same weight
     /// as the fields.
+    /// When this credential stops working, if its owner knows.
+    ///
+    /// Off by default and one toggle away, because most secrets have no expiry and a date picker
+    /// demanding a value for all of them would be answered with a lie.
+    private var expirySection: some View {
+        VaultSection("Expiry", systemImage: "calendar.badge.clock", tint: accent) {
+            Toggle("This secret expires", isOn: expiryEnabled)
+                .toggleStyle(.checkbox)
+                .accessibilityIdentifier("editor-expiry-toggle")
+
+            if let expiry = draft.expiresAt {
+                DatePicker(
+                    "Expires on",
+                    selection: Binding(
+                        get: { expiry },
+                        set: { draft.expiresAt = Calendar.current.startOfDay(for: $0) }
+                    ),
+                    displayedComponents: .date
+                )
+                .datePickerStyle(.field)
+                .accessibilityIdentifier("editor-expiry-date")
+
+                VaultNote(
+                    text: expiry <= Date()
+                        ? "This date has passed. Vault Health lists it as expired."
+                        : "Vault Health starts reminding you a month before this date."
+                )
+            } else {
+                VaultNote(text: "Useful for the things that stop working on a date somebody else chose: API keys with a lifetime, certificates, access tokens, rotation deadlines.")
+            }
+        }
+    }
+
+    /// Turning it on proposes a date rather than an empty picker; turning it off forgets it.
+    private var expiryEnabled: Binding<Bool> {
+        Binding(
+            get: { draft.expiresAt != nil },
+            set: { isOn in
+                guard isOn else {
+                    draft.expiresAt = nil
+                    return
+                }
+                guard draft.expiresAt == nil else { return }
+                let proposed = Calendar.current.date(byAdding: .day, value: 90, to: Date()) ?? Date()
+                draft.expiresAt = Calendar.current.startOfDay(for: proposed)
+            }
+        )
+    }
+
     private var extrasSection: some View {
         VaultSection("Tags and Notes", systemImage: "tag", tint: accent) {
             VaultField("Tags") {
@@ -2137,6 +2188,53 @@ private struct DataSettingsPane: View {
                     }
                 }
 
+                VaultSection("Where the vault is kept", systemImage: "externaldrive") {
+                    VaultNote(
+                        text: "PassStore keeps one encrypted file. Put it in a folder something else already syncs — iCloud Drive, Dropbox, a repository — and the same vault opens on your other Macs. PassStore still syncs nothing itself."
+                    )
+
+                    LabeledContent("Folder") {
+                        Text(viewModel.vaultLocationPath)
+                            .font(.vaultValueSmall)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .accessibilityIdentifier("settings-vault-location-path")
+                    }
+
+                    if let problem = viewModel.vaultLocationProblemMessage {
+                        VaultNote(text: problem, tone: .warning)
+                    }
+
+                    VaultNote(
+                        text: "Open on two Macs at once and each will keep its own changes until it saves. Whichever saves second is told the vault moved underneath it and gets to choose — nothing is merged behind your back, and nothing is thrown away without you saying so.",
+                        tone: .warning
+                    )
+
+                    HStack(spacing: VaultSpacing.s) {
+                        Button("Move Vault to Folder…") { viewModel.moveVaultToChosenFolder() }
+                            .buttonStyle(VaultButtonStyle(.secondary))
+                            .controlSize(.small)
+                            .disabled(!viewModel.canRelocateVault)
+                            .accessibilityIdentifier("settings-move-vault")
+
+                        Button("Open Vault in Another Folder…") { viewModel.openVaultInChosenFolder() }
+                            .buttonStyle(VaultButtonStyle(.secondary))
+                            .controlSize(.small)
+                            .disabled(!viewModel.canRelocateVault)
+                            .accessibilityIdentifier("settings-open-vault-elsewhere")
+
+                        Spacer(minLength: 0)
+                    }
+
+                    if viewModel.isVaultInCustomLocation {
+                        Button("Move Back to Default Location") { viewModel.moveVaultBackToDefaultLocation() }
+                            .buttonStyle(.vaultLink)
+                            .accessibilityIdentifier("settings-vault-default-location")
+                    }
+                }
+
                 VaultSection("Linked files", systemImage: "link") {
                     Toggle("Check linked files when PassStore comes to the front", isOn: $settings.checksLinkedFilesOnFocus)
                         .toggleStyle(.checkbox)
@@ -2235,6 +2333,26 @@ private struct GeneralSettingsPane: View {
     @Bindable var viewModel: VaultViewModel
 
     @State private var isShortcutUnavailable = false
+    /// Set when the system refused to register or unregister the login item, so the reason is shown
+    /// rather than the toggle silently springing back.
+    @State private var loginItemFailure: String?
+
+    /// Reads the system's answer rather than the stored preference: the owner can revoke a login
+    /// item in System Settings, and the toggle has to follow that.
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { LoginItemService.status.isOn },
+            set: { isOn in
+                loginItemFailure = nil
+                do {
+                    try LoginItemService.setEnabled(isOn)
+                    settings.launchesAtLogin = isOn
+                } catch {
+                    loginItemFailure = error.localizedDescription
+                }
+            }
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -2289,8 +2407,30 @@ private struct GeneralSettingsPane: View {
                     VaultNote(text: "Other apps and clipboard managers can read the system clipboard until PassStore clears it. A shorter interval narrows that window — it does not make the clipboard private while the secret is on it.")
                 }
 
+                VaultSection("Opening PassStore", systemImage: "power") {
+                    Toggle("Open at login", isOn: launchAtLoginBinding)
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("settings-launch-at-login")
+
+                    if let explanation = LoginItemService.explanation {
+                        VaultNote(text: explanation, tone: .warning)
+                    }
+
+                    if let failure = loginItemFailure {
+                        VaultNote(text: failure, tone: .warning)
+                    }
+
+                    Divider()
+
+                    Toggle("Menu bar only, no Dock icon", isOn: $settings.showsInMenuBarOnly)
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("settings-menu-bar-only")
+
+                    VaultNote(text: "With the window closed, PassStore leaves the Dock and ⌘-Tab and stays reachable from its menu bar item and its shortcut. Opening the window puts it back, so the menus are always there when there is a window to use them on.")
+                }
+
                 VaultSection("Shortcuts", systemImage: "command") {
-                    Toggle("Global command palette (⌘⌥P)", isOn: $settings.globalCommandPaletteHotkeyEnabled)
+                    Toggle("Global command palette", isOn: $settings.globalCommandPaletteHotkeyEnabled)
                         .toggleStyle(.checkbox)
                         .accessibilityIdentifier("settings-global-command-palette-hotkey")
 
@@ -2302,9 +2442,15 @@ private struct GeneralSettingsPane: View {
                         systemImage: "lock.shield"
                     )
 
+                    if settings.globalCommandPaletteHotkeyEnabled {
+                        Divider()
+
+                        HotkeyRecorderField(settings: settings)
+                    }
+
                     if settings.globalCommandPaletteHotkeyEnabled, isShortcutUnavailable {
                         VaultNote(
-                            text: "⌘⌥P could not be registered — another app is already using it. Quit that app or turn this off.",
+                            text: "\(settings.globalHotkeyDisplay) could not be registered — another app is already using it. Choose a different one, or quit that app.",
                             tone: .warning
                         )
                     }
@@ -2555,8 +2701,9 @@ struct VaultHealthSheet: View {
 
     private func tint(for kind: VaultHealthFinding.Kind) -> Color {
         switch kind {
-        case .reused: .red
-        case .weak: .orange
+        // An expired credential has already stopped working, so it reads as loudly as reuse.
+        case .reused, .expired: .red
+        case .weak, .expiring: .orange
         case .stale: .vaultAccentStrong
         }
     }
@@ -2748,108 +2895,112 @@ struct BulkEditSheet: View {
 
 // MARK: - Password generator
 
-/// Reusable generator panel. `onUse` is nil when opened standalone (command palette), in which
-/// case only copying makes sense.
+/// Makes a secret, of whichever kind is wanted.
+///
+/// Built on the same scaffold as every other sheet — header band, inset sections, one footer with
+/// the buttons — because it used to be a bare stack with its own padding and its own idea of where
+/// a Done button goes, and it showed.
 struct PasswordGeneratorPanel: View {
     var onUse: ((String) -> Void)?
     var onDismiss: () -> Void
     var onCopy: (String) -> Void
 
+    @State private var recipe: SecretRecipe = .password
     @State private var options = PasswordGeneratorOptions()
+    @State private var passphraseOptions = PassphraseOptions()
+    @State private var tokenOptions = RandomTokenOptions()
     @State private var password = ""
     @State private var didCopy = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VaultSection("Generated password", systemImage: "wand.and.sparkles") {
-                generatedValue
+        VaultSheetScaffold(
+            title: "Generate a Secret",
+            subtitle: recipe.explanation,
+            systemImage: "wand.and.sparkles"
+        ) {
+            Spacer(minLength: 0)
 
-                HStack(spacing: 10) {
-                    Button {
-                        regenerate()
-                    } label: {
-                        Label("Regenerate", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .buttonStyle(VaultButtonStyle(.secondary))
-                    .controlSize(.small)
-                    .accessibilityIdentifier("generator-regenerate")
+            Button(onUse == nil ? "Done" : "Cancel") { onDismiss() }
+                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: onUse == nil))
 
-                    Button {
-                        onCopy(password)
-                        didCopy = true
-                    } label: {
-                        Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
-                    }
-                    .buttonStyle(VaultButtonStyle(.secondary))
-                    .controlSize(.small)
-                    .disabled(password.isEmpty)
-                    .accessibilityIdentifier("generator-copy")
-
-                    Spacer(minLength: 0)
+            if let onUse {
+                Button("Use \(recipe.title)") {
+                    onUse(password)
+                    onDismiss()
                 }
-
-                PasswordStrengthBar(password: password)
+                .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
+                .disabled(password.isEmpty)
+                .accessibilityIdentifier("generator-use")
             }
-
-            VaultSection("Options", systemImage: "slider.horizontal.3") {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("Length")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(options.length)")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { Double(options.length) },
-                            set: { options.length = Int($0.rounded()) }
-                        ),
-                        in: Double(PasswordGenerator.minimumLength)...Double(PasswordGenerator.maximumLength),
-                        step: 1
-                    )
-                    .accessibilityIdentifier("generator-length")
-                    .accessibilityValue("\(options.length) characters")
-                }
-
-                Toggle("Lowercase (a–z)", isOn: $options.includeLowercase).toggleStyle(.checkbox)
-                Toggle("Uppercase (A–Z)", isOn: $options.includeUppercase).toggleStyle(.checkbox)
-                Toggle("Digits (0–9)", isOn: $options.includeDigits).toggleStyle(.checkbox)
-                Toggle("Symbols (!@#…)", isOn: $options.includeSymbols).toggleStyle(.checkbox)
-                Toggle("Avoid look-alike characters", isOn: $options.excludeAmbiguous)
-                    .toggleStyle(.checkbox)
-                    .help("Leaves out 0/O, 1/l/I and similar pairs for secrets you may have to read aloud or retype.")
-
-                if !options.hasUsableCharacterSet {
-                    Text("Turn on at least one character set. Lowercase is used until you do.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
-                }
-            }
-
-            HStack(spacing: 12) {
-                Button(onUse == nil ? "Done" : "Cancel") { onDismiss() }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: onUse == nil))
-                if let onUse {
-                    Button("Use Password") {
-                        onUse(password)
-                        onDismiss()
-                    }
-                    .buttonStyle(SheetCapsuleButtonStyle(isPrimary: true))
-                    .disabled(password.isEmpty)
-                    .accessibilityIdentifier("generator-use")
-                }
-            }
-            .frame(maxWidth: .infinity)
+        } content: {
+            kindSection
+            resultSection
+            optionsSection
         }
-        .padding(20)
-        .frame(width: 440)
+        .frame(width: 520, height: 620)
         .onAppear { if password.isEmpty { regenerate() } }
+        .onChange(of: recipe) { _, _ in regenerate() }
         .onChange(of: options) { _, _ in regenerate() }
+        .onChange(of: passphraseOptions) { _, _ in regenerate() }
+        .onChange(of: tokenOptions) { _, _ in regenerate() }
+    }
+
+    // MARK: - Kind
+
+    private var kindSection: some View {
+        VaultSection("What to generate", systemImage: "square.grid.2x2") {
+            Picker("", selection: $recipe) {
+                ForEach(SecretRecipe.allCases) { recipe in
+                    Text(recipe.shortTitle).tag(recipe)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("generator-recipe")
+        }
+    }
+
+    // MARK: - Result
+
+    private var resultSection: some View {
+        VaultSection("Result", systemImage: "text.cursor") {
+            generatedValue
+
+            HStack(spacing: VaultSpacing.s) {
+                Button {
+                    regenerate()
+                } label: {
+                    Label("Regenerate", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .controlSize(.small)
+                .accessibilityIdentifier("generator-regenerate")
+
+                Button {
+                    onCopy(password)
+                    didCopy = true
+                } label: {
+                    Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(VaultButtonStyle(.secondary))
+                .controlSize(.small)
+                .disabled(password.isEmpty)
+                .accessibilityIdentifier("generator-copy")
+
+                Spacer(minLength: 0)
+            }
+
+            Divider()
+
+            // A password is judged by the estimator, like any stored secret. Everything else here
+            // has a draw the generator performed itself, so it states the number rather than
+            // inferring a verdict from the result.
+            if recipe == .password {
+                PasswordStrengthBar(password: password)
+            } else {
+                statedStrength
+            }
+        }
     }
 
     private var generatedValue: some View {
@@ -2859,24 +3010,177 @@ struct PasswordGeneratorPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(10)
+            .padding(VaultSpacing.m)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.6))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                            .strokeBorder(VaultChrome.hairline, lineWidth: 0.5)
                     )
             )
             .accessibilityIdentifier("generator-value")
     }
 
+    private var statedStrength: some View {
+        Label(
+            "About \(Int(statedEntropyBits.rounded())) bits of randomness",
+            systemImage: "dice"
+        )
+        .font(.vaultFootnote)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("generator-entropy")
+    }
+
+    private var statedEntropyBits: Double {
+        switch recipe {
+        case .password: SecretEntropy.bits(of: password)
+        case .passphrase: PassphraseGenerator.entropyBits(passphraseOptions)
+        case .hex, .base64, .base64URL: RandomTokenGenerator.entropyBits(byteCount: tokenOptions.byteCount)
+        case .uuid: RandomTokenGenerator.uuidEntropyBits
+        }
+    }
+
+    // MARK: - Options
+
+    @ViewBuilder
+    private var optionsSection: some View {
+        VaultSection("Options", systemImage: "slider.horizontal.3") {
+            switch recipe {
+            case .password:
+                passwordOptions
+            case .passphrase:
+                passphraseControls
+            case .hex, .base64, .base64URL:
+                byteCountControl
+            case .uuid:
+                VaultNote(text: "A version 4 UUID has no options. 122 of its 128 bits are random; the rest state the version.")
+            }
+        }
+    }
+
+    private var passwordOptions: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            stepperRow(
+                title: "Length",
+                value: Binding(
+                    get: { Double(options.length) },
+                    set: { options.length = Int($0.rounded()) }
+                ),
+                range: Double(PasswordGenerator.minimumLength)...Double(PasswordGenerator.maximumLength),
+                display: "\(options.length)",
+                accessibilityIdentifier: "generator-length",
+                accessibilityValue: "\(options.length) characters"
+            )
+
+            Divider()
+
+            Toggle("Lowercase (a–z)", isOn: $options.includeLowercase).toggleStyle(.checkbox)
+            Toggle("Uppercase (A–Z)", isOn: $options.includeUppercase).toggleStyle(.checkbox)
+            Toggle("Digits (0–9)", isOn: $options.includeDigits).toggleStyle(.checkbox)
+            Toggle("Symbols (!@#…)", isOn: $options.includeSymbols).toggleStyle(.checkbox)
+            Toggle("Avoid look-alike characters", isOn: $options.excludeAmbiguous)
+                .toggleStyle(.checkbox)
+                .help("Leaves out 0/O, 1/l/I and similar pairs for secrets you may have to read aloud or retype.")
+
+            if !options.hasUsableCharacterSet {
+                VaultNote(
+                    text: "Turn on at least one character set. Lowercase is used until you do.",
+                    tone: .warning
+                )
+            }
+        }
+    }
+
+    private var passphraseControls: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            stepperRow(
+                title: "Words",
+                value: Binding(
+                    get: { Double(passphraseOptions.wordCount) },
+                    set: { passphraseOptions.wordCount = Int($0.rounded()) }
+                ),
+                range: Double(PassphraseOptions.wordCountRange.lowerBound)...Double(PassphraseOptions.wordCountRange.upperBound),
+                display: "\(passphraseOptions.wordCount)",
+                accessibilityIdentifier: "generator-word-count",
+                accessibilityValue: "\(passphraseOptions.wordCount) words"
+            )
+
+            Divider()
+
+            Picker("Separator", selection: $passphraseOptions.separator) {
+                ForEach(PassphraseSeparator.allCases) { separator in
+                    Text(separator.title).tag(separator)
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("generator-separator")
+
+            Toggle("Capitalise each word", isOn: $passphraseOptions.capitalizesWords).toggleStyle(.checkbox)
+            Toggle("Add a number at the end", isOn: $passphraseOptions.appendsNumber)
+                .toggleStyle(.checkbox)
+                .help("For the sites that insist on a digit. It adds about six bits, not security.")
+
+            VaultNote(text: "Drawn from \(PassphraseGenerator.wordListSize) words, independently and uniformly.")
+        }
+    }
+
+    private var byteCountControl: some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.s) {
+            stepperRow(
+                title: "Bytes of randomness",
+                value: Binding(
+                    get: { Double(tokenOptions.byteCount) },
+                    set: { tokenOptions.byteCount = Int($0.rounded()) }
+                ),
+                range: Double(RandomTokenOptions.byteCountRange.lowerBound)...Double(RandomTokenOptions.byteCountRange.upperBound),
+                display: "\(tokenOptions.byteCount)",
+                accessibilityIdentifier: "generator-byte-count",
+                accessibilityValue: "\(tokenOptions.byteCount) bytes"
+            )
+
+            VaultNote(text: "32 bytes is the usual answer for a signing key or a session secret.")
+        }
+    }
+
+    /// One labelled slider, so the three of them cannot drift apart.
+    private func stepperRow(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        display: String,
+        accessibilityIdentifier: String,
+        accessibilityValue: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: VaultSpacing.xs) {
+            HStack {
+                Text(title)
+                    .font(.vaultFieldLabel)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: VaultSpacing.s)
+                Text(display)
+                    .font(.vaultValueSmall)
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range, step: 1)
+                .accessibilityIdentifier(accessibilityIdentifier)
+                .accessibilityValue(accessibilityValue)
+        }
+    }
+
     private func regenerate() {
-        password = PasswordGenerator.generate(options: options)
+        password = switch recipe {
+        case .password: PasswordGenerator.generate(options: options)
+        case .passphrase: PassphraseGenerator.generate(passphraseOptions)
+        case .hex: RandomTokenGenerator.hex(byteCount: tokenOptions.byteCount)
+        case .base64: RandomTokenGenerator.base64(byteCount: tokenOptions.byteCount, urlSafe: false)
+        case .base64URL: RandomTokenGenerator.base64(byteCount: tokenOptions.byteCount, urlSafe: true)
+        case .uuid: RandomTokenGenerator.uuid()
+        }
         didCopy = false
     }
 }
-
 struct PasswordGeneratorSheet: View {
     @Environment(\.dismiss) private var dismiss
     let viewModel: VaultViewModel
@@ -4159,6 +4463,10 @@ private struct SimpleFieldEditor: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             switch field.kind {
+            case .totp:
+                // Its own control rather than a text box: a setup key is unreadable, and the only
+                // way to know it was pasted correctly is to watch it produce a code.
+                OneTimeCodeFieldEditor(value: $field.value)
             case .multiline, .json:
                 VStack(alignment: .trailing, spacing: 6) {
                     if isConcealed, !isRevealed {
@@ -4234,8 +4542,8 @@ private struct SimpleFieldEditor: View {
                         }
                         .buttonStyle(VaultButtonStyle(.secondary))
                         .controlSize(.small)
-                        .help("Generate a strong password")
-                        .accessibilityLabel("Generate password")
+                        .help("Generate a password, passphrase, hex or base64 secret")
+                        .accessibilityLabel("Generate a secret")
                         .accessibilityIdentifier("editor-generate-\(field.key)")
                     }
 

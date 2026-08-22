@@ -18,6 +18,9 @@ enum MainWindowPresenter {
     }
 
     static func present() {
+        // A Dock-less app owns no menu bar. Becoming regular before the window appears means it
+        // arrives with File, Edit and Vault where they belong.
+        ActivationPolicyController.prepareForWindow()
         NSApp.activate(ignoringOtherApps: true)
 
         if let window = existingMainWindow() {

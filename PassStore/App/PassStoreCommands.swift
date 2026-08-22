@@ -101,6 +101,13 @@ struct PassStoreCommands: Commands {
             .keyboardShortcut("o", modifiers: [.command, .shift])
             .disabled(isLocked)
 
+            Button {
+                viewModel.importDeveloperCredentials()
+            } label: {
+                Label("Import from Developer Tools…", systemImage: "square.and.arrow.down.on.square")
+            }
+            .disabled(isLocked)
+
             Divider()
 
             Button {
@@ -162,6 +169,14 @@ struct PassStoreCommands: Commands {
                 }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
                 .disabled(!canUseClipboardActions)
+
+                Button {
+                    viewModel.copyOneTimeCodeOfSelectedItem()
+                } label: {
+                    Label("Copy One-Time Code", systemImage: "clock.badge.checkmark")
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+                .disabled(!canUseClipboardActions || !viewModel.selectedItemHasOneTimeCode)
 
                 Button {
                     viewModel.copyEnv()
@@ -348,6 +363,20 @@ struct PassStoreCommands: Commands {
                 }
                 .disabled(isLocked)
 
+                Button {
+                    viewModel.scanFolderForLeakedSecrets()
+                } label: {
+                    Label("Scan a Folder for Secrets…", systemImage: "doc.text.magnifyingglass")
+                }
+                .disabled(isLocked)
+
+                Button {
+                    viewModel.showLastSecretScanReport()
+                } label: {
+                    Label("Last Scan Results…", systemImage: "list.bullet.rectangle")
+                }
+                .disabled(isLocked || !viewModel.hasSecretScanReport)
+
                 Divider()
 
                 Button {
@@ -366,6 +395,22 @@ struct PassStoreCommands: Commands {
                 }
                 .keyboardShortcut("r", modifiers: [.command])
                 .disabled(!canUpdateFromLinkedFile)
+
+                Divider()
+
+                Button {
+                    viewModel.restoreSelectedItemFromTrash()
+                } label: {
+                    Label("Put Back", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(viewModel.selectedItem?.isDeleted != true)
+
+                Button {
+                    viewModel.requestEmptyTrash()
+                } label: {
+                    Label("Empty Recently Deleted…", systemImage: "trash.slash")
+                }
+                .disabled(isLocked || viewModel.trashCount == 0)
             }
         }
     }

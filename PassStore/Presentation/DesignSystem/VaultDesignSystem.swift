@@ -457,6 +457,45 @@ struct VaultValueBox<Content: View>: View {
     }
 }
 
+/// The "Copied" confirmation that lands over a value after it is copied.
+///
+/// Shared rather than written twice: it appears on every copyable value in the app, and a one-time
+/// code that copied silently while every other field said so read as a click that had not worked.
+struct VaultCopiedBadge: View {
+    var body: some View {
+        HStack(spacing: VaultSpacing.xs) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.body.weight(.semibold))
+                .symbolRenderingMode(.hierarchical)
+            Text("Copied")
+                .font(.subheadline.weight(.semibold))
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, VaultSpacing.m)
+        .padding(.vertical, VaultSpacing.s - 1)
+        .background {
+            RoundedRectangle(cornerRadius: VaultRadius.value, style: .continuous)
+                .fill(.thickMaterial)
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// Overlays the copied confirmation, with the animation it has everywhere else.
+    func vaultCopiedFeedback(isCopied: Bool) -> some View {
+        overlay {
+            if isCopied {
+                VaultCopiedBadge()
+                    .allowsHitTesting(false)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: isCopied)
+    }
+}
+
 // MARK: - Text editor
 
 /// Multi-line text box with a placeholder.

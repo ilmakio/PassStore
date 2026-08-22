@@ -14,7 +14,10 @@ PassStore keeps your API keys, database credentials, S3 configs, SSH logins, .en
 
 - **Workspaces** to organize secrets by project
 - **Multiple secret types:** Generic, .env Group, Database, API Credential, MinIO/S3, Server/SSH, Website/Service, Saved Command, Custom Templates
-- **Dynamic fields** with configurable types (text, secret, URL, number, multiline, JSON)
+- **Dynamic fields** with configurable types (text, secret, URL, number, multiline, JSON, one-time code)
+- **Time-based one-time codes (TOTP)** from a setup key, an `otpauth://` link or a QR code, with copy limited to the digits
+- **Expiry dates** for the credentials that stop working on a date somebody else chose
+- **Recently Deleted**, so a deleted secret is recoverable for 30 days
 - **Encrypted vault** with AES-256-GCM and Argon2id key derivation
 - **macOS Keychain** integration for secure key storage
 - **Touch ID** biometric unlock, offered automatically on launch and on focus
@@ -28,8 +31,12 @@ PassStore keeps your API keys, database credentials, S3 configs, SSH logins, .en
 - **.env file import**
 - **Copy as** .env, JSON, or database connection string
 - **Search and filter** by title, tags, fields, environment
-- **Vault health** report for reused, weak and stale secrets
-- **Password generator**
+- **Vault health** report for reused, weak, expiring, expired and stale secrets, scored by entropy
+- **Generators** for passwords, passphrases, hex, base64, URL-safe base64 and UUIDs, with the bits of randomness stated
+- **Import from developer tools:** `~/.aws/credentials`, `.netrc`, Docker `config.json`, unencrypted Bitwarden exports
+- **Scan a folder** for stored secrets sitting in its files in plaintext
+- **Choose where the vault file lives**, so any folder you already sync gives you the same vault on another Mac — with a conflict prompt instead of a silent overwrite
+- **Remappable global shortcut**, open at login, and an optional menu-bar-only mode
 - **Custom templates** for reusable secret types
 - **Bulk edit** across a multi-selection
 

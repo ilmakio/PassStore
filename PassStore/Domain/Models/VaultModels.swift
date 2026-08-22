@@ -73,6 +73,16 @@ final class SecretItemEntity: Identifiable, Hashable {
     var createdAt: Date
     var updatedAt: Date
     var lastAccessedAt: Date?
+    /// When this credential stops working, if its owner knows.
+    ///
+    /// Optional and unset by default: most secrets have no expiry, and inventing one for them
+    /// would turn the health report into a wall of warnings about nothing.
+    var expiresAt: Date?
+    /// When this item was put in the trash, if it is there.
+    ///
+    /// Deleting used to be final, with one level of in-memory undo that died with the session.
+    /// Deleting the wrong secret is not a mistake anybody should have to pay for permanently.
+    var deletedAt: Date?
     weak var workspace: WorkspaceEntity?
     weak var template: SecretFieldTemplateEntity?
     var fields: [SecretFieldValueEntity]
@@ -99,6 +109,8 @@ final class SecretItemEntity: Identifiable, Hashable {
         createdAt: Date = .now,
         updatedAt: Date = .now,
         lastAccessedAt: Date? = nil,
+        expiresAt: Date? = nil,
+        deletedAt: Date? = nil,
         workspace: WorkspaceEntity? = nil,
         template: SecretFieldTemplateEntity? = nil,
         fields: [SecretFieldValueEntity] = [],
@@ -119,6 +131,8 @@ final class SecretItemEntity: Identifiable, Hashable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastAccessedAt = lastAccessedAt
+        self.expiresAt = expiresAt
+        self.deletedAt = deletedAt
         self.workspace = workspace
         self.template = template
         self.fields = fields
@@ -345,6 +359,8 @@ struct SecretItemDraft: Identifiable {
     var tags: [String]
     var isFavorite: Bool
     var isArchived: Bool = false
+    /// Unset means "no expiry", which is what almost every secret has.
+    var expiresAt: Date?
     var fieldDrafts: [FieldDraft]
     var templateID: UUID?
     /// Carried through the editor so saving does not drop an existing file link.
@@ -887,6 +903,47 @@ nonisolated struct VaultMetadata: Codable, Sendable {
     var wrappedVaultKey: WrappedVaultKey
     var biometricUnlockEnabled: Bool
     var updatedAt: Date
+    /// Incremented once per successful save.
+    ///
+    /// This is what makes a vault kept in a synced folder safe to open on two Macs. A wall-clock
+    /// comparison cannot do the job — the clocks disagree, and a sync client writes the file
+    /// whenever it feels like it — but a counter that only this app increments can say
+    /// definitively "someone else wrote since you read this".
+    var writeCounter: Int
+    /// Opaque per-install identifier of whoever wrote last.
+    ///
+    /// Random, and deliberately not the machine's name: `vault.meta` sits unencrypted next to the
+    /// ciphertext, and which Macs hold a copy of a vault is nobody's business. It exists only so
+    /// a vault that came back from a sync conflict can be told apart from one this install wrote.
+    var lastWriterID: String?
+
+    init(
+        version: Int,
+        wrappedVaultKey: WrappedVaultKey,
+        biometricUnlockEnabled: Bool,
+        updatedAt: Date,
+        writeCounter: Int = 0,
+        lastWriterID: String? = nil
+    ) {
+        self.version = version
+        self.wrappedVaultKey = wrappedVaultKey
+        self.biometricUnlockEnabled = biometricUnlockEnabled
+        self.updatedAt = updatedAt
+        self.writeCounter = writeCounter
+        self.lastWriterID = lastWriterID
+    }
+
+    /// Vaults written before 1.4 have no counter. Starting them at zero is right: the first save
+    /// this version performs moves them to one, and every later comparison is meaningful.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        wrappedVaultKey = try container.decode(WrappedVaultKey.self, forKey: .wrappedVaultKey)
+        biometricUnlockEnabled = try container.decode(Bool.self, forKey: .biometricUnlockEnabled)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        writeCounter = try container.decodeIfPresent(Int.self, forKey: .writeCounter) ?? 0
+        lastWriterID = try container.decodeIfPresent(String.self, forKey: .lastWriterID)
+    }
 }
 
 nonisolated struct VaultEnvelope: Codable, Sendable {
@@ -1024,6 +1081,10 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
     let createdAt: Date
     let updatedAt: Date
     let lastAccessedAt: Date?
+    /// Added in 1.4. Absent in vaults written earlier.
+    let expiresAt: Date?
+    /// Added in 1.4. Absent in vaults written earlier, which had no trash.
+    let deletedAt: Date?
     let workspaceID: UUID?
     let templateID: UUID?
     let fields: [FieldValueSnapshot]
@@ -1048,6 +1109,8 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
         createdAt: Date,
         updatedAt: Date,
         lastAccessedAt: Date?,
+        expiresAt: Date? = nil,
+        deletedAt: Date? = nil,
         workspaceID: UUID?,
         templateID: UUID?,
         fields: [FieldValueSnapshot],
@@ -1068,6 +1131,8 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastAccessedAt = lastAccessedAt
+        self.expiresAt = expiresAt
+        self.deletedAt = deletedAt
         self.workspaceID = workspaceID
         self.templateID = templateID
         self.fields = fields
@@ -1091,6 +1156,8 @@ nonisolated struct SecretItemSnapshot: Codable, Sendable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         lastAccessedAt = try container.decodeIfPresent(Date.self, forKey: .lastAccessedAt)
+        expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
         workspaceID = try container.decodeIfPresent(UUID.self, forKey: .workspaceID)
         templateID = try container.decodeIfPresent(UUID.self, forKey: .templateID)
         fields = try container.decode([FieldValueSnapshot].self, forKey: .fields)
@@ -1179,14 +1246,21 @@ struct VaultHealthFinding: Identifiable, Hashable {
     enum Kind: String, Hashable {
         case reused
         case weak
+        /// Past the date its owner gave it. A dead credential, not a weak one.
+        case expired
+        /// Inside `VaultHealthFinding.expiryWarningWindow` of that date.
+        case expiring
         case stale
 
-        /// Lower sorts first: reuse is the most actionable problem in a secret vault.
+        /// Lower sorts first. An expired credential outranks everything: it has already stopped
+        /// working, so it is the only finding that is a fact rather than a judgement.
         var severity: Int {
             switch self {
-            case .reused: 0
-            case .weak: 1
-            case .stale: 2
+            case .expired: 0
+            case .reused: 1
+            case .weak: 2
+            case .expiring: 3
+            case .stale: 4
             }
         }
 
@@ -1194,6 +1268,8 @@ struct VaultHealthFinding: Identifiable, Hashable {
             switch self {
             case .reused: "Reused"
             case .weak: "Weak"
+            case .expired: "Expired"
+            case .expiring: "Expiring"
             case .stale: "Stale"
             }
         }
@@ -1202,7 +1278,20 @@ struct VaultHealthFinding: Identifiable, Hashable {
             switch self {
             case .reused: "arrow.triangle.2.circlepath"
             case .weak: "exclamationmark.shield"
+            case .expired: "calendar.badge.exclamationmark"
+            case .expiring: "calendar.badge.clock"
             case .stale: "clock.badge.exclamationmark"
+            }
+        }
+
+        /// True for the kinds that are about a date rather than about a value.
+        ///
+        /// They are still dismissed by digest — of the date — so silencing an expiry warning lasts
+        /// exactly until that date is moved.
+        var isAboutADate: Bool {
+            switch self {
+            case .expired, .expiring, .stale: true
+            case .reused, .weak: false
             }
         }
     }
@@ -1258,6 +1347,15 @@ struct VaultHealthFinding: Identifiable, Hashable {
         guard let referenceDate else { return true }
         return ignored.ignoredAt >= referenceDate
     }
+}
+
+extension VaultHealthFinding {
+    /// How long before an expiry date PassStore starts saying so.
+    ///
+    /// Thirty days is the shortest window in which rotating a credential is a task you can
+    /// schedule rather than an emergency: it survives a holiday, and it is long enough to raise a
+    /// ticket against whoever owns the other end of the key.
+    static let expiryWarningWindow: TimeInterval = 30 * 24 * 3_600
 }
 
 struct VaultHealthReport {
@@ -1350,8 +1448,50 @@ extension SecretItemEntity {
         passwordLastChangedAt ?? updatedAt
     }
 
+    /// Where this item stands relative to the expiry its owner gave it.
+    ///
+    /// Computed rather than stored: it depends on the current date, and a stored answer would be
+    /// wrong by tomorrow.
+    var expiryState: SecretItemExpiryState {
+        guard let expiresAt else { return .none }
+        let now = Date()
+        if expiresAt <= now { return .expired(expiresAt) }
+        guard expiresAt.timeIntervalSince(now) <= VaultHealthFinding.expiryWarningWindow else {
+            return .current(expiresAt)
+        }
+        return .expiring(expiresAt)
+    }
+    /// True while this item is in the trash. It is hidden from every destination except
+    /// Recently Deleted, and from search, counts, the palette and the health report.
+    var isDeleted: Bool { deletedAt != nil }
+
     var orderedChangeHistory: [SecretItemChangeEntry] {
         changeHistory.sorted { $0.changedAt > $1.changedAt }
+    }
+}
+
+/// What to say about an item's expiry, if anything.
+nonisolated enum SecretItemExpiryState: Equatable, Sendable {
+    /// No expiry was given, which is the normal case.
+    case none
+    /// Set, and far enough away to be nobody's problem today.
+    case current(Date)
+    case expiring(Date)
+    case expired(Date)
+
+    var date: Date? {
+        switch self {
+        case .none: nil
+        case let .current(date), let .expiring(date), let .expired(date): date
+        }
+    }
+
+    /// True only for the two states worth putting on screen unprompted.
+    var needsAttention: Bool {
+        switch self {
+        case .expiring, .expired: true
+        case .none, .current: false
+        }
     }
 }
 
